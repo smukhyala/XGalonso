@@ -29,6 +29,8 @@ from xg_alonso.contracts.identifiers import GameweekId, PlayerCode, Season, Tent
 from xg_alonso.contracts.prediction import PlayerPrediction
 from xg_alonso.contracts.recommendation import TransferRecommendation
 from xg_alonso.contracts.squad import SquadPick, SquadState
+from xg_alonso.domain.rules import SquadRules
+from xg_alonso.optimization.lineup import best_starting_xi
 
 __all__ = [
     "BacktestResult",
@@ -207,18 +209,41 @@ def actual_points(
     }
 
 
-def score_squad(squad: SquadState, points: dict[PlayerCode, int]) -> int:
-    """Score a squad's starting XI, doubling the captain.
+def score_squad(
+    squad: SquadState,
+    points: dict[PlayerCode, int],
+    *,
+    predictions: dict[PlayerCode, PlayerPrediction] | None = None,
+    rules: SquadRules | None = None,
+) -> int:
+    """Score a squad against actual results.
 
-    Bench players and autosubs are ignored. That understates every squad
-    identically, so the comparison against hold stays fair — and modelling
-    autosubs would require a substitution simulator that adds noise without
-    changing which policy wins.
+    **The XI is chosen from predictions, then scored against outcomes** — that
+    temporal order is the whole point. Picking the eleven that happened to do
+    best would measure hindsight, so the selection sees only what was knowable
+    at the deadline and the scoring sees only what happened after.
+
+    When ``predictions`` and ``rules`` are supplied the best legal XI is chosen
+    and its captain doubled. Without them it falls back to the squad's stored
+    slots, which is what the earlier version did unconditionally — and which
+    scored a fixed eleven with whatever sat in slot 1 as captain.
+
+    Autosubs are not modelled: a benched player never replaces a starter who
+    fails to play. That understates every squad identically, so a comparison
+    between policies stays fair.
     """
+    if predictions is not None and rules is not None:
+        selection = best_starting_xi(squad.picks, predictions, rules)
+        starters = selection.starters
+        captain = selection.captain
+    else:
+        starters = squad.starters
+        captain = next((p.player_code for p in squad.picks if p.is_captain), None)
+
     total = 0
-    for pick in squad.starters:
+    for pick in starters:
         scored = points.get(pick.player_code, 0)
-        total += scored * (2 if pick.is_captain else 1)
+        total += scored * (2 if pick.player_code == captain else 1)
     return total
 
 
@@ -286,6 +311,7 @@ def walk_forward(
     prices: dict[PlayerCode, TenthsOfMillion],
     positions: dict[PlayerCode, str],
     teams: dict[PlayerCode, int],
+    rules: SquadRules | None = None,
 ) -> BacktestResult:
     """Walk a season, comparing an acting policy against never transferring.
 
@@ -304,7 +330,7 @@ def walk_forward(
         if not outcomes:
             continue
 
-        recommendation, _ = recommend_fn(acting, gameweek, season)
+        recommendation, predictions = recommend_fn(acting, gameweek, season)
 
         # Score with the squad as it stands *for* this gameweek — the transfer
         # is made before the deadline, so the incoming player plays this week.
@@ -321,8 +347,10 @@ def walk_forward(
             GameweekOutcome(
                 season=season,
                 gameweek=gameweek,
-                policy_points=score_squad(acting_after, outcomes),
-                hold_points=score_squad(holding, outcomes),
+                policy_points=score_squad(
+                    acting_after, outcomes, predictions=predictions, rules=rules
+                ),
+                hold_points=score_squad(holding, outcomes, predictions=predictions, rules=rules),
                 hit_cost=recommendation.package.hit_cost,
                 transfer_made=not recommendation.package.is_hold,
                 player_out=(

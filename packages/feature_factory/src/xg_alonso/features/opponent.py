@@ -74,6 +74,7 @@ def build_opponent_strength(player_stats: pl.DataFrame) -> pl.DataFrame:
                 "opponent_team_id": pl.Int64(),
                 "season": pl.Utf8(),
                 "gameweek_id": pl.Int64(),
+                "fixture_id": pl.Int64(),
                 "conceded_xg": pl.Float64(),
                 "conceded_goals": pl.Float64(),
                 "conceded_points": pl.Float64(),
@@ -87,9 +88,17 @@ def build_opponent_strength(player_stats: pl.DataFrame) -> pl.DataFrame:
             }
         )
 
+    # Group by fixture, not gameweek. A team plays twice in a double gameweek,
+    # and folding both matches into one row makes a rolling mean read as though
+    # the team conceded twice as much per match — the same failure the season
+    # grouping already caused, one level down.
+    keys = ["opponent_team_id", "season", "gameweek_id"]
+    if "fixture_id" in player_stats.columns:
+        keys.append("fixture_id")
+
     return (
         player_stats.filter(pl.col("opponent_team_id").is_not_null())
-        .group_by(["opponent_team_id", "season", "gameweek_id"])
+        .group_by(keys)
         .agg(
             pl.col("expected_goals").sum().alias("conceded_xg"),
             pl.col("goals_scored").sum().alias("conceded_goals"),
@@ -100,7 +109,7 @@ def build_opponent_strength(player_stats: pl.DataFrame) -> pl.DataFrame:
             pl.col("available_time").max().alias("available_time"),
             pl.col("kickoff_time").max().alias("kickoff_time"),
         )
-        .sort(["opponent_team_id", "season", "gameweek_id"])
+        .sort(keys)
     )
 
 

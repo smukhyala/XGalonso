@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -20,6 +21,7 @@ from xg_alonso.cli.pipeline import (
     PRICES_WERE_ASSUMED,
     SliceContext,
     build_context,
+    fetch_squad,
     load_squad_file,
     recommend,
     squad_from_payload,
@@ -39,6 +41,7 @@ from xg_alonso.pipelines.ingestion import (
     SOURCE_BOOTSTRAP,
     SOURCE_FIXTURES,
     FplApiClient,
+    OfflineError,
     git_manifest,
     ingest_bootstrap,
     ingest_element_summaries,
@@ -121,8 +124,19 @@ def ingest(
     run_id = f"ingest-{uuid.uuid4().hex[:12]}"
     bronze = _bronze(data_root)
 
+    # Load the pinned rules so drift can actually be detected. Without these
+    # `result.rule_changes` is always empty and the check below is dead code.
+    pinned_scoring, pinned_squad = _load_pinned_rules(data_root, parsed)
+
     with FplApiClient() as client:
-        result = ingest_bootstrap(client=client, bronze=bronze, season=parsed, run_id=run_id)
+        result = ingest_bootstrap(
+            client=client,
+            bronze=bronze,
+            season=parsed,
+            run_id=run_id,
+            pinned_scoring=pinned_scoring,
+            pinned_squad=pinned_squad,
+        )
 
     typer.echo(f"run {run_id}  commit {result.manifest.git_commit[:8]}")
     for ref in result.snapshots:
@@ -138,6 +152,58 @@ def ingest(
         typer.secho("\n  Preseason data hazards:", fg=typer.colors.YELLOW)
         for warning in result.preseason_warnings:
             typer.echo(f"    {warning.field_name}: {warning.detail}")
+
+    if pinned_scoring is None:
+        _pin_rules(data_root, parsed, result.snapshots[0])
+        typer.echo(f"\n  pinned the rules from this snapshot -> {_pinned_path(data_root, parsed)}")
+
+
+def _pinned_path(data_root: Path, season: Season) -> Path:
+    return data_root / "pinned" / f"rules_{season}.json"
+
+
+def _load_pinned_rules(data_root: Path, season: Season):  # type: ignore[no-untyped-def]
+    """Read the pinned rules for a season, or ``(None, None)`` on first run."""
+    from xg_alonso.pipelines.ingestion import load_rules_from_snapshot
+
+    path = _pinned_path(data_root, season)
+    if not path.exists():
+        return None, None
+
+    record = json.loads(path.read_text())
+    return load_rules_from_snapshot(
+        record["payload"],
+        season=season,
+        source_sha256=record["source_sha256"],
+        fetched_at=datetime.fromisoformat(record["fetched_at"]),
+    )
+
+
+def _pin_rules(data_root: Path, season: Season, ref: object) -> None:
+    """Store the rule-bearing part of a snapshot as the drift reference.
+
+    Only ``game_config`` and ``element_types`` are kept — the parts that define
+    scoring and squad constraints. Pinning the whole payload would make every
+    price change look like a rule change.
+    """
+    bronze = _bronze(data_root)
+    payload = json.loads(bronze.read(ref))  # type: ignore[arg-type]
+    path = _pinned_path(data_root, season)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "source_sha256": ref.content_sha256,  # type: ignore[attr-defined]
+                "fetched_at": ref.timestamps.available_time.isoformat(),  # type: ignore[attr-defined]
+                "payload": {
+                    "game_config": payload["game_config"],
+                    "element_types": payload["element_types"],
+                },
+            },
+            indent=1,
+            sort_keys=True,
+        )
+    )
 
 
 @app.command(name="build-features")
@@ -170,9 +236,20 @@ def build_features_command(
     reported: tuple[str, ...] = SLICE1_FEATURES
     if full:
         from xg_alonso.features.catalogue import build_catalogue, feature_names
+        from xg_alonso.features.opponent import (
+            OPPONENT_FEATURES,
+            build_opponent_features,
+            build_opponent_strength,
+        )
 
         features = build_catalogue(features, player_stats=context.player_stats)
-        reported = tuple(SLICE1_FEATURES) + tuple(feature_names())
+        # Opponent context was previously built only inside the backtest, so
+        # the artifact this command wrote could not be consumed by a trained
+        # model — it was missing thirteen columns the model expects.
+        features = build_opponent_features(
+            features, opponent_strength=build_opponent_strength(context.player_stats)
+        )
+        reported = tuple(SLICE1_FEATURES) + tuple(feature_names()) + OPPONENT_FEATURES
 
     out_dir = data_root / "gold"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -228,10 +305,17 @@ def squad(
             "Required before a gameweek deadline, when picks/ returns 404.",
         ),
     ] = None,
+    model_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--model",
+            help="Use trained component models instead of the closed-form baseline.",
+        ),
+    ] = None,
 ) -> None:
     """Show a squad with projected points per player."""
     context = _load_context(data_root, parse_season(season))
-    recommendation, predictions = _run(context, entry_id, squad_file)
+    recommendation, predictions = _run(context, entry_id, squad_file, model_path)
     names = context.player_names()
 
     state = _squad_state(context, entry_id, squad_file)
@@ -264,22 +348,57 @@ def squad(
 
 
 def _squad_state(context: SliceContext, entry_id: int, squad_file: Path | None):  # type: ignore[no-untyped-def]
+    """Load a squad, preferring the live API and falling back to a file.
+
+    ``entry/{id}/event/{gw}/picks/`` returns 404 before a gameweek's deadline —
+    the squad genuinely does not exist yet — so the file path is a necessary
+    fallback rather than a convenience, and it is what makes the whole flow
+    testable before a season starts.
+    """
+    import httpx
+
     gameweek = context.next_gameweek()
-    if squad_file is None:
-        raise typer.BadParameter(
-            "--squad-file is required for now. The public picks endpoint returns 404 "
-            "before a gameweek deadline, so there is no squad to fetch until the "
-            "season is under way."
+
+    if squad_file is not None:
+        payload = load_squad_file(squad_file)
+        return squad_from_payload(
+            payload, context=context, entry_id=EntryId(entry_id), gameweek=gameweek
         )
-    payload = load_squad_file(squad_file)
-    return squad_from_payload(
-        payload, context=context, entry_id=EntryId(entry_id), gameweek=gameweek
-    )
+
+    try:
+        with FplApiClient() as client:
+            return fetch_squad(
+                client=client,
+                context=context,
+                entry_id=EntryId(entry_id),
+                gameweek=gameweek,
+            )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise typer.BadParameter(
+                f"entry {entry_id} has no squad for GW{gameweek} yet — the picks "
+                "endpoint returns 404 until that gameweek's deadline passes. "
+                "Pass --squad-file to work from a local squad in the meantime."
+            ) from exc
+        raise
+    except OfflineError as exc:
+        raise typer.BadParameter(
+            f"cannot fetch entry {entry_id} while offline. Pass --squad-file."
+        ) from exc
 
 
-def _run(context: SliceContext, entry_id: int, squad_file: Path | None):  # type: ignore[no-untyped-def]
+def _run(  # type: ignore[no-untyped-def]
+    context: SliceContext, entry_id: int, squad_file: Path | None, model_path: Path | None = None
+):
     state = _squad_state(context, entry_id, squad_file)
     manifest = git_manifest("recommend", run_id=f"rec-{uuid.uuid4().hex[:12]}")
+
+    models = None
+    if model_path is not None:
+        from xg_alonso.prediction import load_models
+
+        models = load_models(model_path).models
+
     return recommend(
         context=context,
         squad=state,
@@ -287,6 +406,7 @@ def _run(context: SliceContext, entry_id: int, squad_file: Path | None):  # type
         run_id=manifest.run_id,
         code_version=manifest.git_commit,
         generated_at=utc_now(),
+        models=models,
     )
 
 
@@ -303,10 +423,17 @@ def recommend_command(
             "Required before a gameweek deadline, when picks/ returns 404.",
         ),
     ] = None,
+    model_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--model",
+            help="Use trained component models instead of the closed-form baseline.",
+        ),
+    ] = None,
 ) -> None:
     """Recommend the best legal single transfer, or advise holding."""
     context = _load_context(data_root, parse_season(season))
-    recommendation, _ = _run(context, entry_id, squad_file)
+    recommendation, _ = _run(context, entry_id, squad_file, model_path)
 
     prices = {
         PlayerCode(int(r["player_code"])): int(r["current_price"])
@@ -400,8 +527,22 @@ def _materialize_history(data_root: Path, context: SliceContext) -> None:
     out_dir = data_root / "silver"
     out_dir.mkdir(parents=True, exist_ok=True)
     destination = out_dir / "player_gameweek_stats.parquet"
+
+    # Merge rather than overwrite. `xg backfill` writes the same file, and an
+    # earlier version clobbered four seasons of archive history with whatever
+    # the API happened to return for the current one.
+    added = stats.height
+    if destination.exists():
+        existing = pl.read_parquet(destination)
+        stats = pl.concat([existing, stats], how="diagonal_relaxed").unique(
+            subset=["player_code", "season", "gameweek_id", "fixture_id"],
+            keep="last",
+            maintain_order=True,
+        )
+        typer.echo(f"  merged {added:,} rows into {existing.height:,} existing")
+
     stats.write_parquet(destination)
-    typer.echo(f"  {stats.height:,} history rows -> {destination}")
+    typer.echo(f"  {stats.height:,} total history rows -> {destination}")
 
 
 @app.command()
@@ -513,10 +654,13 @@ def backtest(
     from xg_alonso.contracts.prediction import Position
     from xg_alonso.evaluation import (
         POLICIES,
+        BacktestReport,
         actual_points,
+        compare_to_previous,
         gameweek_deadlines,
         run_policy,
         walk_forward,
+        write_report,
     )
     from xg_alonso.features.opponent import build_opponent_strength
     from xg_alonso.features.slice1 import build_slice1_features, build_team_gameweek_stats
@@ -766,6 +910,7 @@ def backtest(
             prices=prices,
             positions=positions,
             teams=teams,
+            rules=squad_rules,
         )
         typer.echo(" done")
 
@@ -810,6 +955,30 @@ def backtest(
         "  Note: a single season and one starting squad is a small sample.\n"
         "  Treat the ordering as a signal, not the margin."
     )
+
+    report = BacktestReport(
+        run_id=f"bt-{uuid.uuid4().hex[:12]}",
+        created_at=utc_now(),
+        season=str(parsed),
+        first_gameweek=start_gw,
+        last_gameweek=end_gw,
+        code_version=git_manifest("backtest", run_id="report").git_commit,
+        model_fingerprint=trained.models.fingerprint() if trained else None,
+        model_trained_on=trained.trained_seasons if trained else (),
+        results=results,
+    )
+    reports_root = data_root / "reports"
+    delta = compare_to_previous(report, reports_root)
+    destination = write_report(report, reports_root)
+
+    if delta:
+        typer.echo("\n  Change since the previous run on this window:")
+        for name, (was, now) in sorted(delta.items(), key=lambda kv: -kv[1][1]):
+            arrow = "+" if now > was else ("=" if now == was else "")
+            typer.echo(f"    {name:<16}{was:>+6d} -> {now:>+6d}   ({now - was:+d}) {arrow}")
+    else:
+        typer.echo("\n  No previous run on this window to compare against.")
+    typer.echo(f"  saved -> {destination}")
 
     worst = sorted((o for o in model.outcomes if o.transfer_made), key=lambda o: o.decision_delta)
     if worst:
@@ -895,8 +1064,12 @@ def _opening_squad(players: pl.DataFrame, squad_rules, season, gameweek):  # typ
                 current_price=price,
                 selling_price=price,
                 squad_slot=slot,
-                is_captain=slot == 1,
-                is_vice_captain=slot == 2,
+                # No captain is set here. The XI and captain are chosen from
+                # predictions at decision time; baking one in at squad
+                # construction is how every earlier run ended up captaining
+                # the goalkeeper.
+                is_captain=False,
+                is_vice_captain=False,
             )
         )
         total += int(price)

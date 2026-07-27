@@ -41,6 +41,7 @@ from xg_alonso.contracts.recommendation import (
 )
 from xg_alonso.contracts.squad import SquadPick, SquadState
 from xg_alonso.domain.rules import SquadRules
+from xg_alonso.optimization.lineup import starting_xi_points
 
 __all__ = [
     "HOLD_BASELINE",
@@ -96,20 +97,23 @@ class TransferCandidate:
 
 
 def hold_expected_points(
-    squad: SquadState, predictions: dict[PlayerCode, PlayerPrediction]
+    squad: SquadState,
+    predictions: dict[PlayerCode, PlayerPrediction],
+    rules: SquadRules,
 ) -> float:
     """Expected points from doing nothing — the baseline everything is measured against.
 
-    Only the starting XI counts. Bench players score nothing unless someone ahead
-    of them fails to play, and modelling autosubs is a slice-2 concern; ignoring
-    them understates every squad equally, so comparisons stay fair.
+    Scored as the **best legal XI with the captain doubled**, not as the squad's
+    stored slot order. Two earlier versions of this got it wrong in ways that
+    compounded:
+
+    - Summing the stored starters credited whatever eleven the payload happened
+      to name, so a transfer that improved a bench player looked like a full
+      gain even though it changed nothing that scores.
+    - No captain was ever chosen, so the largest single term in FPL scoring —
+      a doubled return — was absent from every measurement.
     """
-    total = 0.0
-    for pick in squad.starters:
-        prediction = predictions.get(pick.player_code)
-        if prediction is not None:
-            total += prediction.expected_points
-    return total
+    return starting_xi_points(squad.picks, predictions, rules)
 
 
 def _club_counts(picks: Sequence[SquadPick]) -> dict[TeamId, int]:
@@ -137,6 +141,9 @@ def rank_single_transfers(
     counts = _club_counts(squad.picks)
     hit_cost = 0 if squad.free_transfers >= 1 else rules.hit_cost_per_transfer
 
+    # The bar every candidate must clear: what this squad scores untouched.
+    hold_points = starting_xi_points(squad.picks, predictions, rules)
+
     evaluated: list[TransferCandidate] = []
 
     for pick in squad.picks:
@@ -161,7 +168,25 @@ def rank_single_transfers(
             if club_after >= rules.max_per_club:
                 continue
 
-            gross = candidate.prediction.expected_points - out_prediction.expected_points
+            # Score the squad this move would actually produce, then re-pick
+            # the XI. A straight difference between the two players is wrong
+            # whenever either sits on the bench: replacing a benched player with
+            # a slightly better benched player gains nothing at all.
+            after = [p for p in squad.picks if p.player_code != pick.player_code]
+            after.append(
+                pick.model_copy(
+                    update={
+                        "player_code": candidate.player_code,
+                        "position": candidate.position,
+                        "team_id": candidate.team_id,
+                        "purchase_price": candidate.price,
+                        "current_price": candidate.price,
+                        "selling_price": candidate.price,
+                    }
+                )
+            )
+            gross = starting_xi_points(after, predictions, rules) - hold_points
+
             # Combine the two uncertainties; a swap inherits both.
             risk = _RISK_WEIGHT * (
                 candidate.prediction.expected_points_sd + out_prediction.expected_points_sd
@@ -260,7 +285,7 @@ def best_single_transfer(
     move is to keep the transfer, and a tool that always finds something to do
     is a tool that costs its user points.
     """
-    baseline = hold_expected_points(squad, predictions)
+    baseline = hold_expected_points(squad, predictions, rules)
     ranked = rank_single_transfers(
         squad, candidates=candidates, predictions=predictions, rules=rules
     )

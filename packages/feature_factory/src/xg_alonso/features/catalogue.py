@@ -98,6 +98,12 @@ _COUNT_METRICS: Final[tuple[str, ...]] = (
     "bonus",
     "bps",
     "total_points",
+    # Market state. Ownership and transfer flow describe what the market
+    # believed, which is information no per-90 rate contains.
+    "selected",
+    "transfers_in",
+    "transfers_out",
+    "transfers_balance",
 )
 
 #: Rate metrics: quantities worth expressing per 90 minutes, with shrinkage so
@@ -113,11 +119,18 @@ _RATE_METRICS: Final[tuple[str, ...]] = (
     "bps",
     "total_points",
     "saves",
+    # FPL's own Opta-derived composites. `threat` proxies shot volume and
+    # `creativity` chance creation — the two event-data families the brief
+    # wanted that D6 otherwise puts out of reach, published officially.
+    "threat",
+    "creativity",
+    "influence",
+    "ict_index",
 )
 
 #: Metrics whose variance is interpretable. A volatile points return is a real
 #: signal about a player's risk profile; volatile own goals is noise.
-_VOLATILITY_METRICS: Final[tuple[str, ...]] = ("total_points", "minutes", "bps")
+_VOLATILITY_METRICS: Final[tuple[str, ...]] = ("total_points", "minutes", "bps", "threat")
 
 #: Windows long enough for a rolling standard deviation to mean anything.
 _VOLATILITY_WINDOWS: Final[tuple[int, ...]] = (5, 10, 20)
@@ -146,7 +159,7 @@ def catalogue_specs() -> list[FeatureSpec]:
             )
             # Sums duplicate means at a fixed window, so only generate them
             # where the total itself is the quantity of interest.
-            if metric in {"minutes", "total_points", "bonus"} and window >= 3:
+            if metric in {"minutes", "total_points", "bonus", "transfers_balance"} and window >= 3:
                 specs.append(
                     FeatureSpec(
                         name=f"{metric}_sum_{window}",

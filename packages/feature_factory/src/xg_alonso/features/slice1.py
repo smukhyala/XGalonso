@@ -69,6 +69,7 @@ def build_team_gameweek_stats(player_stats: pl.DataFrame, players: pl.DataFrame)
         "team_id": pl.Int64(),
         "season": pl.Utf8(),
         "gameweek_id": pl.Int64(),
+        "fixture_id": pl.Int64(),
         "team_xg": pl.Float64(),
         "team_xgc": pl.Float64(),
         "available_time": player_stats.schema.get(
@@ -84,8 +85,14 @@ def build_team_gameweek_stats(player_stats: pl.DataFrame, players: pl.DataFrame)
     if with_team.is_empty():
         return pl.DataFrame(schema=empty_schema)
 
+    # Per fixture, not per gameweek — a double gameweek is two matches, and
+    # summing them into one row doubles the apparent per-match output.
+    keys = ["team_id", "season", "gameweek_id"]
+    if "fixture_id" in with_team.columns:
+        keys.append("fixture_id")
+
     return (
-        with_team.group_by(["team_id", "season", "gameweek_id"])
+        with_team.group_by(keys)
         .agg(
             pl.col("expected_goals").sum().alias("team_xg"),
             # Conceded is a team property already present on every player row,
@@ -93,7 +100,7 @@ def build_team_gameweek_stats(player_stats: pl.DataFrame, players: pl.DataFrame)
             pl.col("expected_goals_conceded").max().alias("team_xgc"),
             pl.col("available_time").max().alias("available_time"),
         )
-        .sort(["team_id", "season", "gameweek_id"])
+        .sort(keys)
     )
 
 

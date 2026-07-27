@@ -110,6 +110,24 @@ PLAYER_GAMEWEEK_STATS_SCHEMA: Final[dict[str, pl.DataType]] = {
     # zero — zero would assert the player made none, which is a different claim.
     "defensive_contribution": pl.Int64(),
     "value": pl.Int64(),  # price at the time, in tenths of a million
+    # --- market state -----------------------------------------------------
+    # Ownership and transfer flow. These are the only fields here that cannot
+    # be reconstructed after the fact: they describe what the market believed
+    # at a moment in time, and the API publishes only the current value. A day
+    # not captured is a day that does not exist, which is why they are carried
+    # even though the price model itself is deferred (D11).
+    "selected": pl.Int64(),  # managers owning this player
+    "transfers_in": pl.Int64(),
+    "transfers_out": pl.Int64(),
+    "transfers_balance": pl.Int64(),
+    # --- FPL's own composite indices --------------------------------------
+    # Opta-derived proxies the official API publishes. `threat` stands in for
+    # shot volume and `creativity` for chance creation — the two families the
+    # brief wanted from event data that D6 otherwise puts out of reach.
+    "influence": pl.Float64(),
+    "creativity": pl.Float64(),
+    "threat": pl.Float64(),
+    "ict_index": pl.Float64(),
     "kickoff_time": _UTC,
     "available_time": _UTC,
 }

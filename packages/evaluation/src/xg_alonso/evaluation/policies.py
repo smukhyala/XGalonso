@@ -149,7 +149,7 @@ def run_policy(
     policy sees the options. Every policy therefore chooses from an identical
     legal set — the comparison isolates selection and nothing else.
     """
-    baseline = hold_expected_points(squad, predictions)
+    baseline = hold_expected_points(squad, predictions, rules)
     legal = rank_single_transfers(
         squad, candidates=candidates, predictions=predictions, rules=rules
     )

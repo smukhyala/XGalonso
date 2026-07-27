@@ -46,6 +46,14 @@ _SOURCE_COLUMNS = (
     "expected_assists",
     "expected_goal_involvements",
     "expected_goals_conceded",
+    "selected",
+    "transfers_in",
+    "transfers_out",
+    "transfers_balance",
+    "influence",
+    "creativity",
+    "threat",
+    "ict_index",
 )
 
 

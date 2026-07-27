@@ -26,23 +26,28 @@ from xg_alonso.contracts.identifiers import (
     EntryId,
     GameweekId,
     PlayerCode,
+    PlayerElementId,
     Season,
     TeamId,
     TenthsOfMillion,
 )
 from xg_alonso.contracts.prediction import PlayerPrediction, Position
 from xg_alonso.contracts.recommendation import TransferRecommendation
-from xg_alonso.contracts.squad import SquadPick, SquadState
+from xg_alonso.contracts.squad import ChipState, ChipStatus, SquadPick, SquadState
 from xg_alonso.domain.constraints import check_squad, check_starting_xi
 from xg_alonso.domain.pricing import selling_price
+from xg_alonso.domain.purchase_prices import parse_transfer_log, reconstruct_purchase_prices
 from xg_alonso.domain.rules import SquadRules
 from xg_alonso.domain.scoring import ScoringRules
+from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
+from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
 from xg_alonso.features.slice1 import (
     SLICE1_FEATURE_SET_VERSION,
     build_slice1_features,
     build_team_gameweek_stats,
 )
 from xg_alonso.optimization.transfer import Candidate, best_single_transfer
+from xg_alonso.pipelines.ingestion.fpl_client import FplApiClient
 from xg_alonso.pipelines.normalization import (
     normalize_fixtures,
     normalize_gameweeks,
@@ -50,6 +55,8 @@ from xg_alonso.pipelines.normalization import (
     normalize_teams,
 )
 from xg_alonso.prediction.baseline import predict_frame
+from xg_alonso.prediction.inference import predict_with_models
+from xg_alonso.prediction.trained import ComponentModels
 
 #: Records, per entry, whether purchase prices had to be assumed. Read by the
 #: CLI so an approximate budget is never presented as an exact one. Decision
@@ -62,6 +69,7 @@ __all__ = [
     "SliceContext",
     "build_context",
     "build_entities",
+    "fetch_squad",
     "load_squad_file",
     "recommend",
 ]
@@ -155,10 +163,46 @@ def build_context(
 
 
 def build_entities(context: SliceContext, *, cutoff: datetime) -> pl.DataFrame:
-    """One prediction row per player, all sharing the gameweek deadline as cutoff."""
-    return context.players.select(
+    """One prediction row per player, all sharing the gameweek deadline as cutoff.
+
+    Carries the upcoming fixture when it is known. Fixtures are published well
+    in advance, so ``opponent_team_id`` and ``was_home`` are inputs available at
+    the deadline — only the result of the match is withheld.
+    """
+    entities = context.players.select(
         "player_code", "position", "team_id", "current_price", "web_name", "status"
     ).with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
+
+    fixtures = context.fixtures
+    if fixtures.is_empty():
+        return entities.with_columns(
+            pl.lit(None, dtype=pl.Int64).alias("opponent_team_id"),
+            pl.lit(None, dtype=pl.Boolean).alias("was_home"),
+        )
+
+    upcoming = fixtures.filter(~pl.col("finished").fill_null(False))
+    home = upcoming.select(
+        pl.col("home_team_id").alias("team_id"),
+        pl.col("away_team_id").alias("opponent_team_id"),
+        pl.lit(True).alias("was_home"),
+        pl.col("kickoff_time"),
+    )
+    away = upcoming.select(
+        pl.col("away_team_id").alias("team_id"),
+        pl.col("home_team_id").alias("opponent_team_id"),
+        pl.lit(False).alias("was_home"),
+        pl.col("kickoff_time"),
+    )
+    # Sort AFTER concatenating. Sorting each side separately and then taking the
+    # first row per team always matches the home row, because every home row
+    # precedes every away row — which made `is_home` identically true.
+    next_fixture = (
+        pl.concat([home, away])
+        .sort(["kickoff_time", "team_id"], nulls_last=True)
+        .unique(subset=["team_id"], keep="first", maintain_order=True)
+        .drop("kickoff_time")
+    )
+    return entities.join(next_fixture, on="team_id", how="left")
 
 
 def load_squad_file(path: Path) -> dict[str, Any]:
@@ -262,28 +306,57 @@ def recommend(
     code_version: str,
     generated_at: datetime,
     horizon_gameweeks: int = 1,
+    models: ComponentModels | None = None,
 ) -> tuple[TransferRecommendation, dict[PlayerCode, PlayerPrediction]]:
-    """Run the full slice: features, predictions, and the best legal transfer."""
+    """Run the full slice: features, predictions, and the best legal transfer.
+
+    Args:
+        models: Trained component models. When supplied, predictions come from
+            the full catalogue and the fitted models; otherwise from the
+            closed-form baseline over the eight legacy features, where clean
+            sheets, goals conceded and saves are league-average constants.
+    """
     gameweek = squad.gameweek
     cutoff = context.deadline_for(gameweek)
 
     entities = build_entities(context, cutoff=cutoff)
-    team_stats = build_team_gameweek_stats(context.player_stats, context.players)
-    features = build_slice1_features(
-        entities, player_stats=context.player_stats, team_stats=team_stats
-    )
 
-    predictions = predict_frame(
-        features,
-        rules=context.scoring,
-        from_gameweek=gameweek,
-        data_cutoff=cutoff,
-        predicted_at=generated_at,
-        run_id=run_id,
-        code_version=code_version,
-        feature_set_version=SLICE1_FEATURE_SET_VERSION,
-        horizon_gameweeks=horizon_gameweeks,
-    )
+    if models is not None:
+        # The trained path needs the full catalogue plus opponent context, and
+        # the fixture — who each player faces — which is published before the
+        # deadline and is therefore an input rather than a leak.
+        features = build_catalogue(entities, player_stats=context.player_stats)
+        features = build_opponent_features(
+            features, opponent_strength=build_opponent_strength(context.player_stats)
+        )
+        predictions = predict_with_models(
+            features,
+            models=models,
+            rules=context.scoring,
+            from_gameweek=gameweek,
+            data_cutoff=cutoff,
+            predicted_at=generated_at,
+            run_id=run_id,
+            code_version=code_version,
+            feature_set_version=CATALOGUE_VERSION,
+            horizon_gameweeks=horizon_gameweeks,
+        )
+    else:
+        team_stats = build_team_gameweek_stats(context.player_stats, context.players)
+        features = build_slice1_features(
+            entities, player_stats=context.player_stats, team_stats=team_stats
+        )
+        predictions = predict_frame(
+            features,
+            rules=context.scoring,
+            from_gameweek=gameweek,
+            data_cutoff=cutoff,
+            predicted_at=generated_at,
+            run_id=run_id,
+            code_version=code_version,
+            feature_set_version=SLICE1_FEATURE_SET_VERSION,
+            horizon_gameweeks=horizon_gameweeks,
+        )
     by_code = {p.player_code: p for p in predictions}
 
     # Unavailable players are excluded from the buy list rather than penalised.
@@ -328,3 +401,81 @@ def recommend(
         horizon_gameweeks=horizon_gameweeks,
     )
     return recommendation, by_code
+
+
+def fetch_squad(
+    *,
+    client: FplApiClient,
+    context: SliceContext,
+    entry_id: EntryId,
+    gameweek: GameweekId,
+) -> SquadState:
+    """Load a manager's squad from the public API.
+
+    This is the product's front door. It reads three public endpoints and needs
+    no authentication (D3):
+
+    - ``entry/{id}/event/{gw}/picks/`` — the fifteen players and their roles
+    - ``entry/{id}/transfers/`` — replayed to recover what was paid for each
+    - ``entry/{id}/history/`` — bank and chips played
+
+    Purchase prices come from the transfer log rather than being assumed equal
+    to the current price, which is the difference between a correct budget and
+    one that silently understates every rise.
+
+    Raises:
+        httpx.HTTPStatusError: notably 404 from ``picks`` before a gameweek's
+            deadline, when the squad genuinely does not exist yet. Callers fall
+            back to ``--squad-file``.
+    """
+    picks_payload = json.loads(client.entry_picks(int(entry_id), int(gameweek)).payload)
+    transfers_payload = json.loads(client.entry_transfers(int(entry_id)).payload)
+    history_payload = json.loads(client.entry_history(int(entry_id)).payload)
+
+    element_ids = [PlayerElementId(int(p["element"])) for p in picks_payload.get("picks", [])]
+    opening = {
+        PlayerElementId(int(r["element_id"])): TenthsOfMillion(int(r["current_price"]))
+        for r in context.players.iter_rows(named=True)
+    }
+    reconstruction = reconstruct_purchase_prices(
+        current_squad=element_ids,
+        transfers=parse_transfer_log(transfers_payload),
+        opening_prices=opening,
+    )
+
+    # entry_history carries per-gameweek state; the row for this gameweek holds
+    # the bank as it stood at the deadline.
+    bank = 0
+    for row in history_payload.get("current", []):
+        if int(row.get("event", -1)) == int(gameweek):
+            bank = int(row.get("bank", 0))
+            break
+
+    played = {str(c.get("name")) for c in history_payload.get("chips", [])}
+    chips = ChipState(
+        wildcard=ChipStatus.PLAYED if "wildcard" in played else ChipStatus.AVAILABLE,
+        free_hit=ChipStatus.PLAYED if "freehit" in played else ChipStatus.AVAILABLE,
+        bench_boost=ChipStatus.PLAYED if "bboost" in played else ChipStatus.AVAILABLE,
+        triple_captain=ChipStatus.PLAYED if "3xc" in played else ChipStatus.AVAILABLE,
+    )
+
+    enriched = dict(picks_payload)
+    enriched["bank"] = bank
+    enriched["picks"] = [
+        {
+            **pick,
+            "purchase_price": int(
+                reconstruction.purchase_prices.get(
+                    PlayerElementId(int(pick["element"])),
+                    opening.get(PlayerElementId(int(pick["element"])), TenthsOfMillion(0)),
+                )
+            ),
+        }
+        for pick in picks_payload.get("picks", [])
+    ]
+
+    state = squad_from_payload(enriched, context=context, entry_id=entry_id, gameweek=gameweek)
+    # Prices came from evidence, not assumption — record that so the CLI does
+    # not warn about a budget it can actually stand behind.
+    PRICES_WERE_ASSUMED[int(entry_id)] = not reconstruction.complete
+    return state.model_copy(update={"chips": chips})

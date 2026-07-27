@@ -27,21 +27,31 @@ from xg_alonso.evaluation.policies import (
     random_policy,
     run_policy,
 )
+from xg_alonso.evaluation.report import (
+    BacktestReport,
+    compare_to_previous,
+    load_reports,
+    write_report,
+)
 
 __all__ = [
     "POLICIES",
+    "BacktestReport",
     "BacktestResult",
     "GameweekOutcome",
     "PolicyName",
     "actual_points",
     "apply_transfer",
+    "compare_to_previous",
     "gameweek_deadlines",
     "highest_form_policy",
     "hold_policy",
+    "load_reports",
     "model_policy",
     "most_expensive_policy",
     "random_policy",
     "run_policy",
     "score_squad",
     "walk_forward",
+    "write_report",
 ]

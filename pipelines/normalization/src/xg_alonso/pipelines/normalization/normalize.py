@@ -232,6 +232,14 @@ def normalize_element_summary(
                 "expected_goals_conceded": h.get("expected_goals_conceded"),
                 "defensive_contribution": h.get("defensive_contribution"),
                 "value": h.get("value"),
+                "selected": h.get("selected"),
+                "transfers_in": h.get("transfers_in"),
+                "transfers_out": h.get("transfers_out"),
+                "transfers_balance": h.get("transfers_balance"),
+                "influence": h.get("influence"),
+                "creativity": h.get("creativity"),
+                "threat": h.get("threat"),
+                "ict_index": h.get("ict_index"),
                 "kickoff_time": h.get("kickoff_time"),
             }
             for h in history

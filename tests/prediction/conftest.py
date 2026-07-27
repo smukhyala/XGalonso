@@ -32,6 +32,14 @@ SOURCE_COLUMNS = (
     "expected_assists",
     "expected_goal_involvements",
     "expected_goals_conceded",
+    "selected",
+    "transfers_in",
+    "transfers_out",
+    "transfers_balance",
+    "influence",
+    "creativity",
+    "threat",
+    "ict_index",
 )
 
 
@@ -70,6 +78,14 @@ def synthetic_stats(
                     "expected_assists": quality * 0.5,
                     "expected_goal_involvements": quality * 1.4,
                     "expected_goals_conceded": 1.8 - quality,
+                    "selected": 100000 * quality + week,
+                    "transfers_in": 5000 * quality + week * 3,
+                    "transfers_out": 3000 * (1 - quality) + week * 2,
+                    "transfers_balance": 2000 * quality - week,
+                    "influence": quality * 40 + week * 0.3,
+                    "creativity": quality * 30 + week * 0.2,
+                    "threat": quality * 50 + week * 0.4,
+                    "ict_index": quality * 12 + week * 0.1,
                 }
             )
     frame = pl.DataFrame(rows, infer_schema_length=None)
