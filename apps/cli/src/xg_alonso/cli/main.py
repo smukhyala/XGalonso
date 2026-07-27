@@ -144,6 +144,10 @@ def ingest(
 def build_features_command(
     data_root: DataRoot = DEFAULT_DATA_ROOT,
     season: SeasonOpt = DEFAULT_SEASON,
+    full: Annotated[
+        bool,
+        typer.Option("--full", help="Build the whole declared catalogue, not just the slice set."),
+    ] = False,
 ) -> None:
     """Build the point-in-time feature set for the next gameweek."""
     from xg_alonso.cli.pipeline import build_entities
@@ -163,14 +167,49 @@ def build_features_command(
         entities, player_stats=context.player_stats, team_stats=team_stats
     )
 
+    reported: tuple[str, ...] = SLICE1_FEATURES
+    if full:
+        from xg_alonso.features.catalogue import build_catalogue, feature_names
+
+        features = build_catalogue(features, player_stats=context.player_stats)
+        reported = tuple(SLICE1_FEATURES) + tuple(feature_names())
+
     out_dir = data_root / "gold"
     out_dir.mkdir(parents=True, exist_ok=True)
     destination = out_dir / f"features_gw{gameweek}.parquet"
     features.write_parquet(destination)
 
     typer.echo(f"GW{gameweek}  cutoff {cutoff.isoformat()}")
-    typer.echo(f"  {features.height:,} rows x {len(SLICE1_FEATURES)} features -> {destination}")
-    for name in SLICE1_FEATURES:
+    typer.echo(f"  {features.height:,} rows x {len(reported)} features -> {destination}")
+
+    if full:
+        # Too many to list; report the distribution and anything unusable.
+        coverages = [
+            1.0 - (features[n].null_count() / max(features.height, 1))
+            for n in reported
+            if n in features.columns
+        ]
+        thin = [
+            n
+            for n in reported
+            if n in features.columns
+            and 1.0 - (features[n].null_count() / max(features.height, 1)) < 0.5
+        ]
+        constant = [
+            n
+            for n in reported
+            if n in features.columns
+            and features[n].drop_nulls().len() > 1
+            and features[n].drop_nulls().n_unique() == 1
+        ]
+        typer.echo(f"    mean coverage {sum(coverages) / max(len(coverages), 1):6.1%}")
+        typer.echo(f"    below 50% coverage: {len(thin)}")
+        typer.echo(f"    constant (no signal): {len(constant)}")
+        if constant:
+            typer.secho(f"    {constant[:6]}", fg=typer.colors.YELLOW)
+        return
+
+    for name in reported:
         if name in features.columns:
             coverage = 1.0 - (features[name].null_count() / max(features.height, 1))
             typer.echo(f"    {name:<24} coverage {coverage:6.1%}")

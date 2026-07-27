@@ -10,6 +10,13 @@ rebuilds features with future records appended and fails if any value moved,
 and its negative control proves the harness itself still has teeth.
 """
 
+from xg_alonso.features.catalogue import (
+    CATALOGUE_VERSION,
+    FeatureSpec,
+    build_catalogue,
+    catalogue_specs,
+    feature_names,
+)
 from xg_alonso.features.generators import rolling_as_of, shrunk_rate_as_of
 from xg_alonso.features.leakage import (
     LeakageDetected,
@@ -31,14 +38,19 @@ from xg_alonso.features.slice1 import (
 )
 
 __all__ = [
+    "CATALOGUE_VERSION",
     "SLICE1_FEATURES",
     "SLICE1_FEATURE_SET_VERSION",
+    "FeatureSpec",
     "LeakageDetected",
     "as_of_join",
     "assert_detects_leakage",
     "assert_no_leakage",
+    "build_catalogue",
     "build_slice1_features",
     "build_team_gameweek_stats",
+    "catalogue_specs",
+    "feature_names",
     "filter_available",
     "find_leakage",
     "make_future_records",
