@@ -12,6 +12,15 @@ reads bronze snapshots, so a feature build is reproducible offline and a test
 that reaches for the network fails loudly instead of flaking.
 """
 
+from xg_alonso.pipelines.ingestion.archive import (
+    ARCHIVE_BASE_URL,
+    BACKFILL_SEASONS,
+    SOURCE_ARCHIVE_GW,
+    SOURCE_ARCHIVE_PLAYERS,
+    ArchiveFile,
+    fetch_archive_season,
+    seasons_with_defensive_contributions,
+)
 from xg_alonso.pipelines.ingestion.bootstrap import (
     SOURCE_BOOTSTRAP,
     SOURCE_FIXTURES,
@@ -39,10 +48,15 @@ from xg_alonso.pipelines.ingestion.history import (
 )
 
 __all__ = [
+    "ARCHIVE_BASE_URL",
+    "BACKFILL_SEASONS",
     "FPL_BASE_URL",
+    "SOURCE_ARCHIVE_GW",
+    "SOURCE_ARCHIVE_PLAYERS",
     "SOURCE_BOOTSTRAP",
     "SOURCE_ELEMENT_SUMMARY",
     "SOURCE_FIXTURES",
+    "ArchiveFile",
     "FplApiClient",
     "FplResponse",
     "IngestResult",
@@ -50,6 +64,7 @@ __all__ = [
     "PreseasonWarning",
     "derive_available_time",
     "detect_preseason_hazards",
+    "fetch_archive_season",
     "git_manifest",
     "ingest_bootstrap",
     "ingest_element_summaries",
@@ -58,4 +73,5 @@ __all__ = [
     "read_element_summaries",
     "read_snapshot_payload",
     "season_end_time",
+    "seasons_with_defensive_contributions",
 ]

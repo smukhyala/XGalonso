@@ -1,0 +1,111 @@
+{
+ "picks": [
+  {
+   "element": 58,
+   "position": 1,
+   "purchase_price": 40,
+   "is_captain": true,
+   "is_vice_captain": false
+  },
+  {
+   "element": 38,
+   "position": 2,
+   "purchase_price": 40,
+   "is_captain": false,
+   "is_vice_captain": true
+  },
+  {
+   "element": 39,
+   "position": 3,
+   "purchase_price": 40,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 66,
+   "position": 4,
+   "purchase_price": 40,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 173,
+   "position": 5,
+   "purchase_price": 40,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 50,
+   "position": 6,
+   "purchase_price": 45,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 132,
+   "position": 7,
+   "purchase_price": 45,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 134,
+   "position": 8,
+   "purchase_price": 45,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 163,
+   "position": 9,
+   "purchase_price": 45,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 107,
+   "position": 10,
+   "purchase_price": 45,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 169,
+   "position": 11,
+   "purchase_price": 45,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 59,
+   "position": 12,
+   "purchase_price": 40,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 174,
+   "position": 13,
+   "purchase_price": 40,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 189,
+   "position": 14,
+   "purchase_price": 45,
+   "is_captain": false,
+   "is_vice_captain": false
+  },
+  {
+   "element": 272,
+   "position": 15,
+   "purchase_price": 45,
+   "is_captain": false,
+   "is_vice_captain": false
+  }
+ ],
+ "bank": 360,
+ "free_transfers": 1
+}

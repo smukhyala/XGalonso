@@ -22,19 +22,29 @@ from xg_alonso.domain.constraints import (
     is_legal_squad,
 )
 from xg_alonso.domain.pricing import selling_price, squad_value
+from xg_alonso.domain.purchase_prices import (
+    PurchasePriceResult,
+    TransferRecord,
+    parse_transfer_log,
+    reconstruct_purchase_prices,
+)
 from xg_alonso.domain.rules import PositionRule, SquadRules
 from xg_alonso.domain.scoring import ScoringRules, ScoringThresholds, assemble_points
 
 __all__ = [
     "PositionRule",
+    "PurchasePriceResult",
     "ScoringRules",
     "ScoringThresholds",
     "SquadRules",
     "SquadViolation",
+    "TransferRecord",
     "assemble_points",
     "check_squad",
     "check_starting_xi",
     "is_legal_squad",
+    "parse_transfer_log",
+    "reconstruct_purchase_prices",
     "selling_price",
     "squad_value",
 ]
