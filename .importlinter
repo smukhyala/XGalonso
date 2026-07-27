@@ -12,6 +12,7 @@ include_external_packages = True
 name = Package dependency direction
 type = layers
 layers =
+    xg_alonso.api
     xg_alonso.cli : xg_alonso.pipelines
     xg_alonso.evaluation
     xg_alonso.optimization : xg_alonso.explanations
@@ -37,6 +38,7 @@ source_modules =
     xg_alonso.explanations
     xg_alonso.evaluation
     xg_alonso.cli
+    xg_alonso.api
     xg_alonso.pipelines
 forbidden_modules =
     duckdb

@@ -16,6 +16,7 @@ from xg_alonso.optimization.lineup import (
     legal_formations,
     starting_xi_points,
 )
+from xg_alonso.optimization.squad_builder import SquadCandidate, build_squad
 from xg_alonso.optimization.transfer import (
     HOLD_BASELINE,
     Candidate,
@@ -29,10 +30,12 @@ __all__ = [
     "CAPTAIN_MULTIPLIER",
     "HOLD_BASELINE",
     "Candidate",
+    "SquadCandidate",
     "TransferCandidate",
     "XiSelection",
     "best_single_transfer",
     "best_starting_xi",
+    "build_squad",
     "hold_expected_points",
     "legal_formations",
     "rank_single_transfers",

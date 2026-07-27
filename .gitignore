@@ -59,3 +59,8 @@ coverage.xml
 .idea/
 .vscode/
 *.swp
+
+# Web front end (apps/web)
+node_modules/
+.next/
+next-env.d.ts

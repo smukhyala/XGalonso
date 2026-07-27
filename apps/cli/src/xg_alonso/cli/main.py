@@ -31,6 +31,7 @@ from xg_alonso.contracts.identifiers import (
     GameweekId,
     PlayerCode,
     Season,
+    TeamId,
     TenthsOfMillion,
     parse_season,
 )
@@ -1165,3 +1166,358 @@ def train(
             bold=True,
         )
     typer.echo(f"\n  saved -> {destination}")
+
+
+@app.command(name="build-squad")
+def build_squad_command(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    model_path: Annotated[
+        Path | None,
+        typer.Option("--model", help="Use trained component models."),
+    ] = None,
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Write the squad as a picks JSON file.")
+    ] = None,
+) -> None:
+    """Build a squad from scratch — the gameweek-1 answer.
+
+    At GW1 nobody has a squad, so there is nothing to transfer from. This picks
+    a legal fifteen maximising the expected points of the eleven it would field,
+    which is not the same as maximising the squad total: four expensive bench
+    players score nothing.
+    """
+    from xg_alonso.optimization import SquadCandidate, build_squad
+
+    context = _load_context(data_root, parse_season(season))
+    gameweek = context.next_gameweek()
+
+    models = None
+    if model_path is not None:
+        from xg_alonso.prediction import load_models
+
+        models = load_models(model_path).models
+
+    predictions = _predict_all(context, gameweek, models)
+    by_code = {p.player_code: p for p in predictions}
+
+    available = {
+        int(r["player_code"]): r
+        for r in context.players.iter_rows(named=True)
+        if r.get("status") in (None, "a", "d")
+    }
+    candidates = [
+        SquadCandidate(
+            player_code=p.player_code,
+            position=p.position,
+            team_id=TeamId(int(available[int(p.player_code)]["team_id"])),
+            price=TenthsOfMillion(int(available[int(p.player_code)]["current_price"])),
+            prediction=p,
+        )
+        for p in predictions
+        if int(p.player_code) in available
+    ]
+    typer.echo(f"  choosing from {len(candidates):,} available players for GW{gameweek}")
+
+    squad, selection = build_squad(
+        candidates,
+        rules=context.squad_rules,
+        entry_id=EntryId(0),
+        gameweek=gameweek,
+        predictions=by_code,
+    )
+
+    names = context.player_names()
+
+    def rows(picks: tuple[SquadPick, ...]) -> list[tuple[str, str, float]]:
+        return [
+            (
+                names.get(p.player_code, str(p.player_code))
+                + (" (C)" if p.is_captain else " (V)" if p.is_vice_captain else ""),
+                p.position.value,
+                by_code[p.player_code].expected_points if p.player_code in by_code else 0.0,
+            )
+            for p in picks
+        ]
+
+    typer.echo(
+        render_squad_summary(
+            entry_id=0,
+            gameweek=int(gameweek),
+            squad_value=int(squad.squad_value),
+            bank=int(squad.bank),
+            free_transfers=squad.free_transfers,
+            starters=rows(squad.starters),
+            bench=rows(squad.bench),
+        )
+    )
+    typer.echo(
+        f"\n  formation {selection.formation_label}   projected {selection.expected_points:.2f} pts"
+    )
+
+    if out is not None:
+        by_element = {
+            int(r["player_code"]): int(r["element_id"])
+            for r in context.players.iter_rows(named=True)
+        }
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps(
+                {
+                    "picks": [
+                        {
+                            "element": by_element[int(p.player_code)],
+                            "position": p.squad_slot,
+                            "purchase_price": int(p.purchase_price),
+                            "is_captain": p.is_captain,
+                            "is_vice_captain": p.is_vice_captain,
+                        }
+                        for p in squad.picks
+                    ],
+                    "bank": int(squad.bank),
+                    "free_transfers": squad.free_transfers,
+                },
+                indent=1,
+            )
+        )
+        typer.echo(f"  saved -> {out}")
+
+
+def _predict_all(context: SliceContext, gameweek: GameweekId, models: object | None):  # type: ignore[no-untyped-def]
+    """Predict every player, via the trained models when supplied."""
+    from xg_alonso.cli.pipeline import build_entities
+    from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
+    from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
+    from xg_alonso.features.slice1 import build_slice1_features, build_team_gameweek_stats
+    from xg_alonso.prediction import predict_with_models
+    from xg_alonso.prediction.baseline import predict_frame
+
+    cutoff = context.deadline_for(gameweek)
+    entities = build_entities(context, cutoff=cutoff)
+
+    if models is not None:
+        features = build_catalogue(entities, player_stats=context.player_stats)
+        features = build_opponent_features(
+            features, opponent_strength=build_opponent_strength(context.player_stats)
+        )
+        return predict_with_models(
+            features,
+            models=models,  # type: ignore[arg-type]
+            rules=context.scoring,
+            from_gameweek=gameweek,
+            data_cutoff=cutoff,
+            predicted_at=cutoff,
+            run_id="build-squad",
+            code_version="cli",
+            feature_set_version=CATALOGUE_VERSION,
+        )
+
+    features = build_slice1_features(
+        entities,
+        player_stats=context.player_stats,
+        team_stats=build_team_gameweek_stats(context.player_stats, context.players),
+    )
+    return predict_frame(
+        features,
+        rules=context.scoring,
+        from_gameweek=gameweek,
+        data_cutoff=cutoff,
+        predicted_at=cutoff,
+        run_id="build-squad",
+        code_version="cli",
+        feature_set_version="slice1_v1",
+    )
+
+
+@app.command()
+def score(
+    season: Annotated[
+        str, typer.Option("--season", help="Season to score, e.g. 2025-26.")
+    ] = "2025-26",
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    start_gw: Annotated[int, typer.Option("--from", help="First gameweek to score.")] = 6,
+    end_gw: Annotated[int, typer.Option("--to", help="Last gameweek to score.")] = 38,
+    model_path: Annotated[
+        Path | None,
+        typer.Option("--model", help="Score a fitted model instead of the closed-form baseline."),
+    ] = None,
+) -> None:
+    """Score assembled expected points against what actually happened.
+
+    Every other accuracy command here scores a *component*. This one scores the
+    number the interface displays and the optimizer consumes, which no metric in
+    the repository previously touched — the chain could have been sound at every
+    link and wrong end to end.
+
+    Both error and ranking are reported, because they answer different
+    questions. A constant bias ruins MAE while leaving every transfer decision
+    intact; a well-calibrated model that ranks nobody correctly is useless to
+    the optimizer. Slices by position and price band come with it, since a
+    pooled number hides a model that is excellent at goalkeepers and blind to
+    forwards.
+    """
+    from xg_alonso.contracts.prediction import Position
+    from xg_alonso.evaluation import (
+        actual_points,
+        gameweek_deadlines,
+        score_predictions,
+    )
+    from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
+    from xg_alonso.features.slice1 import build_slice1_features, build_team_gameweek_stats
+    from xg_alonso.prediction.baseline import predict_frame
+
+    parsed = parse_season(season)
+    silver = data_root / "silver"
+    stats_path = silver / "player_gameweek_stats.parquet"
+    players_path = silver / "players_history.parquet"
+    if not stats_path.exists() or not players_path.exists():
+        raise typer.BadParameter("no backfill found. Run `xg backfill` first.")
+
+    all_stats = pl.read_parquet(stats_path)
+    history = pl.read_parquet(players_path).filter(pl.col("season") == str(parsed))
+    if history.is_empty():
+        raise typer.BadParameter(f"no player history for {season}. Backfill it first.")
+
+    team_ids = {name: i + 1 for i, name in enumerate(sorted(history["team_name"].unique()))}
+    players = history.with_columns(
+        pl.when(pl.col("position") == "GK")
+        .then(pl.lit("GKP"))
+        .otherwise(pl.col("position"))
+        .alias("position"),
+        pl.col("team_name").replace_strict(team_ids, default=0).alias("team_id"),
+        pl.col("opening_price").alias("current_price"),
+    ).filter(pl.col("position").is_in([p.value for p in Position]))
+
+    deadlines = gameweek_deadlines(all_stats).filter(pl.col("season") == str(parsed))
+    deadline_by_gw = {int(r["gameweek_id"]): r["deadline"] for r in deadlines.iter_rows(named=True)}
+
+    scoring = _load_context(data_root, parse_season(DEFAULT_SEASON)).scoring
+
+    trained = None
+    if model_path is not None:
+        from xg_alonso.prediction import load_models
+
+        trained = load_models(model_path)
+        evaluated = tuple(range(start_gw, end_gw + 1))
+        if trained.overlaps(str(parsed), evaluated):
+            raise typer.BadParameter(
+                f"{model_path} was trained on {season} gameweeks that overlap "
+                f"GW{start_gw}-{end_gw}. Scoring a model on its own training data "
+                "measures memorisation. Train on an earlier season."
+            )
+        typer.echo(
+            f"  model {trained.models.fingerprint()[:12]} "
+            f"trained on {', '.join(trained.trained_seasons)}"
+        )
+    else:
+        typer.echo("  closed-form baseline")
+
+    opponent_strength = (
+        build_opponent_strength(all_stats) if trained is not None else pl.DataFrame()
+    )
+    team_stats = (
+        build_team_gameweek_stats(all_stats, players) if trained is None else pl.DataFrame()
+    )
+
+    # Minutes travel with the outcome so the report can separate players who
+    # took the field from those whose zero was never in doubt.
+    outcome_rows = (
+        all_stats.filter(pl.col("season") == str(parsed))
+        .group_by(["gameweek_id", "player_code"])
+        .agg(
+            pl.col("total_points").sum().alias("actual"),
+            pl.col("minutes").sum().alias("minutes"),
+        )
+    )
+
+    collected: list[pl.DataFrame] = []
+    for gw in range(start_gw, end_gw + 1):
+        gameweek = GameweekId(gw)
+        cutoff = deadline_by_gw.get(gw)
+        if cutoff is None or not actual_points(all_stats, season=parsed, gameweek=gameweek):
+            continue
+
+        if trained is None:
+            entities = players.select(
+                "player_code", "position", "team_id", "current_price", "web_name"
+            ).with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
+            features = build_slice1_features(
+                entities, player_stats=all_stats, team_stats=team_stats
+            )
+            predictions = predict_frame(
+                features,
+                rules=scoring,
+                from_gameweek=gameweek,
+                data_cutoff=cutoff,
+                predicted_at=cutoff,
+                run_id="score",
+                code_version="cli",
+                feature_set_version="slice1_v1",
+            )
+        else:
+            from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
+            from xg_alonso.prediction import predict_with_models
+
+            fixture = (
+                all_stats.filter((pl.col("season") == str(parsed)) & (pl.col("gameweek_id") == gw))
+                .select("player_code", "opponent_team_id", "was_home")
+                .unique(subset=["player_code"], keep="first", maintain_order=True)
+            )
+            entities = (
+                players.select("player_code", "position", "team_id", "current_price", "web_name")
+                .join(fixture, on="player_code", how="left")
+                .with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
+            )
+            features = build_catalogue(entities, player_stats=all_stats)
+            features = build_opponent_features(features, opponent_strength=opponent_strength)
+            predictions = predict_with_models(
+                features,
+                models=trained.models,
+                rules=scoring,
+                from_gameweek=gameweek,
+                data_cutoff=cutoff,
+                predicted_at=cutoff,
+                run_id="score-trained",
+                code_version="cli",
+                feature_set_version=CATALOGUE_VERSION,
+            )
+
+        predicted = pl.DataFrame(
+            {
+                "player_code": [int(p.player_code) for p in predictions],
+                "predicted": [float(p.expected_points) for p in predictions],
+                "position": [str(p.position.value) for p in predictions],
+            }
+        )
+        gw_outcomes = outcome_rows.filter(pl.col("gameweek_id") == gw).drop("gameweek_id")
+
+        # An inner join scores only players with both a prediction and a
+        # recorded outcome. Players who left the league mid-season have neither.
+        collected.append(
+            predicted.join(gw_outcomes, on="player_code", how="inner")
+            .join(
+                players.select("player_code", pl.col("current_price").alias("price")),
+                on="player_code",
+                how="left",
+            )
+            .with_columns(pl.lit(gw).alias("gameweek_id"))
+        )
+
+    if not collected:
+        raise typer.BadParameter(f"no scorable gameweeks in {season} GW{start_gw}-{end_gw}")
+
+    frame = pl.concat(collected)
+    typer.echo(
+        f"  {frame.height:,} player-gameweeks across {frame['gameweek_id'].n_unique()} gameweeks\n"
+    )
+
+    report = score_predictions(frame)
+    typer.echo(report.summary())
+
+    if report.overall.degenerate:
+        typer.secho(
+            "\n  WARNING: expected points is constant across players. The optimizer "
+            "cannot rank anybody on this output.",
+            fg=typer.colors.RED,
+            bold=True,
+        )

@@ -21,17 +21,19 @@ dependencies = [
     "xg-alonso-ingestion",
     "xg-alonso-normalization",
     "xg-alonso-cli",
+    "xg-alonso-api",
 ]
 
 [project.scripts]
 xg = "xg_alonso.cli.main:app"
+xg-api = "xg_alonso.api.main:main"
 
 # ---------------------------------------------------------------------------
 # uv workspace
 # ---------------------------------------------------------------------------
 
 [tool.uv.workspace]
-members = ["packages/*", "pipelines/*", "apps/cli"]
+members = ["packages/*", "pipelines/*", "apps/cli", "apps/api"]
 
 [tool.uv.sources]
 xg-alonso-contracts = { workspace = true }
@@ -45,6 +47,7 @@ xg-alonso-explanations = { workspace = true }
 xg-alonso-ingestion = { workspace = true }
 xg-alonso-normalization = { workspace = true }
 xg-alonso-cli = { workspace = true }
+xg-alonso-api = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -84,6 +87,7 @@ src = [
     "pipelines/ingestion/src",
     "pipelines/normalization/src",
     "apps/cli/src",
+    "apps/api/src",
     "tests",
 ]
 
@@ -146,6 +150,7 @@ mypy_path = [
     "pipelines/ingestion/src",
     "pipelines/normalization/src",
     "apps/cli/src",
+    "apps/api/src",
     "tests/prediction",
 ]
 

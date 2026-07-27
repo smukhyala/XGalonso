@@ -57,13 +57,16 @@ REASON_TEMPLATES: Final[dict[ReasonCode, str]] = {
         "Fixtures harden over the next {horizon:.0f} gameweeks: mean opponent strength "
         "{opponent_strength:.2f} against a league average of {league_average:.2f}."
     ),
+    # Expected minutes is a continuous quantity, so it is rendered with a decimal.
+    # Integer rounding implied a discreteness the estimate does not have, and it
+    # also produced "around 1 minutes expected" whenever the value rounded to one.
     ReasonCode.EXPECTED_MINUTES_SECURE: (
         "Minutes look secure: {p_start:.0%} chance of starting, around "
-        "{expected_minutes:.0f} minutes expected."
+        "{expected_minutes:.1f} minutes expected."
     ),
     ReasonCode.EXPECTED_MINUTES_DECLINE: (
         "Minutes are a concern: {p_start:.0%} chance of starting, around "
-        "{expected_minutes:.0f} minutes expected."
+        "{expected_minutes:.1f} minutes expected."
     ),
     ReasonCode.UNDERLYING_STATS_IMPROVING: (
         "Stronger underlying numbers: {recent_xgi:.2f} projected goal involvements "

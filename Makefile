@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install fmt lint types boundaries test test-fast leakage e2e check clean ingest features recommend
+.PHONY: help install fmt lint types boundaries test test-fast leakage e2e check clean ingest features recommend api web web-install
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -75,3 +75,17 @@ features: ## Build point-in-time features
 
 recommend: ## Recommend a transfer (usage: make recommend ENTRY=1234567)
 	uv run xg recommend $(ENTRY)
+
+# ---------------------------------------------------------------------------
+# Local interfaces. Run `make api` and `make web` in two terminals; the web app
+# proxies /api/* to port 8000, so the API must be up first.
+# ---------------------------------------------------------------------------
+
+api: ## Serve the decision API on 127.0.0.1:8000
+	uv run uvicorn xg_alonso.api.main:app --host 127.0.0.1 --port 8000 --reload
+
+web: ## Serve the web front end on 127.0.0.1:3000 (needs `make api`)
+	cd apps/web && npm run dev
+
+web-install: ## Install web dependencies
+	cd apps/web && npm install

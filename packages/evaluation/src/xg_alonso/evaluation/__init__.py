@@ -8,6 +8,14 @@ is a policy comparison — two identical squads walk the season, one transferrin
 and one not, both scored on the same actual results. The gap is the product.
 """
 
+from xg_alonso.evaluation.accuracy import (
+    PRICE_BANDS,
+    AccuracyReport,
+    AccuracySlice,
+    TopKResult,
+    score_predictions,
+    spearman,
+)
 from xg_alonso.evaluation.backtest import (
     BacktestResult,
     GameweekOutcome,
@@ -36,10 +44,14 @@ from xg_alonso.evaluation.report import (
 
 __all__ = [
     "POLICIES",
+    "PRICE_BANDS",
+    "AccuracyReport",
+    "AccuracySlice",
     "BacktestReport",
     "BacktestResult",
     "GameweekOutcome",
     "PolicyName",
+    "TopKResult",
     "actual_points",
     "apply_transfer",
     "compare_to_previous",
@@ -51,7 +63,9 @@ __all__ = [
     "most_expensive_policy",
     "random_policy",
     "run_policy",
+    "score_predictions",
     "score_squad",
+    "spearman",
     "walk_forward",
     "write_report",
 ]
