@@ -8,13 +8,19 @@ assumed from the fact that the generators are point-in-time safe.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import polars as pl
 import pytest
-from conftest import FAST
+from conftest import FAST, T0
 from conftest import synthetic_stats as _stats
 
-from xg_alonso.prediction.dataset import COMPONENT_LABELS, build_training_frame
-from xg_alonso.prediction.trained import train_component_models
+from xg_alonso.prediction.dataset import (
+    COMPONENT_LABELS,
+    TrainingData,
+    build_training_frame,
+)
+from xg_alonso.prediction.trained import ComponentModels, train_component_models
 
 
 class TestTrainingFrame:
@@ -216,3 +222,140 @@ class TestLabelCoverage:
         data = build_training_frame(_stats(), min_gameweek=4)
         for component in COMPONENT_LABELS:
             assert f"label_{component}" in data.label_columns
+
+
+class TestZeroInflatedLabelsDoNotCollapse:
+    """Regression tests for the constant-output bug.
+
+    ``loss="absolute_error"`` fits the conditional *median*. FPL component
+    labels are 74-97% zeros, so the median is zero everywhere and every
+    regression model collapsed to a constant zero — while still scoring ~+50%
+    on an MAE-based skill metric, because predicting zero genuinely does
+    minimise MAE for a rare event.
+
+    The result was a model whose expected points contained no attacking signal
+    at all, and a metric that applauded it. Both halves are tested here.
+    """
+
+    def _sparse_stats(self, *, players: int = 60, gameweeks: int = 26) -> pl.DataFrame:
+        """History where goals are rare but genuinely predictable from quality."""
+        rows = []
+        for player in range(1, players + 1):
+            quality = player / players
+            for week in range(1, gameweeks + 1):
+                kickoff = T0 + timedelta(days=7 * week)
+                # Good players score roughly every third game, poor ones never.
+                scored = 1.0 if (quality > 0.7 and week % 3 == 0) else 0.0
+                rows.append(
+                    {
+                        "player_code": player,
+                        "season": "2025-26",
+                        "gameweek_id": week,
+                        "opponent_team_id": ((week + player) % 6) + 1,
+                        "was_home": (week + player) % 2 == 0,
+                        "kickoff_time": kickoff,
+                        "available_time": kickoff + timedelta(hours=3),
+                        "minutes": 20 + quality * 70,
+                        "starts": 1.0 if quality > 0.4 else 0.0,
+                        "goals_scored": scored,
+                        "assists": scored * 0.5,
+                        "clean_sheets": 1.0 if (week + player) % 3 == 0 else 0.0,
+                        "goals_conceded": 2.0 - quality,
+                        "saves": quality * 2.0,
+                        "yellow_cards": (week % 5 == 0) * 1.0,
+                        "bonus": scored * 3.0,
+                        "bps": quality * 30,
+                        "total_points": 2 + quality * 8,
+                        "expected_goals": quality * 0.9,
+                        "expected_assists": quality * 0.5,
+                        "expected_goal_involvements": quality * 1.4,
+                        "expected_goals_conceded": 1.8 - quality,
+                    }
+                )
+        frame = pl.DataFrame(rows, infer_schema_length=None)
+        return frame.with_columns(
+            pl.col("kickoff_time").dt.replace_time_zone("UTC"),
+            pl.col("available_time").dt.replace_time_zone("UTC"),
+        )
+
+    def _fit(self) -> tuple[ComponentModels, TrainingData]:
+        data = build_training_frame(self._sparse_stats(), min_gameweek=4)
+        models = train_component_models(
+            data.frame,
+            feature_columns=data.feature_columns,
+            label_columns=data.label_columns,
+            min_train_gameweeks=8,
+            model_kwargs=FAST,
+        )
+        return models, data
+
+    def test_the_label_really_is_zero_inflated(self) -> None:
+        """Guards the fixture: without sparsity these tests prove nothing."""
+        data = build_training_frame(self._sparse_stats(), min_gameweek=4)
+        zeros = (data.frame["label_goals_scored"] == 0).sum() / data.rows
+        assert zeros > 0.7, f"fixture is only {zeros:.0%} zeros; not sparse enough to test"
+
+    def test_a_sparse_count_model_does_not_output_a_constant(self) -> None:
+        """The bug itself: every regression collapsed to exactly zero."""
+        models, data = self._fit()
+        predictions = models.predict(data.frame.head(200))
+        for label in ("label_goals_scored", "label_minutes", "label_saves"):
+            if label not in predictions:
+                continue
+            values = predictions[label]
+            assert float(values.std()) > 1e-6, (
+                f"{label} produced a constant. A model that cannot distinguish "
+                "players contributes only an offset to expected points."
+            )
+
+    def test_predictions_track_the_mean_not_the_median(self) -> None:
+        """Expected points needs E[X]. The median of a rare event is zero."""
+        models, data = self._fit()
+        frame = data.frame
+        predictions = models.predict(frame)
+        actual = float(sum(frame["label_goals_scored"].to_list()) / frame.height)
+        predicted = float(predictions["label_goals_scored"].mean())
+        assert predicted > actual * 0.4, (
+            f"predicted mean {predicted:.4f} against actual {actual:.4f}: the model "
+            "is fitting the median, so the component is effectively absent"
+        )
+
+    def test_degenerate_models_are_reported_as_such(self) -> None:
+        """The metric must not applaud a constant."""
+        models, _ = self._fit()
+        assert models.degenerate_labels() == [], (
+            f"degenerate components: {models.degenerate_labels()}"
+        )
+
+    def test_skill_is_zeroed_for_a_constant_model(self) -> None:
+        """A constant predictor has no skill however small its error.
+
+        Built directly rather than by fitting, because the whole point is that
+        a constant model can score highly on MAE.
+        """
+        from xg_alonso.prediction.trained import FoldReport
+
+        constant = FoldReport(
+            label="label_goals_scored",
+            fold_index=0,
+            train_rows=1000,
+            validate_rows=200,
+            mae=0.04,
+            baseline_mae=0.078,  # a genuinely better MAE than predicting the mean
+            prediction_std=0.0,  # ...but the output never varies
+            predicted_mean=0.0,
+            actual_mean=0.04,
+        )
+        assert constant.skill > 0.4, "MAE skill alone would rate this highly"
+        assert constant.degenerate
+        models = ComponentModels(reports=[constant])
+        assert models.skill_by_label()["label_goals_scored"] == 0.0
+        assert models.degenerate_labels() == ["label_goals_scored"]
+
+    def test_mean_bias_is_reported(self) -> None:
+        """A component biased low drags the whole assembled total down."""
+        models, _ = self._fit()
+        bias = models.mean_bias_by_label()
+        assert bias
+        for label, value in bias.items():
+            assert abs(value) < 5.0, f"{label} mean bias {value:.3f} is implausible"

@@ -261,3 +261,98 @@ class TestSummary:
         assert summary["seasons"] == list(seasons)
         assert summary["labels"]
         assert len(summary["fingerprint"]) == 12
+
+
+class TestSkillWeightedShrinkage:
+    """Shrinkage pulls weak components toward the constant they barely improve on."""
+
+    def test_shrinkage_moves_predictions_toward_the_population_mean(self, fitted: Fitted) -> None:
+        models, frame, _ = fitted
+        raw = models.predict(frame, shrink_by_skill=False)
+        shrunk = models.predict(frame, shrink_by_skill=True)
+
+        moved = 0
+        for label in raw:
+            mean = models.label_means.get(label)
+            if mean is None:
+                continue
+            raw_spread = float(raw[label].std())
+            shrunk_spread = float(shrunk[label].std())
+            if raw_spread > 1e-9:
+                assert shrunk_spread <= raw_spread + 1e-9, f"{label} spread grew under shrinkage"
+                moved += 1
+        assert moved > 0, "no component was affected, so the switch does nothing"
+
+    def test_spread_is_scaled_by_exactly_the_measured_skill(self, fitted: Fitted) -> None:
+        """The blend has an exact property, so assert it rather than a tendency.
+
+        ``shrunk = w * raw + (1 - w) * mean`` is affine, so the spread scales by
+        exactly ``w``. Checking that pins the arithmetic without depending on two
+        labels happening to differ in skill.
+        """
+        models, frame, _ = fitted
+        skill = models.skill_by_label()
+        raw = models.predict(frame, shrink_by_skill=False)
+        shrunk = models.predict(frame, shrink_by_skill=True)
+
+        checked = 0
+        for label, values in raw.items():
+            spread = float(values.std())
+            if spread <= 1e-6 or label not in models.label_means:
+                continue
+            weight = max(0.0, min(1.0, skill.get(label, 0.0)))
+            assert float(shrunk[label].std()) == pytest.approx(weight * spread, rel=1e-6), (
+                f"{label} spread did not scale by its skill"
+            )
+            checked += 1
+        assert checked > 0, "no label had enough spread to check"
+
+    def test_a_zero_skill_component_collapses_to_its_mean(self, fitted: Fitted) -> None:
+        """A component that beats nothing should contribute nothing but a constant."""
+        models, frame, _ = fitted
+        label = next(iter(models.models))
+        stripped = ComponentModels(
+            models={label: models.models[label]},
+            feature_columns=models.feature_columns,
+            reports=[],  # no reports means zero measured skill
+            trained_on_rows=models.trained_on_rows,
+            label_means={label: 4.2},
+        )
+        shrunk = stripped.predict(frame, shrink_by_skill=True)[label]
+        assert float(shrunk.std()) == pytest.approx(0.0, abs=1e-9)
+        assert float(shrunk.mean()) == pytest.approx(4.2)
+
+    def test_label_means_are_recorded_for_every_label(self, fitted: Fitted) -> None:
+        """A prediction is only as useful as the fallback it can blend with."""
+        models, _, _ = fitted
+        for label in models.models:
+            assert label in models.label_means
+
+    def test_shrinkage_is_off_by_default(self, fitted: Fitted) -> None:
+        """Behaviour that changes results belongs behind an explicit switch."""
+        models, frame, _ = fitted
+        default = models.predict(frame)
+        explicit = models.predict(frame, shrink_by_skill=False)
+        for label in default:
+            assert (default[label] == explicit[label]).all()
+
+    def test_a_stale_artifact_is_rejected_at_load(self, tmp_path: Path) -> None:
+        """Pickle restores objects missing fields added since they were written.
+
+        Without this check the failure surfaces much later, inside a prediction
+        loop, as an AttributeError with no indication of the cause.
+        """
+        import pickle
+
+        stale = SavedModel(
+            models=ComponentModels(),
+            trained_seasons=("2024-25",),
+            trained_gameweeks=(1, 2),
+            saved_at=NOW,
+        )
+        del stale.models.label_means
+
+        path = tmp_path / "stale.pkl"
+        path.write_bytes(pickle.dumps(stale))
+        with pytest.raises(ValueError, match="older version"):
+            load_models(path)

@@ -641,16 +641,16 @@ def backtest(
     opponent_strength = (
         build_opponent_strength(all_stats) if trained is not None else pl.DataFrame()
     )
-    trained_cache: dict[int, Any] = {}
+    trained_cache: dict[tuple[int, bool], Any] = {}
 
-    def _trained_inputs_for(gameweek: GameweekId) -> tuple[Any, Any, Any]:
+    def _trained_inputs_for(gameweek: GameweekId, shrink: bool = False) -> tuple[Any, Any, Any]:
         """The same entities and cutoff, but predicted by the fitted model.
 
         Sharing the entity frame and the legality check means a comparison
         between the closed-form and trained policies isolates prediction
         quality — nothing else differs.
         """
-        cached = trained_cache.get(int(gameweek))
+        cached = trained_cache.get((int(gameweek), shrink))
         if cached is not None:
             result: tuple[Any, Any, Any] = cached
             return result
@@ -690,6 +690,7 @@ def backtest(
             run_id="backtest-trained",
             code_version="backtest",
             feature_set_version=CATALOGUE_VERSION,
+            shrink_by_skill=shrink,
         )
         by_code = {p.player_code: p for p in predictions}
         candidates = [
@@ -704,7 +705,7 @@ def backtest(
             if p.player_code in prices
         ]
         computed: tuple[Any, Any, Any] = (by_code, candidates, cutoff)
-        trained_cache[int(gameweek)] = computed
+        trained_cache[(int(gameweek), shrink)] = computed
         return computed
 
     gameweeks = [
@@ -718,6 +719,9 @@ def backtest(
         # Same selection rule as `model`, different predictions. The gap between
         # the two is exactly the value the fitted model adds.
         policies["trained"] = POLICIES["model"]
+        # Same model, same selection rule — the only difference is whether weak
+        # components are allowed to speak as loudly as strong ones.
+        policies["trained_shrunk"] = POLICIES["model"]
 
     results: dict[str, Any] = {}
     for policy_name, selector in policies.items():
@@ -731,8 +735,12 @@ def backtest(
             _rng: Any = rng,
             _name: str = policy_name,
         ) -> Any:
-            source = _trained_inputs_for if _name == "trained" else _inputs_for
-            by_code, candidates, cutoff = source(gameweek)
+            if _name.startswith("trained"):
+                by_code, candidates, cutoff = _trained_inputs_for(
+                    gameweek, _name == "trained_shrunk"
+                )
+            else:
+                by_code, candidates, cutoff = _inputs_for(gameweek)
             recommendation = run_policy(
                 squad_state,
                 selector=_sel,
@@ -776,7 +784,10 @@ def backtest(
             f"{result.calibration_error:>10.2f}"
         )
 
-    headline = "trained" if "trained" in results else "model"
+    headline = max(
+        (n for n in results if n != "hold"),
+        key=lambda n: results[n].total_incremental,
+    )
     model = results[headline]
     best_control = max(
         (r.total_incremental for n, r in results.items() if n not in (headline, "hold")),
@@ -959,8 +970,25 @@ def train(
         f"\n  {len(summary['labels'])} models, {summary['folds']} walk-forward folds"
         f", fingerprint {summary['fingerprint']}"
     )
-    typer.echo("\n  Out-of-sample skill vs predicting the mean:")
+    degenerate = models.degenerate_labels()
+    bias = models.mean_bias_by_label()
+
+    typer.echo("\n  Out-of-sample skill (degenerate models report zero):")
     for label, skill in sorted(summary["skill"].items(), key=lambda kv: -kv[1]):
-        flag = "" if skill > 0.02 else "   <- no better than a constant"
-        typer.echo(f"    {label:<26}{skill:>+8.1%}{flag}")
+        note = ""
+        if label in degenerate:
+            note = "   <- CONSTANT OUTPUT, carries no information"
+        elif skill <= 0.02:
+            note = "   <- no better than a constant"
+        typer.echo(f"    {label:<26}{skill:>+8.1%}   bias {bias.get(label, 0.0):+7.3f}{note}")
+
+    if degenerate:
+        typer.secho(
+            f"\n  WARNING: {len(degenerate)} component(s) output a constant: "
+            f"{', '.join(degenerate)}.\n"
+            "  They add only an offset to expected points, so rankings are driven\n"
+            "  entirely by whatever else remains. Check the loss function.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
     typer.echo(f"\n  saved -> {destination}")

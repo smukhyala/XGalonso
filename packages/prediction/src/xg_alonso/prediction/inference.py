@@ -74,17 +74,38 @@ def save_models(saved: SavedModel, path: Path) -> None:
         pickle.dump(saved, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+#: Attributes a usable artifact must carry. Checked on load so an artifact
+#: saved by older code fails here, with a message that says what to do, rather
+#: than raising an AttributeError from inside a prediction loop.
+_REQUIRED_ATTRIBUTES: tuple[str, ...] = (
+    "models",
+    "feature_columns",
+    "reports",
+    "label_means",
+)
+
+
 def load_models(path: Path) -> SavedModel:
-    """Load a persisted model.
+    """Load a persisted model, rejecting anything unusable.
 
     Raises:
         TypeError: if the file does not hold a :class:`SavedModel`. Unpickling
             arbitrary objects and hoping is not a loading strategy.
+        ValueError: if the artifact predates a field the current code needs.
+            Pickle happily restores an object missing attributes added since it
+            was written, and the failure would otherwise surface much later.
     """
     with path.open("rb") as handle:
         loaded = pickle.load(handle)
     if not isinstance(loaded, SavedModel):
         raise TypeError(f"{path} does not contain a SavedModel (got {type(loaded).__name__})")
+
+    missing = [a for a in _REQUIRED_ATTRIBUTES if not hasattr(loaded.models, a)]
+    if missing:
+        raise ValueError(
+            f"{path} was saved by an older version and is missing {missing}. "
+            "Retrain with `xg train` rather than using a stale artifact."
+        )
     return loaded
 
 
@@ -125,11 +146,17 @@ def predict_with_models(
     code_version: str,
     feature_set_version: str,
     horizon_gameweeks: int = 1,
+    shrink_by_skill: bool = False,
 ) -> list[PlayerPrediction]:
     """Predict components with the trained models and assemble them into points.
 
     Requires ``player_code`` and ``position`` on the feature frame. Rows whose
     position is unrecognised are skipped rather than guessed.
+
+    Args:
+        shrink_by_skill: Blend each component toward its population mean in
+            proportion to measured out-of-sample skill, so a weakly-predicted
+            component cannot drive a recommendation as hard as a strong one.
     """
     for required in ("player_code", "position"):
         if required not in features.columns:
@@ -137,7 +164,7 @@ def predict_with_models(
     if features.is_empty():
         return []
 
-    predicted = models.predict(features)
+    predicted = models.predict(features, shrink_by_skill=shrink_by_skill)
 
     def column(label: str, default: float = 0.0) -> list[float]:
         values = predicted.get(label)
