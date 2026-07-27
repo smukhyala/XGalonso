@@ -492,6 +492,10 @@ def backtest(
     data_root: DataRoot = DEFAULT_DATA_ROOT,
     start_gw: Annotated[int, typer.Option("--from", help="First gameweek to evaluate.")] = 6,
     end_gw: Annotated[int, typer.Option("--to", help="Last gameweek to evaluate.")] = 38,
+    model_path: Annotated[
+        Path | None,
+        typer.Option("--model", help="A fitted model to evaluate alongside the baseline."),
+    ] = None,
 ) -> None:
     """Walk a past season, measuring recommendations against holding.
 
@@ -514,6 +518,7 @@ def backtest(
         run_policy,
         walk_forward,
     )
+    from xg_alonso.features.opponent import build_opponent_strength
     from xg_alonso.features.slice1 import build_slice1_features, build_team_gameweek_stats
     from xg_alonso.optimization.transfer import Candidate
     from xg_alonso.prediction.baseline import predict_frame
@@ -560,6 +565,23 @@ def backtest(
 
     squad_rules = _load_context(data_root, parse_season(DEFAULT_SEASON)).squad_rules
     scoring = _load_context(data_root, parse_season(DEFAULT_SEASON)).scoring
+
+    trained = None
+    if model_path is not None:
+        from xg_alonso.prediction import load_models
+
+        trained = load_models(model_path)
+        evaluated = tuple(range(start_gw, end_gw + 1))
+        if trained.overlaps(str(parsed), evaluated):
+            raise typer.BadParameter(
+                f"{model_path} was trained on {season} gameweeks that overlap "
+                f"GW{start_gw}-{end_gw}. Backtesting a model on its own training "
+                "data measures memorisation, not skill. Train on an earlier season."
+            )
+        typer.echo(
+            f"  model {trained.models.fingerprint()[:12]} "
+            f"trained on {', '.join(trained.trained_seasons)}"
+        )
 
     initial = _opening_squad(players, squad_rules, parsed, start_gw)
     typer.echo(
@@ -616,14 +638,89 @@ def backtest(
         prediction_cache[int(gameweek)] = computed
         return computed
 
+    opponent_strength = (
+        build_opponent_strength(all_stats) if trained is not None else pl.DataFrame()
+    )
+    trained_cache: dict[int, Any] = {}
+
+    def _trained_inputs_for(gameweek: GameweekId) -> tuple[Any, Any, Any]:
+        """The same entities and cutoff, but predicted by the fitted model.
+
+        Sharing the entity frame and the legality check means a comparison
+        between the closed-form and trained policies isolates prediction
+        quality — nothing else differs.
+        """
+        cached = trained_cache.get(int(gameweek))
+        if cached is not None:
+            result: tuple[Any, Any, Any] = cached
+            return result
+
+        assert trained is not None
+        from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
+        from xg_alonso.features.opponent import build_opponent_features
+        from xg_alonso.prediction import predict_with_models
+
+        _, _, cutoff = _inputs_for(gameweek)
+
+        # Who each player faces this gameweek. Fixtures are published well
+        # before the deadline, so this is an input rather than a leak — only
+        # the result of the match is withheld.
+        fixture = (
+            all_stats.filter(
+                (pl.col("season") == str(parsed)) & (pl.col("gameweek_id") == int(gameweek))
+            )
+            .select("player_code", "opponent_team_id", "was_home")
+            .unique(subset=["player_code"], keep="first", maintain_order=True)
+        )
+        entities = (
+            players.select("player_code", "position", "team_id", "current_price", "web_name")
+            .join(fixture, on="player_code", how="left")
+            .with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
+        )
+        features = build_catalogue(entities, player_stats=all_stats)
+        features = build_opponent_features(features, opponent_strength=opponent_strength)
+
+        predictions = predict_with_models(
+            features,
+            models=trained.models,
+            rules=scoring,
+            from_gameweek=gameweek,
+            data_cutoff=cutoff,
+            predicted_at=cutoff,
+            run_id="backtest-trained",
+            code_version="backtest",
+            feature_set_version=CATALOGUE_VERSION,
+        )
+        by_code = {p.player_code: p for p in predictions}
+        candidates = [
+            Candidate(
+                player_code=p.player_code,
+                position=p.position,
+                team_id=TeamId(teams[p.player_code]),
+                price=prices[p.player_code],
+                prediction=p,
+            )
+            for p in predictions
+            if p.player_code in prices
+        ]
+        computed: tuple[Any, Any, Any] = (by_code, candidates, cutoff)
+        trained_cache[int(gameweek)] = computed
+        return computed
+
     gameweeks = [
         GameweekId(gw)
         for gw in range(start_gw, end_gw + 1)
         if gw in deadline_by_gw and actual_points(all_stats, season=parsed, gameweek=GameweekId(gw))
     ]
 
+    policies = dict(POLICIES)
+    if trained is not None:
+        # Same selection rule as `model`, different predictions. The gap between
+        # the two is exactly the value the fitted model adds.
+        policies["trained"] = POLICIES["model"]
+
     results: dict[str, Any] = {}
-    for policy_name, selector in POLICIES.items():
+    for policy_name, selector in policies.items():
         rng = random.Random(20260727)
 
         def recommend_at(
@@ -634,7 +731,8 @@ def backtest(
             _rng: Any = rng,
             _name: str = policy_name,
         ) -> Any:
-            by_code, candidates, cutoff = _inputs_for(gameweek)
+            source = _trained_inputs_for if _name == "trained" else _inputs_for
+            by_code, candidates, cutoff = source(gameweek)
             recommendation = run_policy(
                 squad_state,
                 selector=_sel,
@@ -678,21 +776,23 @@ def backtest(
             f"{result.calibration_error:>10.2f}"
         )
 
-    model = results["model"]
+    headline = "trained" if "trained" in results else "model"
+    model = results[headline]
     best_control = max(
-        (r.total_incremental for n, r in results.items() if n not in ("model", "hold")),
+        (r.total_incremental for n, r in results.items() if n not in (headline, "hold")),
         default=0,
     )
     typer.echo("\n" + "─" * 72)
     if model.total_incremental > best_control:
         typer.secho(
-            f"  Model beats every control by {model.total_incremental - best_control:+d} pts.",
+            f"  '{headline}' beats every other policy by "
+            f"{model.total_incremental - best_control:+d} pts.",
             fg=typer.colors.GREEN,
         )
     else:
         typer.secho(
-            f"  Model does NOT beat the best control ({best_control:+d} pts). "
-            "The optimizer is adding nothing over a heuristic.",
+            f"  '{headline}' does NOT beat the best alternative ({best_control:+d} pts). "
+            "It is adding nothing over a simpler policy.",
             fg=typer.colors.RED,
         )
     typer.echo(
@@ -702,7 +802,7 @@ def backtest(
 
     worst = sorted((o for o in model.outcomes if o.transfer_made), key=lambda o: o.decision_delta)
     if worst:
-        typer.echo("\n  Model's weakest decisions:")
+        typer.echo(f"\n  {headline} weakest decisions:")
         for outcome in worst[:3]:
             out_name = names.get(outcome.player_out, "?") if outcome.player_out else "?"
             in_name = names.get(outcome.player_in, "?") if outcome.player_in else "?"
@@ -797,3 +897,70 @@ def _opening_squad(players: pl.DataFrame, squad_rules, season, gameweek):  # typ
         bank=TenthsOfMillion(budget - total),
         free_transfers=1,
     )
+
+
+@app.command()
+def train(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    seasons: Annotated[
+        str, typer.Option("--seasons", help="Comma-separated training seasons.")
+    ] = "2024-25",
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Where to write the fitted model.")
+    ] = None,
+    min_gameweek: Annotated[
+        int, typer.Option("--min-gw", help="Skip opening gameweeks with empty windows.")
+    ] = 4,
+) -> None:
+    """Fit component models on historical seasons.
+
+    Train on seasons *before* the one you intend to evaluate. A model fitted on
+    the period it is later backtested over measures memorisation, and the result
+    looks entirely reasonable — which is why the saved artifact records what it
+    was trained on and the backtest refuses to use an overlapping model.
+    """
+    from xg_alonso.prediction import (
+        SavedModel,
+        build_training_frame,
+        model_summary,
+        save_models,
+        train_component_models,
+    )
+
+    stats_path = data_root / "silver" / "player_gameweek_stats.parquet"
+    if not stats_path.exists():
+        raise typer.BadParameter("no backfill found. Run `xg backfill` first.")
+
+    wanted = [s.strip() for s in seasons.split(",")]
+    stats = pl.read_parquet(stats_path)
+
+    typer.echo(f"  building training frame from {', '.join(wanted)} ...")
+    data = build_training_frame(stats, seasons=wanted, min_gameweek=min_gameweek)
+    typer.echo(f"    {data.rows:,} rows x {len(data.feature_columns)} features")
+
+    typer.echo("  fitting component models ...")
+    models = train_component_models(
+        data.frame,
+        feature_columns=data.feature_columns,
+        label_columns=data.label_columns,
+    )
+
+    saved = SavedModel(
+        models=models,
+        trained_seasons=data.seasons,
+        trained_gameweeks=data.gameweeks,
+        saved_at=utc_now(),
+    )
+    destination = out or (data_root / "models" / "component_models.pkl")
+    save_models(saved, destination)
+
+    summary = model_summary(saved)
+    typer.echo(
+        f"\n  {len(summary['labels'])} models, {summary['folds']} walk-forward folds"
+        f", fingerprint {summary['fingerprint']}"
+    )
+    typer.echo("\n  Out-of-sample skill vs predicting the mean:")
+    for label, skill in sorted(summary["skill"].items(), key=lambda kv: -kv[1]):
+        flag = "" if skill > 0.02 else "   <- no better than a constant"
+        typer.echo(f"    {label:<26}{skill:>+8.1%}{flag}")
+    typer.echo(f"\n  saved -> {destination}")

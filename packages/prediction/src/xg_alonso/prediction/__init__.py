@@ -21,6 +21,13 @@ from xg_alonso.prediction.dataset import (
     TrainingData,
     build_training_frame,
 )
+from xg_alonso.prediction.inference import (
+    SavedModel,
+    load_models,
+    model_summary,
+    predict_with_models,
+    save_models,
+)
 from xg_alonso.prediction.trained import (
     TRAINED_MODEL_NAME,
     TRAINED_MODEL_VERSION,
@@ -37,10 +44,15 @@ __all__ = [
     "TRAINED_MODEL_VERSION",
     "ComponentModels",
     "FoldReport",
+    "SavedModel",
     "TrainingData",
     "build_training_frame",
     "estimator_fingerprint",
+    "load_models",
+    "model_summary",
     "predict_frame",
     "predict_player",
+    "predict_with_models",
+    "save_models",
     "train_component_models",
 ]

@@ -25,6 +25,11 @@ from xg_alonso.features.leakage import (
     find_leakage,
     make_future_records,
 )
+from xg_alonso.features.opponent import (
+    OPPONENT_FEATURES,
+    build_opponent_features,
+    build_opponent_strength,
+)
 from xg_alonso.features.point_in_time import (
     as_of_join,
     filter_available,
@@ -39,6 +44,7 @@ from xg_alonso.features.slice1 import (
 
 __all__ = [
     "CATALOGUE_VERSION",
+    "OPPONENT_FEATURES",
     "SLICE1_FEATURES",
     "SLICE1_FEATURE_SET_VERSION",
     "FeatureSpec",
@@ -47,6 +53,8 @@ __all__ = [
     "assert_detects_leakage",
     "assert_no_leakage",
     "build_catalogue",
+    "build_opponent_features",
+    "build_opponent_strength",
     "build_slice1_features",
     "build_team_gameweek_stats",
     "catalogue_specs",

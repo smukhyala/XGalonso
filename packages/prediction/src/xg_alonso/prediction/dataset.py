@@ -25,6 +25,11 @@ from datetime import timedelta
 import polars as pl
 
 from xg_alonso.features.catalogue import build_catalogue, feature_names
+from xg_alonso.features.opponent import (
+    OPPONENT_FEATURES,
+    build_opponent_features,
+    build_opponent_strength,
+)
 
 __all__ = [
     "COMPONENT_LABELS",
@@ -102,6 +107,7 @@ def build_training_frame(
 
     deadline_rows = _deadlines(stats)
     labels = [c for c in COMPONENT_LABELS if c in stats.columns]
+    opponent_strength = build_opponent_strength(stats)
 
     built: list[pl.DataFrame] = []
     for row in deadline_rows.iter_rows(named=True):
@@ -116,9 +122,12 @@ def build_training_frame(
 
         # One entity row per player who actually featured in this gameweek. The
         # cutoff is the deadline, so the features cannot see this week's result.
+        # The fixture — who a player faces and where — is published well
+        # before the deadline, so carrying it onto the entity row is an input
+        # rather than a leak. Only the *result* is withheld.
         entities = (
-            outcomes.select("player_code")
-            .unique(keep="first", maintain_order=True)
+            outcomes.select("player_code", "opponent_team_id", "was_home")
+            .unique(subset=["player_code"], keep="first", maintain_order=True)
             .with_columns(
                 pl.lit(row["deadline"]).alias("prediction_timestamp"),
                 pl.lit(season).alias("label_season"),
@@ -127,6 +136,7 @@ def build_training_frame(
         )
 
         features = build_catalogue(entities, player_stats=stats)
+        features = build_opponent_features(features, opponent_strength=opponent_strength)
 
         label_frame = outcomes.group_by("player_code").agg(
             [pl.col(c).sum().alias(f"label_{c}") for c in labels]
@@ -146,7 +156,7 @@ def build_training_frame(
     frame = pl.concat(built, how="vertical").sort(["label_season", "label_gameweek", "player_code"])
     return TrainingData(
         frame=frame,
-        feature_columns=tuple(feature_names()),
+        feature_columns=tuple(feature_names()) + OPPONENT_FEATURES,
         label_columns=tuple(f"label_{c}" for c in labels),
         gameweeks=tuple(sorted({int(g) for g in frame["label_gameweek"].unique()})),
         seasons=tuple(sorted({str(s) for s in frame["label_season"].unique()})),

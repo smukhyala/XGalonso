@@ -146,6 +146,7 @@ mypy_path = [
     "pipelines/ingestion/src",
     "pipelines/normalization/src",
     "apps/cli/src",
+    "tests/prediction",
 ]
 
 [[tool.mypy.overrides]]
@@ -161,6 +162,7 @@ minversion = "8.0"
 testpaths = ["tests", "packages", "pipelines", "apps"]
 python_files = ["test_*.py"]
 addopts = "-ra --strict-markers --strict-config"
+pythonpath = ["tests/prediction"]
 markers = [
     "leakage: point-in-time leakage tests (must include a negative control)",
     "golden: golden-fixture comparison tests",
