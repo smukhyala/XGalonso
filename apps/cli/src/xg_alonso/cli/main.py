@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import polars as pl
 import typer
@@ -24,7 +24,14 @@ from xg_alonso.cli.pipeline import (
     recommend,
     squad_from_payload,
 )
-from xg_alonso.contracts.identifiers import EntryId, PlayerCode, Season, parse_season
+from xg_alonso.contracts.identifiers import (
+    EntryId,
+    GameweekId,
+    PlayerCode,
+    Season,
+    TenthsOfMillion,
+    parse_season,
+)
 from xg_alonso.contracts.provenance import utc_now
 from xg_alonso.contracts.squad import SquadPick
 from xg_alonso.explanations.render import render_recommendation, render_squad_summary
@@ -379,13 +386,17 @@ def backfill(
         SOURCE_ARCHIVE_PLAYERS,
         fetch_archive_season,
     )
-    from xg_alonso.pipelines.normalization import normalize_archive_season
+    from xg_alonso.pipelines.normalization import (
+        build_players_history,
+        normalize_archive_season,
+    )
 
     wanted = [s.strip() for s in seasons.split(",")] if seasons else list(BACKFILL_SEASONS)
     run_id = f"backfill-{uuid.uuid4().hex[:12]}"
     bronze = _bronze(data_root)
 
     frames: list[pl.DataFrame] = []
+    player_frames: list[pl.DataFrame] = []
     for season_name in wanted:
         typer.echo(f"  {season_name} ...", nl=False)
         fetch_archive_season(season_name, bronze=bronze, run_id=run_id)
@@ -404,12 +415,16 @@ def backfill(
         )
         result = normalize_archive_season(merged, players_raw, season=parse_season(season_name))
         frames.append(result.stats)
+        player_frames.append(
+            build_players_history(merged, players_raw, season=parse_season(season_name))
+        )
 
         defensive = "with DC" if result.has_defensive_contributions else "no DC"
         typer.echo(
             f" {result.rows_out:>6,} rows ({defensive})"
             f"  dropped: {result.rows_dropped_unresolved_element} unresolved,"
-            f" {result.rows_dropped_bad_kickoff} bad kickoff"
+            f" {result.rows_dropped_bad_kickoff} bad kickoff,"
+            f" {result.rows_dropped_managers} managers"
         )
 
     if not frames:
@@ -422,3 +437,324 @@ def backfill(
     destination = out_dir / "player_gameweek_stats.parquet"
     stats.write_parquet(destination)
     typer.echo(f"\n  {stats.height:,} total rows -> {destination}")
+
+    if player_frames:
+        players_history = pl.concat(player_frames, how="vertical")
+        players_dest = out_dir / "players_history.parquet"
+        players_history.write_parquet(players_dest)
+        typer.echo(f"  {players_history.height:,} player-seasons -> {players_dest}")
+
+
+@app.command()
+def backtest(
+    season: Annotated[
+        str, typer.Option("--season", help="Season to walk, e.g. 2025-26.")
+    ] = "2025-26",
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    start_gw: Annotated[int, typer.Option("--from", help="First gameweek to evaluate.")] = 6,
+    end_gw: Annotated[int, typer.Option("--to", help="Last gameweek to evaluate.")] = 38,
+) -> None:
+    """Walk a past season, measuring recommendations against holding.
+
+    This is the headline metric. Two identical squads walk the season — one
+    takes every recommendation, one never transfers — and both are scored on the
+    same actual results. A model that ranks players well but recommends badly
+    looks good on MAE and bad here, which is the point.
+
+    Starts at GW6 by default so the rolling features have in-season history to
+    work with; earlier gameweeks lean entirely on the prior season.
+    """
+    import random
+
+    from xg_alonso.contracts.identifiers import TeamId
+    from xg_alonso.contracts.prediction import Position
+    from xg_alonso.evaluation import (
+        POLICIES,
+        actual_points,
+        gameweek_deadlines,
+        run_policy,
+        walk_forward,
+    )
+    from xg_alonso.features.slice1 import build_slice1_features, build_team_gameweek_stats
+    from xg_alonso.optimization.transfer import Candidate
+    from xg_alonso.prediction.baseline import predict_frame
+
+    parsed = parse_season(season)
+    silver = data_root / "silver"
+    stats_path = silver / "player_gameweek_stats.parquet"
+    players_path = silver / "players_history.parquet"
+    if not stats_path.exists() or not players_path.exists():
+        raise typer.BadParameter("no backfill found. Run `xg backfill` first.")
+
+    all_stats = pl.read_parquet(stats_path)
+    history = pl.read_parquet(players_path).filter(pl.col("season") == str(parsed))
+    if history.is_empty():
+        raise typer.BadParameter(f"no player history for {season}. Backfill it first.")
+
+    # The archive labels goalkeepers "GK"; the rest of the system uses "GKP".
+    team_ids = {name: i + 1 for i, name in enumerate(sorted(history["team_name"].unique()))}
+    players = history.with_columns(
+        pl.when(pl.col("position") == "GK")
+        .then(pl.lit("GKP"))
+        .otherwise(pl.col("position"))
+        .alias("position"),
+        pl.col("team_name").replace_strict(team_ids, default=0).alias("team_id"),
+        pl.col("opening_price").alias("current_price"),
+    ).filter(pl.col("position").is_in([p.value for p in Position]))
+
+    deadlines = gameweek_deadlines(all_stats).filter(pl.col("season") == str(parsed))
+    deadline_by_gw = {int(r["gameweek_id"]): r["deadline"] for r in deadlines.iter_rows(named=True)}
+
+    prices = {
+        PlayerCode(int(r["player_code"])): TenthsOfMillion(int(r["current_price"]))
+        for r in players.iter_rows(named=True)
+    }
+    positions = {
+        PlayerCode(int(r["player_code"])): str(r["position"]) for r in players.iter_rows(named=True)
+    }
+    teams = {
+        PlayerCode(int(r["player_code"])): int(r["team_id"]) for r in players.iter_rows(named=True)
+    }
+    names = {
+        PlayerCode(int(r["player_code"])): str(r["web_name"]) for r in players.iter_rows(named=True)
+    }
+
+    squad_rules = _load_context(data_root, parse_season(DEFAULT_SEASON)).squad_rules
+    scoring = _load_context(data_root, parse_season(DEFAULT_SEASON)).scoring
+
+    initial = _opening_squad(players, squad_rules, parsed, start_gw)
+    typer.echo(
+        f"  initial squad: {len(initial.picks)} players, "
+        f"bank {int(initial.bank) / 10:.1f}m, {season} GW{start_gw}-{end_gw}"
+    )
+
+    prediction_cache: dict[int, Any] = {}
+
+    def _inputs_for(gameweek: GameweekId) -> tuple[Any, Any, Any]:
+        """Predictions and candidates for one gameweek, computed once.
+
+        Cached so every policy is evaluated against byte-identical inputs — a
+        control that saw different predictions would not be a control.
+        """
+        cached = prediction_cache.get(int(gameweek))
+        if cached is not None:
+            result: tuple[Any, Any, Any] = cached
+            return result
+
+        cutoff = deadline_by_gw.get(int(gameweek))
+        if cutoff is None:
+            raise KeyError(f"no deadline for GW{gameweek}")
+
+        entities = players.select(
+            "player_code", "position", "team_id", "current_price", "web_name"
+        ).with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
+
+        team_stats = build_team_gameweek_stats(all_stats, players)
+        features = build_slice1_features(entities, player_stats=all_stats, team_stats=team_stats)
+        predictions = predict_frame(
+            features,
+            rules=scoring,
+            from_gameweek=gameweek,
+            data_cutoff=cutoff,
+            predicted_at=cutoff,
+            run_id="backtest",
+            code_version="backtest",
+            feature_set_version="slice1_v1",
+        )
+        by_code = {p.player_code: p for p in predictions}
+        candidates = [
+            Candidate(
+                player_code=p.player_code,
+                position=p.position,
+                team_id=TeamId(teams[p.player_code]),
+                price=prices[p.player_code],
+                prediction=p,
+            )
+            for p in predictions
+            if p.player_code in prices
+        ]
+        computed: tuple[Any, Any, Any] = (by_code, candidates, cutoff)
+        prediction_cache[int(gameweek)] = computed
+        return computed
+
+    gameweeks = [
+        GameweekId(gw)
+        for gw in range(start_gw, end_gw + 1)
+        if gw in deadline_by_gw and actual_points(all_stats, season=parsed, gameweek=GameweekId(gw))
+    ]
+
+    results: dict[str, Any] = {}
+    for policy_name, selector in POLICIES.items():
+        rng = random.Random(20260727)
+
+        def recommend_at(
+            squad_state: Any,
+            gameweek: GameweekId,
+            season_arg: Any,
+            _sel: Any = selector,
+            _rng: Any = rng,
+            _name: str = policy_name,
+        ) -> Any:
+            by_code, candidates, cutoff = _inputs_for(gameweek)
+            recommendation = run_policy(
+                squad_state,
+                selector=_sel,
+                candidates=candidates,
+                predictions=by_code,
+                rules=squad_rules,
+                entry_id=EntryId(0),
+                gameweek=gameweek,
+                generated_at=cutoff,
+                run_id=f"backtest-{_name}",
+                rng=_rng,
+                policy_name=_name,
+            )
+            return recommendation, by_code
+
+        typer.echo(f"  {policy_name} ...", nl=False)
+        results[policy_name] = walk_forward(
+            initial_squad=initial,
+            season=parsed,
+            gameweeks=gameweeks,
+            recommend_fn=recommend_at,
+            player_stats=all_stats,
+            prices=prices,
+            positions=positions,
+            teams=teams,
+        )
+        typer.echo(" done")
+
+    typer.echo("\n" + "─" * 72)
+    typer.echo(f"  BACKTEST — {season} GW{start_gw}-{end_gw}, {len(gameweeks)} gameweeks")
+    typer.echo("─" * 72 + "\n")
+    typer.echo(
+        f"  {'policy':<16}{'vs hold':>10}{'transfers':>11}"
+        f"{'win rate':>10}{'pts/xfer':>10}{'pred err':>10}"
+    )
+    typer.echo("  " + "-" * 67)
+    for policy_name, result in sorted(results.items(), key=lambda kv: -kv[1].total_incremental):
+        typer.echo(
+            f"  {policy_name:<16}{result.total_incremental:>+10d}{result.transfers_made:>11}"
+            f"{result.decision_win_rate:>9.0%}{result.mean_decision_delta:>+10.2f}"
+            f"{result.calibration_error:>10.2f}"
+        )
+
+    model = results["model"]
+    best_control = max(
+        (r.total_incremental for n, r in results.items() if n not in ("model", "hold")),
+        default=0,
+    )
+    typer.echo("\n" + "─" * 72)
+    if model.total_incremental > best_control:
+        typer.secho(
+            f"  Model beats every control by {model.total_incremental - best_control:+d} pts.",
+            fg=typer.colors.GREEN,
+        )
+    else:
+        typer.secho(
+            f"  Model does NOT beat the best control ({best_control:+d} pts). "
+            "The optimizer is adding nothing over a heuristic.",
+            fg=typer.colors.RED,
+        )
+    typer.echo(
+        "  Note: a single season and one starting squad is a small sample.\n"
+        "  Treat the ordering as a signal, not the margin."
+    )
+
+    worst = sorted((o for o in model.outcomes if o.transfer_made), key=lambda o: o.decision_delta)
+    if worst:
+        typer.echo("\n  Model's weakest decisions:")
+        for outcome in worst[:3]:
+            out_name = names.get(outcome.player_out, "?") if outcome.player_out else "?"
+            in_name = names.get(outcome.player_in, "?") if outcome.player_in else "?"
+            typer.echo(
+                f"    GW{outcome.gameweek:<3}{out_name[:20]:>21} -> {in_name[:20]:<21}"
+                f"{outcome.decision_delta:+4d} pts (predicted {outcome.predicted_gain:+.1f})"
+            )
+
+
+def _opening_squad(players: pl.DataFrame, squad_rules, season, gameweek):  # type: ignore[no-untyped-def]
+    """Build a realistic opening squad for a backtest.
+
+    **This is load-bearing for the metric, not setup detail.** An earlier version
+    picked the cheapest legal 15, which left 36m unspent and produced a hold
+    baseline of players who barely appear. Everything beats that, so the
+    backtest reported a 100% beat-hold rate and hundreds of incremental points —
+    a number that measured the starting squad, not the recommendations.
+
+    A credible baseline spends the budget the way a manager would: the most
+    expensive legal squad that fits, built from opening prices only, so it
+    encodes no knowledge of how the season actually went.
+    """
+    from xg_alonso.contracts.identifiers import TeamId
+    from xg_alonso.contracts.prediction import Position
+    from xg_alonso.contracts.squad import SquadPick, SquadState
+
+    budget = int(squad_rules.total_budget)
+    club_count: dict[int, int] = {}
+    chosen: dict[str, list[dict[str, Any]]] = {}
+
+    # Reserve a floor for the positions not yet filled, so spending early does
+    # not leave the squad unable to complete itself legally.
+    order = sorted(squad_rules.positions, key=lambda r: -r.squad_select)
+    remaining_slots = sum(r.squad_select for r in squad_rules.positions)
+    spend = 0
+
+    for rule in order:
+        pool = list(
+            players.filter(pl.col("position") == rule.position.value)
+            .sort("current_price", descending=True)
+            .iter_rows(named=True)
+        )
+        cheapest = min((int(r["current_price"]) for r in pool), default=40)
+        picked: list[dict[str, Any]] = []
+        for row in pool:
+            if len(picked) == rule.squad_select:
+                break
+            team = int(row["team_id"])
+            if club_count.get(team, 0) >= squad_rules.max_per_club:
+                continue
+            price = int(row["current_price"])
+            # Leave enough to fill every remaining slot at the cheapest price.
+            slots_after = remaining_slots - len(picked) - 1
+            if spend + price + slots_after * cheapest > budget:
+                continue
+            club_count[team] = club_count.get(team, 0) + 1
+            picked.append(row)
+            spend += price
+        if len(picked) < rule.squad_select:
+            raise typer.BadParameter(
+                f"could not fill {rule.position.value} within budget; "
+                f"only {len(picked)} of {rule.squad_select} affordable"
+            )
+        remaining_slots -= rule.squad_select
+        chosen[rule.position.value] = picked
+
+    starting = chosen["GKP"][:1] + chosen["DEF"][:4] + chosen["MID"][:4] + chosen["FWD"][:2]
+    bench = chosen["GKP"][1:] + chosen["DEF"][4:] + chosen["MID"][4:] + chosen["FWD"][2:]
+
+    picks, total = [], 0
+    for slot, row in enumerate(starting + bench, start=1):
+        price = TenthsOfMillion(int(row["current_price"]))
+        picks.append(
+            SquadPick(
+                player_code=PlayerCode(int(row["player_code"])),
+                position=Position(str(row["position"])),
+                team_id=TeamId(int(row["team_id"])),
+                purchase_price=price,
+                current_price=price,
+                selling_price=price,
+                squad_slot=slot,
+                is_captain=slot == 1,
+                is_vice_captain=slot == 2,
+            )
+        )
+        total += int(price)
+
+    return SquadState(
+        entry_id=EntryId(0),
+        gameweek=GameweekId(gameweek),
+        picks=tuple(picks),
+        bank=TenthsOfMillion(budget - total),
+        free_transfers=1,
+    )

@@ -13,6 +13,7 @@ are established here and relied upon everywhere downstream:
 
 from xg_alonso.pipelines.normalization.archive import (
     ArchiveNormalizationResult,
+    build_players_history,
     normalize_archive_season,
 )
 from xg_alonso.pipelines.normalization.normalize import (
@@ -44,6 +45,7 @@ __all__ = [
     "TEAMS_SCHEMA",
     "ArchiveNormalizationResult",
     "build_element_to_code_map",
+    "build_players_history",
     "conform",
     "empty_frame",
     "normalize_archive_season",

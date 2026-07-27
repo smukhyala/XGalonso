@@ -13,6 +13,7 @@ name = Package dependency direction
 type = layers
 layers =
     xg_alonso.cli : xg_alonso.pipelines
+    xg_alonso.evaluation
     xg_alonso.optimization : xg_alonso.explanations
     xg_alonso.prediction
     xg_alonso.features
@@ -34,6 +35,7 @@ source_modules =
     xg_alonso.prediction
     xg_alonso.optimization
     xg_alonso.explanations
+    xg_alonso.evaluation
     xg_alonso.cli
     xg_alonso.pipelines
 forbidden_modules =

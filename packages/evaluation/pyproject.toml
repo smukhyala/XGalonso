@@ -1,34 +1,23 @@
 [project]
-name = "xg-alonso-cli"
+name = "xg-alonso-evaluation"
 version = "0.1.0"
-description = "Composition root. Wires every package together behind the `xg` binary."
+description = "Walk-forward backtesting. Measures whether recommendations beat holding."
 requires-python = ">=3.12"
 dependencies = [
-    "typer>=0.15,<1",
     "polars>=1.20,<2",
     "xg-alonso-contracts",
     "xg-alonso-domain",
-    "xg-alonso-storage",
     "xg-alonso-features",
     "xg-alonso-prediction",
     "xg-alonso-optimization",
-    "xg-alonso-evaluation",
-    "xg-alonso-explanations",
-    "xg-alonso-ingestion",
-    "xg-alonso-normalization",
 ]
 
 [tool.uv.sources]
 xg-alonso-contracts = { workspace = true }
 xg-alonso-domain = { workspace = true }
-xg-alonso-storage = { workspace = true }
 xg-alonso-features = { workspace = true }
 xg-alonso-prediction = { workspace = true }
 xg-alonso-optimization = { workspace = true }
-xg-alonso-evaluation = { workspace = true }
-xg-alonso-explanations = { workspace = true }
-xg-alonso-ingestion = { workspace = true }
-xg-alonso-normalization = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -27,7 +27,12 @@ from xg_alonso.pipelines.normalization.schema import (
     empty_frame,
 )
 
-__all__ = ["ArchiveNormalizationResult", "normalize_archive_season"]
+__all__ = [
+    "MANAGER_POSITION",
+    "ArchiveNormalizationResult",
+    "build_players_history",
+    "normalize_archive_season",
+]
 
 #: Results are provisional until a match is finalised — bonus points in
 #: particular are recomputed after full time.
@@ -35,6 +40,15 @@ _SETTLEMENT_HOURS = 3
 
 #: Columns the archive publishes only from 2025/26. Absent seasons get null.
 _DEFENSIVE_COLUMNS = ("defensive_contribution",)
+
+#: Position label FPL uses for Assistant Managers — real managers (Guardiola,
+#: Emery, Moyes) sold as assets during the 2024/25 Assistant Manager chip. They
+#: are not footballers: they occupy a separate squad slot, are priced on a
+#: different scale (0.5-1.5m against a 3.8m player minimum), score through the
+#: ``mng_*`` rules rather than the player rules, and carry ids in their own
+#: 100000000+ range. Left in, the optimizer would happily buy Pep Guardiola as a
+#: midfielder.
+MANAGER_POSITION = "AM"
 
 
 @dataclass(frozen=True)
@@ -45,6 +59,7 @@ class ArchiveNormalizationResult:
     rows_in: int
     rows_dropped_unresolved_element: int
     rows_dropped_bad_kickoff: int
+    rows_dropped_managers: int
     has_defensive_contributions: bool
 
     @property
@@ -93,12 +108,17 @@ def normalize_archive_season(
             rows_in=0,
             rows_dropped_unresolved_element=0,
             rows_dropped_bad_kickoff=0,
+            rows_dropped_managers=0,
             has_defensive_contributions=False,
         )
 
     mapping = _element_to_code(players_raw)
 
     frame = merged_gw.with_columns(pl.col("element").cast(pl.Int64))
+    managers_dropped = 0
+    if "position" in frame.columns:
+        managers_dropped = int(frame.filter(pl.col("position") == MANAGER_POSITION).height)
+        frame = frame.filter(pl.col("position") != MANAGER_POSITION)
     joined = frame.join(mapping, on="element", how="left")
     unresolved = int(joined["player_code"].null_count())
     joined = joined.filter(pl.col("player_code").is_not_null())
@@ -133,5 +153,57 @@ def normalize_archive_season(
         rows_in=rows_in,
         rows_dropped_unresolved_element=unresolved,
         rows_dropped_bad_kickoff=bad_kickoff,
+        rows_dropped_managers=managers_dropped,
         has_defensive_contributions=has_defensive,
+    )
+
+
+def build_players_history(
+    merged_gw: pl.DataFrame, players_raw: pl.DataFrame, *, season: Season
+) -> pl.DataFrame:
+    """Per-season player attributes: position, club and opening price.
+
+    A backtest needs to know what a player cost and where he played *in that
+    season*, not today. ``merged_gw`` carries position, team and the price at
+    the time on every row, so the season's opening state is its earliest row.
+    """
+    if merged_gw.is_empty():
+        return pl.DataFrame(
+            schema={
+                "player_code": pl.Int64(),
+                "season": pl.Utf8(),
+                "web_name": pl.Utf8(),
+                "position": pl.Utf8(),
+                "team_name": pl.Utf8(),
+                "opening_price": pl.Int64(),
+            }
+        )
+
+    mapping = _element_to_code(players_raw)
+    players_only = (
+        merged_gw.filter(pl.col("position") != MANAGER_POSITION)
+        if "position" in merged_gw.columns
+        else merged_gw
+    )
+    joined = (
+        players_only.with_columns(pl.col("element").cast(pl.Int64))
+        .join(mapping, on="element", how="inner")
+        .with_columns(
+            pl.col("kickoff_time").cast(pl.Utf8).str.to_datetime(time_zone="UTC", strict=False)
+        )
+        .filter(pl.col("kickoff_time").is_not_null())
+        .sort(["player_code", "kickoff_time"])
+    )
+
+    return (
+        joined.group_by("player_code")
+        .agg(
+            pl.col("name").first().alias("web_name"),
+            pl.col("position").first().alias("position"),
+            pl.col("team").first().alias("team_name"),
+            pl.col("value").first().cast(pl.Int64).alias("opening_price"),
+        )
+        .with_columns(pl.lit(str(season)).alias("season"))
+        .select("player_code", "season", "web_name", "position", "team_name", "opening_price")
+        .sort("player_code")
     )

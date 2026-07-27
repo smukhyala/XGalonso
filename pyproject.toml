@@ -16,6 +16,7 @@ dependencies = [
     "xg-alonso-features",
     "xg-alonso-prediction",
     "xg-alonso-optimization",
+    "xg-alonso-evaluation",
     "xg-alonso-explanations",
     "xg-alonso-ingestion",
     "xg-alonso-normalization",
@@ -39,6 +40,7 @@ xg-alonso-storage = { workspace = true }
 xg-alonso-features = { workspace = true }
 xg-alonso-prediction = { workspace = true }
 xg-alonso-optimization = { workspace = true }
+xg-alonso-evaluation = { workspace = true }
 xg-alonso-explanations = { workspace = true }
 xg-alonso-ingestion = { workspace = true }
 xg-alonso-normalization = { workspace = true }
@@ -77,6 +79,7 @@ src = [
     "packages/feature_factory/src",
     "packages/prediction/src",
     "packages/optimization/src",
+    "packages/evaluation/src",
     "packages/explanations/src",
     "pipelines/ingestion/src",
     "pipelines/normalization/src",
@@ -138,6 +141,7 @@ mypy_path = [
     "packages/feature_factory/src",
     "packages/prediction/src",
     "packages/optimization/src",
+    "packages/evaluation/src",
     "packages/explanations/src",
     "pipelines/ingestion/src",
     "pipelines/normalization/src",
