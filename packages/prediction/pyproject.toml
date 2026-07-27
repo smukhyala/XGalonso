@@ -5,6 +5,8 @@ description = "Model training and inference. Consumes approved feature sets, nev
 requires-python = ">=3.12"
 dependencies = [
     "polars>=1.20,<2",
+    "numpy>=2.0",
+    "scikit-learn>=1.6",
     "xg-alonso-contracts",
     "xg-alonso-domain",
     "xg-alonso-features",

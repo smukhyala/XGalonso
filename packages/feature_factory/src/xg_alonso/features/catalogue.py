@@ -27,11 +27,11 @@ one goes through the same as-of generators the leakage harness verifies.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 import polars as pl
 
-from xg_alonso.features.generators import rolling_as_of, shrunk_rate_as_of
+from xg_alonso.features.generators import ROW_ID, stage_window
 
 __all__ = [
     "CATALOGUE_VERSION",
@@ -42,6 +42,19 @@ __all__ = [
 ]
 
 CATALOGUE_VERSION: Final[str] = "catalogue_v1"
+
+#: Per-90 scaling for rate features.
+_DENOMINATOR_SCALE: Final[float] = 90.0
+
+#: Aggregations the rolling generator supports, as Polars expressions.
+_ROLLING_AGGS: Final[dict[str, Any]] = {
+    "mean": lambda c: pl.col(c).mean(),
+    "sum": lambda c: pl.col(c).sum(),
+    "median": lambda c: pl.col(c).median(),
+    "min": lambda c: pl.col(c).min(),
+    "max": lambda c: pl.col(c).max(),
+    "std": lambda c: pl.col(c).std(),
+}
 
 GeneratorKind = Literal["rolling", "shrunk_rate"]
 
@@ -248,38 +261,67 @@ def build_catalogue(
             "A feature set that silently drops features is not the version it claims to be."
         )
 
-    frame = entities
+    # Staging — the join plus rank over each entity's visible past — dominates
+    # the cost and depends only on the window. Grouping specs by window turns
+    # ~130 stagings into ~9, which is the difference between a feature build
+    # that takes a second and a training set that takes an hour.
+    frame = entities.with_row_index(ROW_ID)
+    by_window: dict[int, list[FeatureSpec]] = {}
     for spec in chosen:
-        if spec.generator == "rolling":
-            frame = rolling_as_of(
-                frame,
-                player_stats,
-                entity_keys=["player_code"],
-                value_column=spec.source_column,
-                window=spec.window,
-                aggregation=spec.aggregation,
-                output_name=spec.name,
-                prediction_time_col=prediction_time_col,
-                order_col="kickoff_time",
-                min_periods=spec.min_periods,
-            )
-        else:
-            assert spec.denominator is not None  # guaranteed by __post_init__
-            frame = shrunk_rate_as_of(
-                frame,
-                player_stats,
-                entity_keys=["player_code"],
-                numerator=spec.source_column,
-                denominator=spec.denominator,
-                window=spec.window,
-                prior_strength=spec.prior_strength,
-                output_name=spec.name,
-                # A fixed prior of zero keeps the feature independent of the
-                # rest of the batch. An empirical prior pooled across entities
-                # with different cutoffs would leak, which the generator
-                # refuses outright.
-                prior_value=0.0,
-                prediction_time_col=prediction_time_col,
-                order_col="kickoff_time",
-            )
-    return frame
+        by_window.setdefault(spec.window, []).append(spec)
+
+    for window, window_specs in sorted(by_window.items()):
+        staged = stage_window(
+            entities,
+            player_stats,
+            entity_keys=["player_code"],
+            prediction_time_col=prediction_time_col,
+            available_time_col="available_time",
+            window=window,
+            order_col="kickoff_time",
+        )
+
+        aggregations: list[pl.Expr] = []
+        for spec in window_specs:
+            if spec.generator == "rolling":
+                aggregations.append(
+                    _ROLLING_AGGS[spec.aggregation](spec.source_column).alias(spec.name)
+                )
+                aggregations.append(pl.col(spec.source_column).count().alias(f"__n_{spec.name}"))
+            else:
+                assert spec.denominator is not None  # guaranteed by __post_init__
+                aggregations.append(pl.col(spec.source_column).sum().alias(f"__num_{spec.name}"))
+                aggregations.append(pl.col(spec.denominator).sum().alias(f"__den_{spec.name}"))
+
+        summary = staged.group_by(ROW_ID).agg(aggregations)
+
+        # Apply min_periods and shrinkage after the single aggregation pass.
+        post: list[pl.Expr] = []
+        for spec in window_specs:
+            if spec.generator == "rolling":
+                post.append(
+                    pl.when(pl.col(f"__n_{spec.name}") >= spec.min_periods)
+                    .then(pl.col(spec.name))
+                    .otherwise(None)
+                    .alias(spec.name)
+                )
+            else:
+                prior_mass = spec.prior_strength * _DENOMINATOR_SCALE
+                post.append(
+                    (
+                        pl.col(f"__num_{spec.name}").fill_null(0)
+                        / (pl.col(f"__den_{spec.name}").fill_null(0) + prior_mass)
+                        * _DENOMINATOR_SCALE
+                    ).alias(spec.name)
+                )
+        summary = summary.with_columns(post).select([ROW_ID, *[s.name for s in window_specs]])
+
+        frame = frame.join(summary, on=ROW_ID, how="left")
+
+        # A rate with no visible history is exactly the prior, which is zero
+        # here — never null, so cold-start players stay rankable.
+        rate_names = [s.name for s in window_specs if s.generator == "shrunk_rate"]
+        if rate_names:
+            frame = frame.with_columns([pl.col(n).fill_null(0.0) for n in rate_names])
+
+    return frame.sort(ROW_ID).drop(ROW_ID)

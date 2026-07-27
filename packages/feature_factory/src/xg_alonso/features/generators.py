@@ -26,12 +26,13 @@ __all__ = [
     "ROW_ID",
     "rolling_as_of",
     "shrunk_rate_as_of",
+    "stage_window",
 ]
 
 ROW_ID = "__xg_entity_row"
 
 
-def _stage(
+def stage_window(
     entities: pl.DataFrame,
     source: pl.DataFrame,
     *,
@@ -41,7 +42,13 @@ def _stage(
     window: int,
     order_col: str | None,
 ) -> pl.DataFrame:
-    """Attach each entity row's visible history, newest first, capped at ``window``."""
+    """Attach each entity row's visible history, newest first, capped at ``window``.
+
+    This is the expensive step — a join plus a rank over every entity row's
+    visible past. Exposed publicly so a caller building many features over the
+    *same* window can stage once and aggregate many times, rather than paying
+    for the join per feature.
+    """
     keys = list(entity_keys)
     missing = [c for c in [*keys, prediction_time_col] if c not in entities.columns]
     if missing:
@@ -109,7 +116,7 @@ def rolling_as_of(
         ``entities`` plus one feature column, in the original row order.
     """
     name = output_name or f"{value_column}_{aggregation}_{window}"
-    windowed = _stage(
+    windowed = stage_window(
         entities,
         source,
         entity_keys=entity_keys,
@@ -189,7 +196,7 @@ def shrunk_rate_as_of(
     if prior_strength < 0:
         raise ValueError("prior_strength must not be negative")
 
-    windowed = _stage(
+    windowed = stage_window(
         entities,
         source,
         entity_keys=entity_keys,

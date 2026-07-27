@@ -149,7 +149,7 @@ mypy_path = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["duckdb.*"]
+module = ["duckdb.*", "sklearn.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------

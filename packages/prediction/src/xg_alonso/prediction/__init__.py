@@ -16,11 +16,31 @@ from xg_alonso.prediction.baseline import (
     predict_frame,
     predict_player,
 )
+from xg_alonso.prediction.dataset import (
+    COMPONENT_LABELS,
+    TrainingData,
+    build_training_frame,
+)
+from xg_alonso.prediction.trained import (
+    TRAINED_MODEL_NAME,
+    TRAINED_MODEL_VERSION,
+    ComponentModels,
+    FoldReport,
+    train_component_models,
+)
 
 __all__ = [
     "BASELINE_NAME",
     "BASELINE_VERSION",
+    "COMPONENT_LABELS",
+    "TRAINED_MODEL_NAME",
+    "TRAINED_MODEL_VERSION",
+    "ComponentModels",
+    "FoldReport",
+    "TrainingData",
+    "build_training_frame",
     "estimator_fingerprint",
     "predict_frame",
     "predict_player",
+    "train_component_models",
 ]
