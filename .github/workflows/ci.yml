@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Every job runs offline. Feature builds must be reproducible from stored
+  # snapshots; a test that needs the live FPL API is a test that will flake.
+  XG_ALONSO_OFFLINE: "1"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync workspace
+        run: uv sync --all-packages --frozen
+
+      - name: Lint
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy .
+
+      - name: Import boundaries
+        run: uv run lint-imports --config .importlinter
+
+      - name: Banned strings
+        run: |
+          if grep -rniE '3000\+|thousands of candidate features|raw_understat_shots' \
+             --include='*.md' --include='*.py' .; then
+            echo "::error::A corrected claim has reappeared. See docs/README.md conventions."
+            exit 1
+          fi
+
+      - name: Tests
+        run: uv run pytest -m "not network" --cov --cov-report=term-missing
+
+      - name: Leakage suite
+        run: uv run pytest -m leakage -v

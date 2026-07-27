@@ -1,0 +1,103 @@
+[importlinter]
+root_packages =
+    xg_alonso
+include_external_packages = True
+
+# ---------------------------------------------------------------------------
+# The dependency direction from docs/architecture/01_repository_structure.md.
+# Modules on the same line are siblings and may not import each other.
+# ---------------------------------------------------------------------------
+
+[importlinter:contract:layers]
+name = Package dependency direction
+type = layers
+layers =
+    xg_alonso.cli : xg_alonso.pipelines
+    xg_alonso.optimization : xg_alonso.explanations
+    xg_alonso.prediction
+    xg_alonso.features
+    xg_alonso.domain : xg_alonso.storage
+    xg_alonso.contracts
+
+# ---------------------------------------------------------------------------
+# The storage adapter is the only place a database driver may appear. Without
+# this gate, four packages independently reached for duckdb during planning.
+# ---------------------------------------------------------------------------
+
+[importlinter:contract:duckdb-isolation]
+name = duckdb is importable only from the storage adapter
+type = forbidden
+source_modules =
+    xg_alonso.contracts
+    xg_alonso.domain
+    xg_alonso.features
+    xg_alonso.prediction
+    xg_alonso.optimization
+    xg_alonso.explanations
+    xg_alonso.cli
+    xg_alonso.pipelines
+forbidden_modules =
+    duckdb
+
+# ---------------------------------------------------------------------------
+# domain holds pure football and FPL rules. It must stay free of I/O so it can
+# be tested without a database, a network, or a dataframe engine.
+# ---------------------------------------------------------------------------
+
+[importlinter:contract:domain-purity]
+name = domain is pure — no I/O, no dataframe engine, no HTTP
+type = forbidden
+source_modules =
+    xg_alonso.domain
+forbidden_modules =
+    duckdb
+    polars
+    httpx
+    pyarrow
+    sqlite3
+
+# ---------------------------------------------------------------------------
+# contracts is the shared vocabulary. It must depend on nothing internal, or it
+# stops being a boundary and becomes a second implementation.
+#
+# polars IS permitted here: the storage protocols are typed in terms of frames,
+# and a dataframe type is legitimate shared vocabulary for an analytics system.
+# A database driver and an HTTP client are not — those are implementation
+# choices that belong behind an adapter, so they stay forbidden.
+# ---------------------------------------------------------------------------
+
+[importlinter:contract:contracts-independence]
+name = contracts depends on no other internal package
+type = forbidden
+source_modules =
+    xg_alonso.contracts
+forbidden_modules =
+    xg_alonso.domain
+    xg_alonso.storage
+    xg_alonso.features
+    xg_alonso.prediction
+    xg_alonso.optimization
+    xg_alonso.explanations
+    xg_alonso.pipelines
+    xg_alonso.cli
+    duckdb
+    httpx
+
+# ---------------------------------------------------------------------------
+# HTTP belongs to ingestion. Nothing downstream may reach for the network,
+# which is what keeps feature builds reproducible from stored snapshots.
+# ---------------------------------------------------------------------------
+
+[importlinter:contract:http-isolation]
+name = httpx is importable only from ingestion
+type = forbidden
+source_modules =
+    xg_alonso.contracts
+    xg_alonso.domain
+    xg_alonso.storage
+    xg_alonso.features
+    xg_alonso.prediction
+    xg_alonso.optimization
+    xg_alonso.explanations
+forbidden_modules =
+    httpx

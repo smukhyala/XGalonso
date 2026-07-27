@@ -1,0 +1,162 @@
+[project]
+name = "xg-alonso"
+version = "0.1.0"
+description = "ML-powered Fantasy Premier League decision system"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+
+# The root distribution is a thin aggregator. All real code lives in workspace
+# members under packages/, pipelines/ and apps/, which share the PEP 420
+# namespace package `xg_alonso`.
+dependencies = [
+    "xg-alonso-contracts",
+    "xg-alonso-domain",
+    "xg-alonso-storage",
+    "xg-alonso-features",
+    "xg-alonso-prediction",
+    "xg-alonso-optimization",
+    "xg-alonso-explanations",
+    "xg-alonso-ingestion",
+    "xg-alonso-cli",
+]
+
+[project.scripts]
+xg = "xg_alonso.cli.main:app"
+
+# ---------------------------------------------------------------------------
+# uv workspace
+# ---------------------------------------------------------------------------
+
+[tool.uv.workspace]
+members = ["packages/*", "pipelines/*", "apps/cli"]
+
+[tool.uv.sources]
+xg-alonso-contracts = { workspace = true }
+xg-alonso-domain = { workspace = true }
+xg-alonso-storage = { workspace = true }
+xg-alonso-features = { workspace = true }
+xg-alonso-prediction = { workspace = true }
+xg-alonso-optimization = { workspace = true }
+xg-alonso-explanations = { workspace = true }
+xg-alonso-ingestion = { workspace = true }
+xg-alonso-cli = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "hypothesis>=6.120",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "import-linter>=2.1",
+    "pre-commit>=4.0",
+    "respx>=0.22",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = [
+    "packages/data_contracts/src",
+    "packages/domain/src",
+    "packages/storage/src",
+    "packages/feature_factory/src",
+    "packages/prediction/src",
+    "packages/optimization/src",
+    "packages/explanations/src",
+    "pipelines/ingestion/src",
+    "apps/cli/src",
+    "tests",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "DTZ",  # flake8-datetimez  -- DTZ003 is what actually catches datetime.utcnow()
+    "T20",  # flake8-print
+    "PT",   # flake8-pytest-style
+    "RET",  # flake8-return
+    "SIM",  # flake8-simplify
+    "TID",  # flake8-tidy-imports
+    "PTH",  # flake8-use-pathlib
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",   # line length is handled by the formatter
+    "B008",   # typer uses function calls in argument defaults by design
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["T20"]
+"**/tests/**" = ["T20"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+known-first-party = ["xg_alonso"]
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_no_return = true
+disallow_untyped_defs = true
+disallow_any_unimported = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = [
+    "packages/data_contracts/src",
+    "packages/domain/src",
+    "packages/storage/src",
+    "packages/feature_factory/src",
+    "packages/prediction/src",
+    "packages/optimization/src",
+    "packages/explanations/src",
+    "pipelines/ingestion/src",
+    "apps/cli/src",
+]
+
+[[tool.mypy.overrides]]
+module = ["duckdb.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests", "packages", "pipelines", "apps"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "leakage: point-in-time leakage tests (must include a negative control)",
+    "golden: golden-fixture comparison tests",
+    "e2e: end-to-end slice tests",
+    "network: requires live network access (excluded by default in CI)",
+]
+filterwarnings = ["error"]

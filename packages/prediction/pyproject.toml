@@ -1,0 +1,23 @@
+[project]
+name = "xg-alonso-prediction"
+version = "0.1.0"
+description = "Model training and inference. Consumes approved feature sets, never raw data."
+requires-python = ">=3.12"
+dependencies = [
+    "polars>=1.20,<2",
+    "xg-alonso-contracts",
+    "xg-alonso-domain",
+    "xg-alonso-features",
+]
+
+[tool.uv.sources]
+xg-alonso-contracts = { workspace = true }
+xg-alonso-domain = { workspace = true }
+xg-alonso-features = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xg_alonso"]
