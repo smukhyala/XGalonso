@@ -1,0 +1,17 @@
+Database Schema
+
+Core tables:
+players
+teams
+fixtures
+player_snapshots
+player_match_stats
+feature_registry
+feature_values
+embeddings
+clusters
+model_registry
+recommendations
+transfer_packages
+wildcard_runs
+knowledge_objects
