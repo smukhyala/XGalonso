@@ -18,6 +18,7 @@ dependencies = [
     "xg-alonso-optimization",
     "xg-alonso-explanations",
     "xg-alonso-ingestion",
+    "xg-alonso-normalization",
     "xg-alonso-cli",
 ]
 
@@ -40,6 +41,7 @@ xg-alonso-prediction = { workspace = true }
 xg-alonso-optimization = { workspace = true }
 xg-alonso-explanations = { workspace = true }
 xg-alonso-ingestion = { workspace = true }
+xg-alonso-normalization = { workspace = true }
 xg-alonso-cli = { workspace = true }
 
 [dependency-groups]
@@ -77,6 +79,7 @@ src = [
     "packages/optimization/src",
     "packages/explanations/src",
     "pipelines/ingestion/src",
+    "pipelines/normalization/src",
     "apps/cli/src",
     "tests",
 ]
@@ -137,6 +140,7 @@ mypy_path = [
     "packages/optimization/src",
     "packages/explanations/src",
     "pipelines/ingestion/src",
+    "pipelines/normalization/src",
     "apps/cli/src",
 ]
 

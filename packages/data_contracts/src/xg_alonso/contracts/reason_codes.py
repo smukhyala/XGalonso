@@ -58,22 +58,20 @@ REASON_TEMPLATES: Final[dict[ReasonCode, str]] = {
         "{opponent_strength:.2f} against a league average of {league_average:.2f}."
     ),
     ReasonCode.EXPECTED_MINUTES_SECURE: (
-        "Minutes look secure: {p_start:.0%} chance of starting, {expected_minutes:.0f} "
-        "expected minutes."
+        "Minutes look secure: {p_start:.0%} chance of starting, around "
+        "{expected_minutes:.0f} minutes expected."
     ),
     ReasonCode.EXPECTED_MINUTES_DECLINE: (
-        "Minutes are trending down: {p_start:.0%} chance of starting, "
-        "{expected_minutes:.0f} expected minutes."
+        "Minutes are a concern: {p_start:.0%} chance of starting, around "
+        "{expected_minutes:.0f} minutes expected."
     ),
     ReasonCode.UNDERLYING_STATS_IMPROVING: (
-        "Underlying numbers are improving: {recent_xgi:.2f} expected goal involvements "
-        "per 90 over the last {window:.0f} appearances, against a baseline of "
-        "{baseline_xgi:.2f}."
+        "Stronger underlying numbers: {recent_xgi:.2f} projected goal involvements "
+        "against {baseline_xgi:.2f} for the player leaving."
     ),
     ReasonCode.UNDERLYING_STATS_DECLINING: (
-        "Underlying numbers are declining: {recent_xgi:.2f} expected goal involvements "
-        "per 90 over the last {window:.0f} appearances, against a baseline of "
-        "{baseline_xgi:.2f}."
+        "Weaker underlying numbers: {recent_xgi:.2f} projected goal involvements "
+        "against {baseline_xgi:.2f} for the alternative."
     ),
     ReasonCode.AVAILABILITY_RISK_HIGH: (
         "Availability is in doubt: reported {chance_of_playing:.0%} chance of playing."

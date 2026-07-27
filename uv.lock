@@ -15,6 +15,7 @@ members = [
     "xg-alonso-explanations",
     "xg-alonso-features",
     "xg-alonso-ingestion",
+    "xg-alonso-normalization",
     "xg-alonso-optimization",
     "xg-alonso-prediction",
     "xg-alonso-storage",
@@ -1023,6 +1024,7 @@ dependencies = [
     { name = "xg-alonso-explanations" },
     { name = "xg-alonso-features" },
     { name = "xg-alonso-ingestion" },
+    { name = "xg-alonso-normalization" },
     { name = "xg-alonso-optimization" },
     { name = "xg-alonso-prediction" },
     { name = "xg-alonso-storage" },
@@ -1048,6 +1050,7 @@ requires-dist = [
     { name = "xg-alonso-explanations", editable = "packages/explanations" },
     { name = "xg-alonso-features", editable = "packages/feature_factory" },
     { name = "xg-alonso-ingestion", editable = "pipelines/ingestion" },
+    { name = "xg-alonso-normalization", editable = "pipelines/normalization" },
     { name = "xg-alonso-optimization", editable = "packages/optimization" },
     { name = "xg-alonso-prediction", editable = "packages/prediction" },
     { name = "xg-alonso-storage", editable = "packages/storage" },
@@ -1077,6 +1080,7 @@ dependencies = [
     { name = "xg-alonso-explanations" },
     { name = "xg-alonso-features" },
     { name = "xg-alonso-ingestion" },
+    { name = "xg-alonso-normalization" },
     { name = "xg-alonso-optimization" },
     { name = "xg-alonso-prediction" },
     { name = "xg-alonso-storage" },
@@ -1091,6 +1095,7 @@ requires-dist = [
     { name = "xg-alonso-explanations", editable = "packages/explanations" },
     { name = "xg-alonso-features", editable = "packages/feature_factory" },
     { name = "xg-alonso-ingestion", editable = "pipelines/ingestion" },
+    { name = "xg-alonso-normalization", editable = "pipelines/normalization" },
     { name = "xg-alonso-optimization", editable = "packages/optimization" },
     { name = "xg-alonso-prediction", editable = "packages/prediction" },
     { name = "xg-alonso-storage", editable = "packages/storage" },
@@ -1175,6 +1180,25 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "polars", specifier = ">=1.20,<2" },
+    { name = "xg-alonso-contracts", editable = "packages/data_contracts" },
+    { name = "xg-alonso-domain", editable = "packages/domain" },
+    { name = "xg-alonso-storage", editable = "packages/storage" },
+]
+
+[[package]]
+name = "xg-alonso-normalization"
+version = "0.1.0"
+source = { editable = "pipelines/normalization" }
+dependencies = [
+    { name = "polars" },
+    { name = "xg-alonso-contracts" },
+    { name = "xg-alonso-domain" },
+    { name = "xg-alonso-storage" },
+]
+
+[package.metadata]
+requires-dist = [
     { name = "polars", specifier = ">=1.20,<2" },
     { name = "xg-alonso-contracts", editable = "packages/data_contracts" },
     { name = "xg-alonso-domain", editable = "packages/domain" },

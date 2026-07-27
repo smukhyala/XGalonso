@@ -20,7 +20,8 @@ from xg_alonso.contracts import (
     TableStore,
     TimeSource,
 )
-from xg_alonso.storage import DuckDBTableStore, FileSystemBronzeStore
+from xg_alonso.storage import FileSystemBronzeStore
+from xg_alonso.storage.duckdb_store import DuckDBTableStore
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 

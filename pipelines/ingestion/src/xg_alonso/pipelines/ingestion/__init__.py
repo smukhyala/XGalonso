@@ -31,10 +31,17 @@ from xg_alonso.pipelines.ingestion.fpl_client import (
     OfflineError,
     derive_available_time,
 )
+from xg_alonso.pipelines.ingestion.history import (
+    SOURCE_ELEMENT_SUMMARY,
+    ingest_element_summaries,
+    read_element_summaries,
+    season_end_time,
+)
 
 __all__ = [
     "FPL_BASE_URL",
     "SOURCE_BOOTSTRAP",
+    "SOURCE_ELEMENT_SUMMARY",
     "SOURCE_FIXTURES",
     "FplApiClient",
     "FplResponse",
@@ -45,7 +52,10 @@ __all__ = [
     "detect_preseason_hazards",
     "git_manifest",
     "ingest_bootstrap",
+    "ingest_element_summaries",
     "load_local_payload",
     "load_rules_from_snapshot",
+    "read_element_summaries",
     "read_snapshot_payload",
+    "season_end_time",
 ]

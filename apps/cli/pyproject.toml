@@ -14,6 +14,7 @@ dependencies = [
     "xg-alonso-optimization",
     "xg-alonso-explanations",
     "xg-alonso-ingestion",
+    "xg-alonso-normalization",
 ]
 
 [tool.uv.sources]
@@ -25,6 +26,7 @@ xg-alonso-prediction = { workspace = true }
 xg-alonso-optimization = { workspace = true }
 xg-alonso-explanations = { workspace = true }
 xg-alonso-ingestion = { workspace = true }
+xg-alonso-normalization = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
