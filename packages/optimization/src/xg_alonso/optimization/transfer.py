@@ -19,7 +19,7 @@ the game would reject costs the user a transfer to discover.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
@@ -49,6 +49,11 @@ from xg_alonso.explanations.reasons import (
     build_no_move_reasons,
     build_transfer_reasons,
 )
+from xg_alonso.optimization.horizon import (
+    DEFAULT_DISCOUNT,
+    HorizonValue,
+    value_over_horizon,
+)
 from xg_alonso.optimization.lineup import starting_xi_points
 
 __all__ = [
@@ -59,6 +64,7 @@ __all__ = [
     "best_single_transfer",
     "build_transfer_board",
     "hold_expected_points",
+    "horizon_valued",
     "rank_single_transfers",
 ]
 
@@ -110,6 +116,78 @@ class TransferCandidate:
     @property
     def bank_after(self) -> TenthsOfMillion:
         return TenthsOfMillion(self.out_pick.selling_price - self.incoming.price)
+
+
+def horizon_valued(
+    predictions: dict[PlayerCode, PlayerPrediction],
+    projections: Mapping[PlayerCode, Sequence[float]],
+    *,
+    discount: float = DEFAULT_DISCOUNT,
+) -> tuple[dict[PlayerCode, PlayerPrediction], dict[PlayerCode, HorizonValue]]:
+    """Re-price every prediction over the horizon rather than the next gameweek.
+
+    **Why substitute the predictions rather than change the search.** A transfer
+    is chosen by scoring the eleven a squad would field, and that scoring runs
+    through `starting_xi_points`, captaincy and the bench in several places. If
+    the horizon were threaded through each of them, some paths would use it and
+    others would not, and the ones that did not would be exactly the subtle
+    cases — a captain chosen on next week while the squad was chosen on five.
+
+    Swapping the number every one of those paths already reads is a single
+    substitution point that cannot be partially applied. The breakdown is scaled
+    with the total so the two still agree, which the contract enforces.
+
+    Returns:
+        Re-priced predictions, and the horizon detail for explanation.
+    """
+    repriced: dict[PlayerCode, PlayerPrediction] = {}
+    values: dict[PlayerCode, HorizonValue] = {}
+
+    for code, prediction in predictions.items():
+        weekly = projections.get(code)
+        if not weekly:
+            repriced[code] = prediction
+            continue
+
+        value = value_over_horizon(weekly, discount=discount)
+        values[code] = value
+
+        base = prediction.expected_points
+        # Scale rather than replace, so the component breakdown keeps its shape
+        # and continues to sum to the total it explains.
+        factor = (value.total / base) if abs(base) > 1e-9 else 0.0
+        breakdown = prediction.breakdown
+        repriced[code] = prediction.model_copy(
+            update={
+                "breakdown": breakdown.model_copy(
+                    update={
+                        field: getattr(breakdown, field) * factor
+                        for field in (
+                            "appearance",
+                            "goals",
+                            "assists",
+                            "clean_sheets",
+                            "goals_conceded",
+                            "saves",
+                            "cards",
+                            "own_goals",
+                            "penalties",
+                            "defensive_contribution",
+                            "bonus",
+                        )
+                    }
+                ),
+                "expected_points": value.total,
+                # Uncertainty grows with the horizon: a five-week projection is
+                # a longer extrapolation from the same features, and pricing it
+                # as confidently as next week's would be the whole reason a
+                # horizon objective goes wrong.
+                "expected_points_sd": prediction.expected_points_sd
+                * (1.0 + 0.1 * (value.horizon - 1)),
+            }
+        )
+
+    return repriced, values
 
 
 def hold_expected_points(

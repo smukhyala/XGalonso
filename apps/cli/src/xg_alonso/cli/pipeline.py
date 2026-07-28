@@ -15,6 +15,7 @@ The workflow proves every contract boundary the vertical slice exists to prove::
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -40,15 +41,19 @@ from xg_alonso.domain.purchase_prices import parse_transfer_log, reconstruct_pur
 from xg_alonso.domain.rules import SquadRules
 from xg_alonso.domain.scoring import ScoringRules
 from xg_alonso.explanations.reasons import PopulationStats
-from xg_alonso.features.career import build_career_features
-from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
-from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
+from xg_alonso.features.assemble import build_model_features
+from xg_alonso.features.catalogue import CATALOGUE_VERSION
+from xg_alonso.features.opponent import build_opponent_strength
 from xg_alonso.features.slice1 import (
     SLICE1_FEATURE_SET_VERSION,
     build_slice1_features,
     build_team_gameweek_stats,
 )
-from xg_alonso.optimization.transfer import Candidate, best_single_transfer
+from xg_alonso.optimization.transfer import (
+    Candidate,
+    best_single_transfer,
+    horizon_valued,
+)
 from xg_alonso.pipelines.ingestion.fpl_client import FplApiClient
 from xg_alonso.pipelines.normalization import (
     normalize_fixtures,
@@ -213,6 +218,156 @@ def build_entities(context: SliceContext, *, cutoff: datetime) -> pl.DataFrame:
     return entities.join(next_fixture, on="team_id", how="left")
 
 
+def fixtures_by_gameweek(
+    context: SliceContext, gameweeks: Sequence[GameweekId]
+) -> dict[int, pl.DataFrame]:
+    """The fixture each club plays in each of the given gameweeks.
+
+    Returned per gameweek rather than as one frame because the horizon needs to
+    ask "who does this club play in week three", and a single next-fixture join
+    can only answer "who do they play next".
+    """
+    fixtures = context.fixtures
+    by_gameweek: dict[int, pl.DataFrame] = {}
+    if fixtures.is_empty() or "gameweek_id" not in fixtures.columns:
+        return by_gameweek
+
+    for gameweek in gameweeks:
+        week = fixtures.filter(pl.col("gameweek_id") == int(gameweek))
+        if week.is_empty():
+            continue
+        home = week.select(
+            pl.col("home_team_id").alias("team_id"),
+            pl.col("away_team_id").alias("opponent_team_id"),
+            pl.lit(True).alias("was_home"),
+        )
+        away = week.select(
+            pl.col("away_team_id").alias("team_id"),
+            pl.col("home_team_id").alias("opponent_team_id"),
+            pl.lit(False).alias("was_home"),
+        )
+        by_gameweek[int(gameweek)] = pl.concat([home, away]).unique(
+            subset=["team_id"], keep="first", maintain_order=True
+        )
+    return by_gameweek
+
+
+def horizon_projections(
+    context: SliceContext,
+    *,
+    from_gameweek: GameweekId,
+    horizon: int,
+    generated_at: datetime,
+    run_id: str,
+    code_version: str,
+    models: ComponentModels | None = None,
+) -> dict[PlayerCode, list[float]]:
+    """Expected points per player for each gameweek in the horizon.
+
+    **The catalogue is built once, not once per gameweek.** Every player feature
+    is as of the same cutoff — today's deadline — so the only thing that differs
+    between week one and week five is which club they face. Rebuilding the whole
+    catalogue five times would cost five times as much to produce four columns
+    of difference, so the fixture columns are swapped and the opponent features
+    rebuilt against them instead.
+
+    Returns:
+        Player code to a list of expected points, nearest gameweek first. A
+        player whose club has no fixture in a given week gets zero for it, which
+        is the correct projection for a blank.
+    """
+    cutoff = context.deadline_for(from_gameweek)
+    base = build_entities(context, cutoff=cutoff)
+    weeks = [GameweekId(int(from_gameweek) + offset) for offset in range(horizon)]
+    schedule = fixtures_by_gameweek(context, weeks)
+    opponent_strength = build_opponent_strength(context.player_stats)
+
+    projections: dict[PlayerCode, list[float]] = {}
+    for index, gameweek in enumerate(weeks):
+        week_fixtures = schedule.get(int(gameweek))
+        if week_fixtures is None and index > 0:
+            # No fixture published for this week. Blanks are real — a club can
+            # genuinely not play — so this is a zero rather than a gap to fill.
+            for values in projections.values():
+                values.append(0.0)
+            continue
+
+        entities = base
+        if week_fixtures is not None:
+            entities = base.drop("opponent_team_id", "was_home").join(
+                week_fixtures, on="team_id", how="left"
+            )
+
+        predictions = _predict_entities(
+            context,
+            entities,
+            gameweek=gameweek,
+            cutoff=cutoff,
+            generated_at=generated_at,
+            run_id=run_id,
+            code_version=code_version,
+            models=models,
+            opponent_strength=opponent_strength,
+        )
+        for prediction in predictions:
+            projections.setdefault(prediction.player_code, []).append(prediction.expected_points)
+
+    # A player missing from a later week's frame would otherwise have a short
+    # list, and a ragged horizon cannot be discounted coherently.
+    length = horizon
+    for values in projections.values():
+        while len(values) < length:
+            values.append(0.0)
+    return projections
+
+
+def _predict_entities(
+    context: SliceContext,
+    entities: pl.DataFrame,
+    *,
+    gameweek: GameweekId,
+    cutoff: datetime,
+    generated_at: datetime,
+    run_id: str,
+    code_version: str,
+    models: ComponentModels | None,
+    opponent_strength: pl.DataFrame,
+) -> list[PlayerPrediction]:
+    """Predict one gameweek from a prepared entity frame."""
+    if models is not None:
+        features = build_model_features(
+            entities, player_stats=context.player_stats, opponent_strength=opponent_strength
+        )
+        return predict_with_models(
+            features,
+            models=models,
+            rules=context.scoring,
+            from_gameweek=gameweek,
+            data_cutoff=cutoff,
+            predicted_at=generated_at,
+            run_id=run_id,
+            code_version=code_version,
+            feature_set_version=CATALOGUE_VERSION,
+            with_evidence=False,
+        )
+
+    team_stats = build_team_gameweek_stats(context.player_stats, context.players)
+    features = build_slice1_features(
+        entities, player_stats=context.player_stats, team_stats=team_stats
+    )
+    return predict_frame(
+        features,
+        rules=context.scoring,
+        from_gameweek=gameweek,
+        data_cutoff=cutoff,
+        predicted_at=generated_at,
+        run_id=run_id,
+        code_version=code_version,
+        feature_set_version=SLICE1_FEATURE_SET_VERSION,
+        with_evidence=False,
+    )
+
+
 def load_squad_file(path: Path) -> dict[str, Any]:
     """Load a squad from disk.
 
@@ -316,6 +471,7 @@ def recommend(
     horizon_gameweeks: int = 1,
     models: ComponentModels | None = None,
     form_signals_path: Path | None = None,
+    horizon: int = 1,
 ) -> tuple[TransferRecommendation, dict[PlayerCode, PlayerPrediction]]:
     """Run the full slice: features, predictions, and the best legal transfer.
 
@@ -334,14 +490,7 @@ def recommend(
         # The trained path needs the full catalogue plus opponent context, and
         # the fixture — who each player faces — which is published before the
         # deadline and is therefore an input rather than a leak.
-        features = build_catalogue(entities, player_stats=context.player_stats)
-        features = build_opponent_features(
-            features, opponent_strength=build_opponent_strength(context.player_stats)
-        )
-        # Career-length evidence. Every catalogue window is measured in
-        # appearances and tops out at twenty, so a player with four elite
-        # seasons and one with a single hot streak look identical inside it.
-        features = build_career_features(features, player_stats=context.player_stats)
+        features = build_model_features(entities, player_stats=context.player_stats)
         predictions = predict_with_models(
             features,
             models=models,
@@ -413,10 +562,36 @@ def recommend(
     # why it is assembled here rather than inside the optimizer.
     population = PopulationStats.from_predictions(predictions, prices=price_by_code)
 
+    # Score over a horizon when one is asked for. A transfer is permanent and
+    # paid for once, so judging it on the next gameweek alone undervalues buying
+    # a better player and overvalues chasing a single favourable fixture.
+    scoring = by_code
+    if horizon > 1:
+        projections = horizon_projections(
+            context,
+            from_gameweek=gameweek,
+            horizon=horizon,
+            generated_at=generated_at,
+            run_id=run_id,
+            code_version=code_version,
+            models=models,
+        )
+        scoring, _ = horizon_valued(by_code, projections)
+        candidates = [
+            Candidate(
+                player_code=candidate.player_code,
+                position=candidate.position,
+                team_id=candidate.team_id,
+                price=candidate.price,
+                prediction=scoring.get(candidate.player_code, candidate.prediction),
+            )
+            for candidate in candidates
+        ]
+
     recommendation = best_single_transfer(
         squad,
         candidates=candidates,
-        predictions=by_code,
+        predictions=scoring,
         rules=context.squad_rules,
         entry_id=entry_id,
         gameweek=gameweek,

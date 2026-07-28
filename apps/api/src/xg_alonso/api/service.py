@@ -56,7 +56,7 @@ from xg_alonso.explanations.lineup_diff import compare_lineups, selection_from_s
 from xg_alonso.explanations.player import ArchetypeVerdict, Comparable, explain_squad
 from xg_alonso.explanations.reasons import PopulationStats
 from xg_alonso.features.archetypes import ArchetypeModel, build_archetypes
-from xg_alonso.features.career import build_career_features
+from xg_alonso.features.assemble import build_model_features
 from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
 from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
 from xg_alonso.features.slice1 import (
@@ -184,15 +184,7 @@ class DecisionService:
         run_id = f"api-{uuid.uuid4().hex[:12]}"
 
         if self._models is not None:
-            features = build_catalogue(entities, player_stats=self._context.player_stats)
-            features = build_opponent_features(
-                features,
-                opponent_strength=build_opponent_strength(self._context.player_stats),
-            )
-            # Career-length evidence. Every catalogue window is measured in
-            # appearances and tops out at twenty, so a player with four elite
-            # seasons and one with a single hot streak look identical inside it.
-            features = build_career_features(features, player_stats=self._context.player_stats)
+            features = build_model_features(entities, player_stats=self._context.player_stats)
             predictions = predict_with_models(
                 features,
                 models=self._models,
@@ -732,7 +724,9 @@ class DecisionService:
             caveat=self._ARCHETYPE_CAVEAT,
         )
 
-    def recommend(self, entry_id: int, *, squad_file: Path | None = None) -> RecommendationResponse:
+    def recommend(
+        self, entry_id: int, *, squad_file: Path | None = None, horizon: int = 1
+    ) -> RecommendationResponse:
         from xg_alonso.api.main import RecommendationResponse
 
         state = self._load_squad(entry_id, squad_file)
@@ -745,6 +739,7 @@ class DecisionService:
             code_version="api",
             generated_at=utc_now(),
             models=self._models,
+            horizon=horizon,
         )
         rows = self._player_rows()
 

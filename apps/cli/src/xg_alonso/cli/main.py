@@ -1286,8 +1286,8 @@ def build_squad_command(
 def _predict_all(context: SliceContext, gameweek: GameweekId, models: object | None):  # type: ignore[no-untyped-def]
     """Predict every player, via the trained models when supplied."""
     from xg_alonso.cli.pipeline import build_entities
-    from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
-    from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
+    from xg_alonso.features.assemble import build_model_features
+    from xg_alonso.features.catalogue import CATALOGUE_VERSION
     from xg_alonso.features.slice1 import build_slice1_features, build_team_gameweek_stats
     from xg_alonso.prediction import predict_with_models
     from xg_alonso.prediction.baseline import predict_frame
@@ -1296,10 +1296,7 @@ def _predict_all(context: SliceContext, gameweek: GameweekId, models: object | N
     entities = build_entities(context, cutoff=cutoff)
 
     if models is not None:
-        features = build_catalogue(entities, player_stats=context.player_stats)
-        features = build_opponent_features(
-            features, opponent_strength=build_opponent_strength(context.player_stats)
-        )
+        features = build_model_features(entities, player_stats=context.player_stats)
         return predict_with_models(
             features,
             models=models,  # type: ignore[arg-type]

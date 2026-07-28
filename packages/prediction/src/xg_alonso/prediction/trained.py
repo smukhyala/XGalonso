@@ -360,8 +360,17 @@ def train_component_models(
         if train_rows.is_empty() or validate_rows.is_empty():
             continue
 
-        x_train = _matrix(train_rows, feature_columns)
-        x_validate = _matrix(validate_rows, feature_columns)
+        # Usability is a property of *this fold's* rows, not of the whole frame.
+        # A career feature is null for every player before their first completed
+        # season, and `defensive_contribution` is null for every season but one —
+        # so an early fold can hold an all-null column while the full frame does
+        # not. Checking globally and fitting per fold was the gap that let the
+        # binner crash survive the first fix.
+        fold_columns = usable_features(train_rows, feature_columns)
+        if not fold_columns:
+            continue
+        x_train = _matrix(train_rows, fold_columns)
+        x_validate = _matrix(validate_rows, fold_columns)
 
         for label in label_columns:
             y_train = train_rows[label].to_numpy().astype(np.float64)

@@ -17,6 +17,7 @@ from xg_alonso.features.archetypes import (
     PlayerArchetype,
     build_archetypes,
 )
+from xg_alonso.features.assemble import build_model_features
 from xg_alonso.features.career import (
     CAREER_FEATURES,
     CAREER_VERSION,
@@ -73,6 +74,7 @@ __all__ = [
     "build_archetypes",
     "build_career_features",
     "build_catalogue",
+    "build_model_features",
     "build_opponent_features",
     "build_opponent_strength",
     "build_slice1_features",

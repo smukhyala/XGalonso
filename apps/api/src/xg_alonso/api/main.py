@@ -410,10 +410,22 @@ def recommend(
     entry_id: int,
     service: ServiceDep,
     squad_file: Annotated[Path | None, Query()] = None,
+    horizon: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=10,
+            description=(
+                "Gameweeks to judge the transfer over. A transfer is permanent "
+                "and paid for once, so scoring it on the next gameweek alone "
+                "undervalues buying a better player."
+            ),
+        ),
+    ] = 1,
 ) -> RecommendationResponse:
     """The best legal single transfer, or an explicit hold."""
     try:
-        return service.recommend(entry_id, squad_file=squad_file)
+        return service.recommend(entry_id, squad_file=squad_file, horizon=horizon)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

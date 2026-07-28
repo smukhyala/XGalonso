@@ -82,6 +82,8 @@ export default function FeaturesPage() {
         <>
           <Summary data={data} />
 
+          <Findings data={data} />
+
           <Filters
             labels={data.labels}
             weights={data.label_weights}
@@ -169,6 +171,128 @@ function Stat({ label, value }: { label: string; value: string }) {
         {value}
       </dd>
     </div>
+  );
+}
+
+/**
+ * What the run actually found, before the table of numbers.
+ *
+ * The ranking was accurate and arrived without a thesis: eighty rows of column
+ * names, ordered, with no statement of what the ordering *meant*. A reader had
+ * to reverse-engineer the finding from the data, which is work the page should
+ * have done.
+ *
+ * Every figure here is computed from the response rather than written down, so
+ * the summary cannot drift from the table beneath it.
+ */
+function Findings({ data }: { data: ImportanceResponse }) {
+  const ranked = data.features;
+  if (ranked.length === 0) return null;
+
+  const top = ranked[0];
+  const topFamily = Object.entries(data.families).sort((a, b) => b[1] - a[1])[0];
+  const total = Object.values(data.families).reduce((sum, value) => sum + value, 0);
+  const familyShare = topFamily && total > 0 ? topFamily[1] / total : 0;
+
+  // How concentrated the ranking is: what share of all measured importance the
+  // top five features carry. A high number means a few features decide
+  // everything, which is itself the finding.
+  const headSum = ranked.slice(0, 5).reduce((sum, f) => sum + Math.max(f.importance, 0), 0);
+  const allSum = ranked.reduce((sum, f) => sum + Math.max(f.importance, 0), 0);
+  const concentration = allSum > 0 ? headSum / allSum : 0;
+
+  const deadShare = data.features_measured
+    ? data.features_with_no_effect / data.features_measured
+    : 0;
+
+  const unstable = ranked.filter(
+    (f) => f.rank_stability !== null && f.rank_stability > data.features_measured / 8,
+  ).length;
+
+  return (
+    <section className="rise mt-14" style={{ animationDelay: "0.12s" }}>
+      <p className="eyebrow">What this run found</p>
+
+      <div
+        className="mt-5 max-w-3xl space-y-4 text-[15px] leading-relaxed"
+        style={{ color: "var(--color-muted)" }}
+      >
+        <p>
+          Each of the {data.features_measured} features was shuffled in turn across{" "}
+          {data.folds_measured} walk-forward validation windows — gameweeks the model was
+          never fitted on — and the damage to its out-of-sample error recorded. A feature
+          that only helped by memorising the training set does nothing under that test,
+          which is the point of running it this way.
+        </p>
+
+        <p>
+          <span style={{ color: "var(--color-chalk)" }}>
+            {top.feature_name} came first, at {importanceText(top.importance)}.
+          </span>{" "}
+          The top five carry {Math.round(concentration * 100)}% of all measured importance,
+          so this is not a broad consensus of many small signals — a handful of features
+          decide the projection and the rest adjust it.
+          {topFamily && (
+            <>
+              {" "}
+              The {familyName(topFamily[0])} family alone accounts for{" "}
+              {Math.round(familyShare * 100)}% of the total.
+            </>
+          )}
+        </p>
+
+        <p>
+          <span style={{ color: "var(--color-chalk)" }}>
+            {data.features_with_no_effect} of {data.features_measured} features (
+            {Math.round(deadShare * 100)}%) did not improve out-of-sample error at all.
+          </span>{" "}
+          That is expected rather than alarming, and there are three separate reasons for
+          it — worth telling apart, because only one of them means a feature is useless.
+        </p>
+
+        <ul className="space-y-3 pt-1">
+          <Cause
+            title="It duplicates a feature that won"
+            body="A rolling mean over three appearances and one over five carry nearly the same signal. Shuffling either leaves the model able to recover from the other, so both score near zero while the pair together matters a great deal. This is why the family totals are shown below — they are the only place that signal is visible."
+          />
+          <Cause
+            title="It describes something the model already sees another way"
+            body="Composite ratings overlap the counting stats they were built from. Once goals, assists and minutes are present, an index summarising them has little left to add."
+          />
+          <Cause
+            title="It genuinely carries nothing"
+            body="Rare events and market noise. A feature counting something that happens a handful of times a season cannot move a projection, however sensible it looks in a list."
+          />
+        </ul>
+
+        {unstable > 0 && (
+          <p>
+            <span style={{ color: "var(--color-chalk)" }}>
+              {unstable} features rank inconsistently between folds.
+            </span>{" "}
+            They are shown faded in the table below. A feature that places third on one
+            window and near the bottom on the next has not been shown to matter — it has
+            been shown to be noisy, and the two are easy to confuse when only an average
+            is displayed.
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function Cause({ title, body }: { title: string; body: string }) {
+  return (
+    <li className="flex gap-3.5">
+      <span
+        aria-hidden
+        className="mt-[0.6rem] h-px w-4 shrink-0"
+        style={{ background: "var(--color-dim)" }}
+      />
+      <span className="text-[14px] leading-relaxed">
+        <span style={{ color: "var(--color-chalk)" }}>{title}.</span> {body}
+      </span>
+    </li>
   );
 }
 
