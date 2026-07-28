@@ -30,6 +30,12 @@ from xg_alonso.prediction.inference import (
     predict_with_models,
     save_models,
 )
+from xg_alonso.prediction.refresh import (
+    DEFAULT_REFRESH_BUDGET,
+    RefreshPlan,
+    RefreshRequest,
+    plan_refresh,
+)
 from xg_alonso.prediction.trained import (
     TRAINED_MODEL_NAME,
     TRAINED_MODEL_VERSION,
@@ -42,10 +48,13 @@ __all__ = [
     "BASELINE_NAME",
     "BASELINE_VERSION",
     "COMPONENT_LABELS",
+    "DEFAULT_REFRESH_BUDGET",
     "TRAINED_MODEL_NAME",
     "TRAINED_MODEL_VERSION",
     "ComponentModels",
     "FoldReport",
+    "RefreshPlan",
+    "RefreshRequest",
     "SavedModel",
     "TrainingData",
     "apply_form_signals",
@@ -57,6 +66,7 @@ __all__ = [
     "load_models",
     "load_signals",
     "model_summary",
+    "plan_refresh",
     "predict_frame",
     "predict_player",
     "predict_with_models",
