@@ -22,6 +22,24 @@ export interface HistoryNote {
   is_positive: boolean;
 }
 
+export interface DerivationLine {
+  component: string;
+  expectation: number;
+  unit: string;
+  rate: number;
+  points: number;
+  note: string;
+  sentence: string;
+}
+
+export interface GameweekProjection {
+  gameweek: number;
+  opponent: string | null;
+  is_home: boolean | null;
+  expected_points: number;
+  weight: number;
+}
+
 export interface PlayerSummary {
   player_code: number;
   name: string;
@@ -34,6 +52,9 @@ export interface PlayerSummary {
   p_start: number;
   expected_minutes: number;
   history: HistoryNote[];
+  derivation: DerivationLine[];
+  horizon: GameweekProjection[];
+  horizon_total: number | null;
 }
 
 export interface SquadPlayer extends PlayerSummary {
@@ -122,16 +143,6 @@ export interface Archetype {
   rank_within: number;
   comparables: Comparable[];
   caveat: string;
-}
-
-export interface DerivationLine {
-  component: string;
-  expectation: number;
-  unit: string;
-  rate: number;
-  points: number;
-  note: string;
-  sentence: string;
 }
 
 export interface Swap {

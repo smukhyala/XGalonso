@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Alternatives } from "@/components/Alternatives";
+import { Derivation, Horizon } from "@/components/Depth";
 import { History } from "@/components/History";
 import { LineupDiff } from "@/components/LineupDiff";
 import { Pitch } from "@/components/Pitch";
@@ -301,7 +302,7 @@ function Board({ players }: { players: PlayerSummary[] }) {
     <section className="rise mt-24" style={{ animationDelay: "0.3s" }}>
       <div className="flex items-baseline justify-between">
         <p className="eyebrow">Best available</p>
-        <p className="eyebrow hidden sm:block">Open a row for his record</p>
+        <p className="eyebrow hidden sm:block">Open a row for the full breakdown</p>
       </div>
       <div className="hairline mt-5" />
 
@@ -344,18 +345,26 @@ function Board({ players }: { players: PlayerSummary[] }) {
           </button>
 
           {open === player.player_code && (
-            <div className="pb-7 pl-[3.5rem] pr-2">
-              {player.history.length > 0 ? (
-                <>
-                  <p className="eyebrow mb-3">His record in this fixture</p>
-                  <History notes={player.history} />
-                </>
-              ) : (
-                <p className="text-[13px]" style={{ color: "var(--color-dim)" }}>
-                  No prior meetings with this opponent, and not enough history in this
-                  gameweek to say anything worth saying.
-                </p>
-              )}
+            <div className="grid gap-10 pb-9 pl-[3.5rem] pr-2 pt-1 lg:grid-cols-2">
+              <Derivation lines={player.derivation} />
+
+              <div className="space-y-9">
+                <Horizon weeks={player.horizon} total={player.horizon_total} />
+
+                <div>
+                  <p className="eyebrow">Whether it has happened before</p>
+                  <div className="mt-3">
+                    {player.history.length > 0 ? (
+                      <History notes={player.history} compact />
+                    ) : (
+                      <p className="text-[13px]" style={{ color: "var(--color-dim)" }}>
+                        No prior meetings with this opponent, and not enough history in
+                        this gameweek to say anything worth saying.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
           </li>

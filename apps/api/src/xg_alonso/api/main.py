@@ -92,6 +92,34 @@ class HistoryNoteOut(BaseModel):
     is_positive: bool
 
 
+class DerivationLineOut(BaseModel):
+    """One scoring term, with the arithmetic that produced it."""
+
+    component: str
+    expectation: float
+    unit: str
+    rate: float
+    points: float
+    note: str = ""
+    sentence: str
+
+
+class GameweekProjectionOut(BaseModel):
+    """What he is projected for in one upcoming gameweek, and who he faces."""
+
+    gameweek: int
+    opponent: str | None
+    is_home: bool | None
+    expected_points: float
+    weight: float = Field(
+        description=(
+            "How much this week counts toward the horizon value. Later weeks "
+            "are discounted, because a free transfer arrives every week and a "
+            "projection five weeks out is a longer extrapolation."
+        )
+    )
+
+
 class PlayerSummary(BaseModel):
     player_code: int
     name: str
@@ -106,6 +134,18 @@ class PlayerSummary(BaseModel):
     history: list[HistoryNoteOut] = Field(
         default_factory=list,
         description="What he has done against this opponent, and in this gameweek.",
+    )
+    derivation: list[DerivationLineOut] = Field(
+        default_factory=list,
+        description="How the projection was assembled, largest contribution first.",
+    )
+    horizon: list[GameweekProjectionOut] = Field(
+        default_factory=list,
+        description="The next few gameweeks, each with the club he faces.",
+    )
+    horizon_total: float | None = Field(
+        default=None,
+        description="Discounted value across the horizon, comparable to a single gameweek.",
     )
 
 
@@ -217,18 +257,6 @@ class ArchetypeOut(BaseModel):
             "are and 'best in his cluster' would be close to circular."
         )
     )
-
-
-class DerivationLineOut(BaseModel):
-    """One scoring term, with the arithmetic that produced it."""
-
-    component: str
-    expectation: float
-    unit: str
-    rate: float
-    points: float
-    note: str = ""
-    sentence: str
 
 
 class SwapOut(BaseModel):

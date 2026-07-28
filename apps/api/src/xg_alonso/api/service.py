@@ -32,6 +32,8 @@ from xg_alonso.cli.pipeline import (
     build_context,
     build_entities,
     fetch_squad,
+    fixtures_by_gameweek,
+    horizon_projections,
     load_squad_file,
     recommend,
     squad_from_payload,
@@ -66,6 +68,7 @@ from xg_alonso.features.slice1 import (
     build_team_gameweek_stats,
 )
 from xg_alonso.optimization import SquadCandidate, best_starting_xi, build_squad
+from xg_alonso.optimization.horizon import discount_weights, value_over_horizon
 from xg_alonso.pipelines.ingestion import SOURCE_BOOTSTRAP, SOURCE_FIXTURES, FplApiClient
 from xg_alonso.pipelines.normalization import PLAYER_GAMEWEEK_STATS_SCHEMA, empty_frame
 from xg_alonso.prediction import load_models, predict_with_models
@@ -135,6 +138,7 @@ class DecisionService:
         self._predictions: dict[int, list[PlayerPrediction]] = {}
         self._archetypes: dict[int, ArchetypeModel] = {}
         self._history: dict[int, dict[int, list[Any]]] = {}
+        self._horizon: dict[tuple[int, int], dict[PlayerCode, list[float]]] = {}
 
     # -- loading ----------------------------------------------------------
 
@@ -343,10 +347,31 @@ class DecisionService:
     def _player_rows(self) -> dict[int, dict[str, Any]]:
         return {int(r["player_code"]): r for r in self._context.players.iter_rows(named=True)}
 
-    def _summary(self, prediction: PlayerPrediction, row: dict[str, Any]) -> PlayerSummary:
+    def _summary(
+        self,
+        prediction: PlayerPrediction,
+        row: dict[str, Any],
+        *,
+        with_depth: bool = False,
+    ) -> PlayerSummary:
+        """One player, optionally with the arithmetic and the weeks ahead.
+
+        ``with_depth`` is opt-in because the horizon costs a feature build and
+        several model passes. The squad and recommendation views carry their own
+        deeper explanation already; the board is where a reader has nothing else
+        to go on, so that is where it is turned on.
+        """
         from xg_alonso.api.main import PlayerSummary
 
         minutes = prediction.components.minutes
+        derivation: list[Any] = []
+        horizon: list[Any] = []
+        horizon_total: float | None = None
+        if with_depth:
+            derivation, _ = self._derivation_out(prediction)
+            horizon, horizon_total = self._horizon_out(
+                prediction.from_gameweek, prediction.player_code, self._HORIZON_WEEKS
+            )
         return PlayerSummary(
             player_code=int(prediction.player_code),
             name=str(row["web_name"]),
@@ -359,6 +384,9 @@ class DecisionService:
             p_start=round(minutes.p_start, 4),
             expected_minutes=round(minutes.expected_minutes, 1),
             history=self._history_out(prediction.from_gameweek, int(prediction.player_code)),
+            derivation=derivation,
+            horizon=horizon,
+            horizon_total=horizon_total,
         )
 
     # -- endpoints --------------------------------------------------------
@@ -403,7 +431,19 @@ class DecisionService:
             summaries = [s for s in summaries if s.price <= max_price]
 
         summaries.sort(key=lambda s: (-s.expected_points, s.player_code))
-        return summaries[:limit]
+        top = summaries[:limit]
+
+        # Depth is computed only for the rows actually returned. Building the
+        # horizon for six hundred players to display twelve would be most of a
+        # second spent on numbers nobody sees.
+        rows_by_code = {int(code): row for code, row in rows.items()}
+        predictions = {int(p.player_code): p for p in self._predict(gameweek)}
+        return [
+            self._summary(predictions[s.player_code], rows_by_code[s.player_code], with_depth=True)
+            if s.player_code in predictions and s.player_code in rows_by_code
+            else s
+            for s in top
+        ]
 
     def _load_squad(self, entry_id: int, squad_file: Path | None) -> SquadState:
         gameweek = self._context.next_gameweek()
@@ -484,6 +524,80 @@ class DecisionService:
         return {
             code: form_reason(signal, code, weight=2.0) for code, signal in signals.live(at).items()
         }
+
+    #: Gameweeks ahead shown alongside a projection. Five, matching the horizon
+    #: the optimizer values transfers over.
+    _HORIZON_WEEKS: int = 5
+
+    def _horizon_projections(
+        self, gameweek: GameweekId, weeks: int
+    ) -> dict[PlayerCode, list[float]]:
+        """Per-gameweek projections for the whole league, cached.
+
+        Costly enough to be worth caching and cheap enough to be worth having:
+        the catalogue is built once and only the fixture varies per week, so
+        this is one feature build plus a handful of model passes rather than
+        five full rebuilds.
+        """
+        key = (int(gameweek), weeks)
+        if key in self._horizon:
+            return self._horizon[key]
+
+        projections = horizon_projections(
+            self._context,
+            from_gameweek=gameweek,
+            horizon=weeks,
+            generated_at=utc_now(),
+            run_id=f"api-{uuid.uuid4().hex[:8]}",
+            code_version="api",
+            models=self._models,
+        )
+        self._horizon[key] = projections
+        return projections
+
+    def _horizon_out(
+        self, gameweek: GameweekId, player: PlayerCode, weeks: int
+    ) -> tuple[list[Any], float | None]:
+        """One player's next few gameweeks, each with the club he faces."""
+        from xg_alonso.api.main import GameweekProjectionOut
+
+        weekly = self._horizon_projections(gameweek, weeks).get(player)
+        if not weekly:
+            return [], None
+
+        schedule = fixtures_by_gameweek(
+            self._context, [GameweekId(int(gameweek) + i) for i in range(weeks)]
+        )
+        teams = {
+            int(row["team_id"]): str(row["name"])
+            for row in self._context.teams.iter_rows(named=True)
+        }
+        club = self._player_rows().get(int(player), {}).get("team_id")
+        weights = discount_weights(len(weekly))
+
+        out: list[Any] = []
+        for index, points in enumerate(weekly):
+            week = int(gameweek) + index
+            opponent: str | None = None
+            is_home: bool | None = None
+            fixtures = schedule.get(week)
+            if fixtures is not None and club is not None:
+                match = fixtures.filter(pl.col("team_id") == int(club))
+                if not match.is_empty():
+                    opponent = teams.get(int(match["opponent_team_id"][0]))
+                    is_home = bool(match["was_home"][0])
+            out.append(
+                GameweekProjectionOut(
+                    gameweek=week,
+                    opponent=opponent,
+                    is_home=is_home,
+                    expected_points=round(points, 2),
+                    weight=round(weights[index], 3),
+                )
+            )
+
+        total = value_over_horizon(weekly).total
+        return out, round(total, 2)
 
     def _history_notes(self, gameweek: GameweekId) -> dict[int, list[Any]]:
         """Situational history for every player, cached per gameweek.
