@@ -79,6 +79,19 @@ class HealthResponse(BaseModel):
     )
 
 
+class HistoryNoteOut(BaseModel):
+    """A checkable fact about what this player has done in this situation.
+
+    Distinct from a `ReasonOut`: a reason is derived from the model, this is a
+    retrieval from matches that were played. It is the one part of the
+    explanation a user can verify against a scoreboard.
+    """
+
+    kind: str
+    text: str
+    is_positive: bool
+
+
 class PlayerSummary(BaseModel):
     player_code: int
     name: str
@@ -90,6 +103,10 @@ class PlayerSummary(BaseModel):
     expected_points_sd: float
     p_start: float
     expected_minutes: float
+    history: list[HistoryNoteOut] = Field(
+        default_factory=list,
+        description="What he has done against this opponent, and in this gameweek.",
+    )
 
 
 class SquadPlayer(PlayerSummary):
@@ -172,6 +189,8 @@ class TransferOptionOut(BaseModel):
     risk_penalty: float
     bank_after: int
     reasons: list[ReasonOut]
+    history_in: list[HistoryNoteOut] = Field(default_factory=list)
+    history_out: list[HistoryNoteOut] = Field(default_factory=list)
 
 
 class ComparableOut(BaseModel):
@@ -274,6 +293,10 @@ class PlayerExplanationOut(BaseModel):
     derivation: list[DerivationLineOut] = Field(
         default_factory=list,
         description="How the projection was assembled, largest contribution first.",
+    )
+    history: list[HistoryNoteOut] = Field(
+        default_factory=list,
+        description="Checkable facts about this situation, not model output.",
     )
     derivation_reconciles: bool = Field(
         default=True,

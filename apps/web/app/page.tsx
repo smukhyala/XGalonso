@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Alternatives } from "@/components/Alternatives";
+import { History } from "@/components/History";
 import { LineupDiff } from "@/components/LineupDiff";
 import { Pitch } from "@/components/Pitch";
 import { PlayerLedger } from "@/components/PlayerLedger";
@@ -294,21 +295,24 @@ function Stat({ label, value, unit }: { label: string; value: string; unit?: str
 }
 
 function Board({ players }: { players: PlayerSummary[] }) {
+  const [open, setOpen] = useState<number | null>(null);
   const ceiling = Math.max(...players.map((p) => p.expected_points));
   return (
     <section className="rise mt-24" style={{ animationDelay: "0.3s" }}>
       <div className="flex items-baseline justify-between">
         <p className="eyebrow">Best available</p>
-        <p className="eyebrow hidden sm:block">Projected points · this gameweek</p>
+        <p className="eyebrow hidden sm:block">Open a row for his record</p>
       </div>
       <div className="hairline mt-5" />
 
       <ol className="mt-2">
         {players.map((player, index) => (
-          <li
-            key={player.player_code}
-            className="grid grid-cols-[2.5rem_1fr_auto] items-center gap-4 border-b py-3.5 sm:grid-cols-[2.5rem_1fr_7rem_5rem_auto]"
-            style={{ borderColor: "var(--color-line)" }}
+          <li key={player.player_code} className="border-b" style={{ borderColor: "var(--color-line)" }}>
+          <button
+            type="button"
+            onClick={() => setOpen(open === player.player_code ? null : player.player_code)}
+            aria-expanded={open === player.player_code}
+            className="grid w-full grid-cols-[2.5rem_1fr_auto] items-center gap-4 py-3.5 text-left transition-opacity hover:opacity-80 sm:grid-cols-[2.5rem_1fr_7rem_5rem_auto]"
           >
             <span className="tnum text-xs text-dim">{String(index + 1).padStart(2, "0")}</span>
 
@@ -337,9 +341,31 @@ function Board({ players }: { players: PlayerSummary[] }) {
             <span className="tnum hidden text-sm text-muted sm:block">{money(player.price)}</span>
 
             <span className="tnum text-right text-sm">{player.expected_points.toFixed(2)}</span>
+          </button>
+
+          {open === player.player_code && (
+            <div className="pb-7 pl-[3.5rem] pr-2">
+              {player.history.length > 0 ? (
+                <>
+                  <p className="eyebrow mb-3">His record in this fixture</p>
+                  <History notes={player.history} />
+                </>
+              ) : (
+                <p className="text-[13px]" style={{ color: "var(--color-dim)" }}>
+                  No prior meetings with this opponent, and not enough history in this
+                  gameweek to say anything worth saying.
+                </p>
+              )}
+            </div>
+          )}
           </li>
         ))}
       </ol>
+      <p className="mt-5 max-w-2xl text-[13px] leading-relaxed" style={{ color: "var(--color-dim)" }}>
+        These are match results, not projections — what he did, against this opponent, in
+        this gameweek, in seasons that have been played. They sit next to the model rather
+        than inside it: nothing here moves a number.
+      </p>
     </section>
   );
 }

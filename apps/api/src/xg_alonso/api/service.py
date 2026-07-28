@@ -52,6 +52,7 @@ from xg_alonso.contracts.recommendation import TransferOption
 from xg_alonso.contracts.squad import SquadState
 from xg_alonso.evaluation.importance import load_importance
 from xg_alonso.explanations.derivation import derive_points
+from xg_alonso.explanations.history import build_history_notes
 from xg_alonso.explanations.lineup_diff import compare_lineups, selection_from_starters
 from xg_alonso.explanations.player import ArchetypeVerdict, Comparable, explain_squad
 from xg_alonso.explanations.reasons import PopulationStats
@@ -132,6 +133,7 @@ class DecisionService:
         self._models = self._load_models()
         self._predictions: dict[int, list[PlayerPrediction]] = {}
         self._archetypes: dict[int, ArchetypeModel] = {}
+        self._history: dict[int, dict[int, list[Any]]] = {}
 
     # -- loading ----------------------------------------------------------
 
@@ -344,6 +346,7 @@ class DecisionService:
             expected_points_sd=round(prediction.expected_points_sd, 3),
             p_start=round(minutes.p_start, 4),
             expected_minutes=round(minutes.expected_minutes, 1),
+            history=self._history_out(prediction.from_gameweek, int(prediction.player_code)),
         )
 
     # -- endpoints --------------------------------------------------------
@@ -470,6 +473,46 @@ class DecisionService:
             code: form_reason(signal, code, weight=2.0) for code, signal in signals.live(at).items()
         }
 
+    def _history_notes(self, gameweek: GameweekId) -> dict[int, list[Any]]:
+        """Situational history for every player, cached per gameweek.
+
+        One scan of the stats table serves the whole league. Asking per player
+        would repeat the same hundred-thousand-row filter six hundred times to
+        answer six hundred versions of the same question.
+        """
+        key = int(gameweek)
+        if key in self._history:
+            return self._history[key]
+
+        cutoff = self._context.deadline_for(gameweek)
+        entities = build_entities(self._context, cutoff=cutoff)
+        fixtures = {
+            int(row["player_code"]): (int(row["opponent_team_id"]), bool(row["was_home"]))
+            for row in entities.iter_rows(named=True)
+            if row.get("opponent_team_id") is not None
+        }
+        teams = {
+            int(row["team_id"]): str(row["name"])
+            for row in self._context.teams.iter_rows(named=True)
+        }
+        notes = build_history_notes(
+            self._context.player_stats,
+            fixtures=fixtures,
+            gameweek=int(gameweek),
+            team_names=teams,
+            cutoff=cutoff,
+        )
+        self._history[key] = notes
+        return notes
+
+    def _history_out(self, gameweek: GameweekId, player: int, limit: int = 3) -> list[Any]:
+        from xg_alonso.api.main import HistoryNoteOut
+
+        return [
+            HistoryNoteOut(kind=n.kind, text=n.text, is_positive=n.is_positive)
+            for n in self._history_notes(gameweek).get(player, [])[:limit]
+        ]
+
     def _names(self) -> dict[int, str]:
         return {code: str(row["web_name"]) for code, row in self._player_rows().items()}
 
@@ -495,7 +538,7 @@ class DecisionService:
             for reason in sorted(reasons, key=lambda r: -r.weight)
         ]
 
-    def _option_out(self, option: TransferOption) -> TransferOptionOut:
+    def _option_out(self, option: TransferOption, gameweek: GameweekId) -> TransferOptionOut:
         from xg_alonso.api.main import TransferOptionOut
 
         names = self._names()
@@ -515,6 +558,8 @@ class DecisionService:
             risk_penalty=round(option.risk_penalty, 2),
             bank_after=int(option.bank_after),
             reasons=self._reasons_out(option.reasons),
+            history_in=self._history_out(gameweek, int(option.move.player_in), limit=2),
+            history_out=self._history_out(gameweek, int(option.move.player_out), limit=2),
         )
 
     def _derivation_out(self, prediction: PlayerPrediction) -> tuple[list[Any], bool]:
@@ -693,9 +738,12 @@ class DecisionService:
                     start_margin=round(explanation.start_verdict.margin, 2),
                     forced_by_quota=explanation.start_verdict.forced_by_quota,
                     legal_replacements=0 if entry is None else entry.legal_replacements,
-                    replacements=[self._option_out(option) for option in explanation.replacements],
+                    replacements=[
+                        self._option_out(option, gameweek) for option in explanation.replacements
+                    ],
                     no_replacement_reasons=self._reasons_out(explanation.no_replacement_reasons),
                     archetype=self._archetype_out(explanation.archetype),
+                    history=self._history_out(gameweek, code),
                     derivation=derivation_lines,
                     derivation_reconciles=derivation_ok,
                 )
@@ -752,6 +800,7 @@ class DecisionService:
             if move.player_in in by_code:
                 in_summary = self._summary(by_code[move.player_in], rows[int(move.player_in)])
 
+        gameweek = recommendation.gameweek
         board = recommendation.board
         chosen = None
         if recommendation.package.moves:
@@ -760,7 +809,7 @@ class DecisionService:
         alternatives = []
         if board is not None:
             alternatives = [
-                self._option_out(option)
+                self._option_out(option, gameweek)
                 for option in board.top
                 # The headline move is already stated above; repeating it as its
                 # own runner-up would suggest the board contains one fewer real
@@ -900,6 +949,7 @@ class DecisionService:
                     replacements=[],
                     no_replacement_reasons=[],
                     archetype=self._archetype_out(explanation.archetype),
+                    history=self._history_out(gameweek, code),
                     derivation=derivation_lines,
                     derivation_reconciles=derivation_ok,
                 )

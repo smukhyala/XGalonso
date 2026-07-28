@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { History } from "@/components/History";
 import {
   POSITION_COLOR,
   money,
@@ -308,6 +309,15 @@ function Detail({ player }: { player: PlayerExplanation }) {
               ))}
             </ul>
           </>
+        )}
+
+        {player.history.length > 0 && (
+          <div className="mt-9">
+            <p className="eyebrow">His record in this fixture</p>
+            <div className="mt-4">
+              <History notes={player.history} compact />
+            </div>
+          </div>
         )}
 
         {player.archetype && <ArchetypePanel archetype={player.archetype} />}

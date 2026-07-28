@@ -16,6 +16,12 @@ export interface Provenance {
   run_id: string;
 }
 
+export interface HistoryNote {
+  kind: "opponent" | "gameweek" | "venue";
+  text: string;
+  is_positive: boolean;
+}
+
 export interface PlayerSummary {
   player_code: number;
   name: string;
@@ -27,6 +33,7 @@ export interface PlayerSummary {
   expected_points_sd: number;
   p_start: number;
   expected_minutes: number;
+  history: HistoryNote[];
 }
 
 export interface SquadPlayer extends PlayerSummary {
@@ -98,6 +105,8 @@ export interface TransferOption {
   risk_penalty: number;
   bank_after: number;
   reasons: Reason[];
+  history_in: HistoryNote[];
+  history_out: HistoryNote[];
 }
 
 export interface Comparable {
@@ -168,6 +177,7 @@ export interface PlayerExplanation {
   replacements: TransferOption[];
   no_replacement_reasons: Reason[];
   archetype: Archetype | null;
+  history: HistoryNote[];
   derivation: DerivationLine[];
   derivation_reconciles: boolean;
 }

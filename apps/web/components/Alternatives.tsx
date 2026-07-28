@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { History } from "@/components/History";
 import { POSITION_COLOR, money, type Reason, type TransferOption } from "@/lib/api";
 
 /**
@@ -127,6 +128,23 @@ function Detail({ option }: { option: TransferOption }) {
           <p className="text-[13px]" style={{ color: "var(--color-dim)" }}>
             This move gains points without any single statistic standing out.
           </p>
+        )}
+
+        {(option.history_in.length > 0 || option.history_out.length > 0) && (
+          <div className="mt-6 grid gap-6 sm:grid-cols-2">
+            {option.history_in.length > 0 && (
+              <div>
+                <p className="eyebrow mb-3">{option.player_in_name}&rsquo;s record</p>
+                <History notes={option.history_in} compact />
+              </div>
+            )}
+            {option.history_out.length > 0 && (
+              <div>
+                <p className="eyebrow mb-3">{option.player_out_name}&rsquo;s record</p>
+                <History notes={option.history_out} compact />
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>
