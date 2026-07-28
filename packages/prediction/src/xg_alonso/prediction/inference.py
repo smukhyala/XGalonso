@@ -21,6 +21,7 @@ from typing import Any
 
 import polars as pl
 
+from xg_alonso.contracts.evidence import FeatureEvidence
 from xg_alonso.contracts.identifiers import GameweekId, PlayerCode
 from xg_alonso.contracts.prediction import (
     ComponentExpectations,
@@ -30,6 +31,7 @@ from xg_alonso.contracts.prediction import (
 )
 from xg_alonso.contracts.provenance import PredictionProvenance
 from xg_alonso.domain.scoring import ScoringRules, assemble_points
+from xg_alonso.prediction.evidence import build_feature_evidence
 from xg_alonso.prediction.trained import (
     TRAINED_MODEL_NAME,
     TRAINED_MODEL_VERSION,
@@ -147,6 +149,7 @@ def predict_with_models(
     feature_set_version: str,
     horizon_gameweeks: int = 1,
     shrink_by_skill: bool = False,
+    with_evidence: bool = True,
 ) -> list[PlayerPrediction]:
     """Predict components with the trained models and assemble them into points.
 
@@ -157,6 +160,11 @@ def predict_with_models(
         shrink_by_skill: Blend each component toward its population mean in
             proportion to measured out-of-sample skill, so a weakly-predicted
             component cannot drive a recommendation as hard as a strong one.
+        with_evidence: Attach the explanatory feature panel, ranked within
+            position across this batch. On by default because a prediction that
+            cannot be traced to its inputs cannot be explained — the whole
+            reason the recommendation screen could only cite model output was
+            that this frame used to be discarded here.
     """
     for required in ("player_code", "position"):
         if required not in features.columns:
@@ -165,6 +173,13 @@ def predict_with_models(
         return []
 
     predicted = models.predict(features, shrink_by_skill=shrink_by_skill)
+
+    evidence: list[FeatureEvidence] | None = None
+    if with_evidence:
+        evidence = build_feature_evidence(
+            features,
+            positions=[str(p) for p in features["position"].to_list()],
+        )
 
     def column(label: str, default: float = 0.0) -> list[float]:
         values = predicted.get(label)
@@ -244,6 +259,7 @@ def predict_with_models(
                 expected_points_sd=round(sd, 6),
                 scoring_rules_version=rules.version,
                 provenance=provenance,
+                feature_evidence=None if evidence is None else evidence[index],
             )
         )
     return out

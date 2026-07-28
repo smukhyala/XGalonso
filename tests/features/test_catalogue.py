@@ -77,7 +77,18 @@ def _stats(rows: int = 12, players: tuple[int, ...] = (1, 2, 3)) -> pl.DataFrame
                 # modulus, which was periodic within the longer windows and made
                 # short and long windows coincide — a fixture artefact that
                 # looked like a catalogue bug.
-                data[column].append(player * 2.0 + week * 0.37 + index * 0.11)
+                #
+                # The per-week slope is scaled by the player rather than added
+                # to it. With a shared slope, two players' series differ by a
+                # constant, and standard deviation is translation-invariant — so
+                # every `*_std_*` column was mathematically identical across
+                # players. `test_no_feature_is_constant_across_players` then
+                # passed only because catastrophic cancellation left different
+                # last bits, which made it architecture-dependent: it passed on
+                # arm64 and failed on x86_64 for the same commit. Scaling makes
+                # the spread genuinely differ, so the test measures the
+                # catalogue instead of the floating-point unit.
+                data[column].append(player * 2.0 + week * 0.37 * player + index * 0.11)
     return pl.DataFrame(data).with_columns(
         pl.col("available_time").dt.replace_time_zone("UTC"),
         pl.col("kickoff_time").dt.replace_time_zone("UTC"),

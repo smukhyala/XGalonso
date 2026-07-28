@@ -21,6 +21,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from xg_alonso.contracts.evidence import FeatureEvidence
 from xg_alonso.contracts.identifiers import GameweekId, PlayerCode
 from xg_alonso.contracts.provenance import PredictionProvenance
 
@@ -173,6 +174,16 @@ class PlayerPrediction(_Frozen):
         description="Which pinned scoring snapshot assembled these points"
     )
     provenance: PredictionProvenance
+
+    feature_evidence: FeatureEvidence | None = Field(
+        default=None,
+        description=(
+            "The features this prediction was made from, for the explanatory "
+            "panel only. Optional because the closed-form baseline does not "
+            "build the full catalogue and must not claim to have: absent "
+            "evidence is honest, invented evidence is not."
+        ),
+    )
 
     @model_validator(mode="after")
     def _breakdown_matches_total(self) -> PlayerPrediction:

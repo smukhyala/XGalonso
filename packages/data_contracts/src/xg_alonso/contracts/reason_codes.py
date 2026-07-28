@@ -1,20 +1,40 @@
 """The single reason-code vocabulary.
 
 Planning produced three competing vocabularies with three naming conventions.
-This is the one. It is deliberately small: slice 1 emits seven codes, each of
-which a human can verify against the data. A large vocabulary that nothing emits
-is documentation cosplay.
+This is the one.
 
 **Grounding rule.** Every reason carries structured numeric evidence, and its
 prose is rendered from a template whose placeholders must all resolve from that
 evidence. An LLM may rewrite the rendered sentence for readability, but it never
 receives free rein to state a cause or a statistic: there is no code path that
 lets prose reference a number the evidence does not contain.
+
+**Why the vocabulary grew.** The first version declared seven codes and emitted
+three. The recommendation screen therefore justified a transfer with two
+unattributed minutes sentences and one derived aggregate, and named no feature
+at all — it cited xG nowhere despite xG being in the model. The codes below draw
+on the explanatory panel directly, so a reason says *which* statistic moved the
+decision, what its value was, and where that value sits among comparable
+players.
+
+**Numbers live in evidence; labels live in context.** A template slot that is a
+quantity must resolve from ``evidence: dict[str, float]``, which is validated.
+Slots that are purely descriptive — a position name, for instance — resolve from
+``context: dict[str, str]``. Splitting them keeps the guarantee sharp: no
+quantitative claim can enter prose without passing through the validated numeric
+channel, and widening ``evidence`` to accept strings would have quietly
+dissolved that.
+
+Player names are absent from both. A reason knows its ``subject`` as a code;
+attaching a name is the renderer's job, because the contract layer has no
+business holding presentation data and because a name map belongs to the surface
+that has one.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
+from string import Formatter
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -26,19 +46,43 @@ __all__ = [
     "Reason",
     "ReasonCode",
     "ReasonPolarity",
+    "template_placeholders",
 ]
 
 
 class ReasonCode(StrEnum):
     """Why a recommendation was made. Each maps to one evidence template."""
 
+    # --- fixtures ---
     FIXTURE_SWING_POSITIVE = "FIXTURE_SWING_POSITIVE"
     FIXTURE_SWING_NEGATIVE = "FIXTURE_SWING_NEGATIVE"
+    HOME_FIXTURE = "HOME_FIXTURE"
+
+    # --- minutes and availability ---
     EXPECTED_MINUTES_SECURE = "EXPECTED_MINUTES_SECURE"
     EXPECTED_MINUTES_DECLINE = "EXPECTED_MINUTES_DECLINE"
+    AVAILABILITY_RISK_HIGH = "AVAILABILITY_RISK_HIGH"
+
+    # --- underlying attacking numbers ---
     UNDERLYING_STATS_IMPROVING = "UNDERLYING_STATS_IMPROVING"
     UNDERLYING_STATS_DECLINING = "UNDERLYING_STATS_DECLINING"
-    AVAILABILITY_RISK_HIGH = "AVAILABILITY_RISK_HIGH"
+    XG_RATE_HIGHER = "XG_RATE_HIGHER"
+    XG_RATE_LOWER = "XG_RATE_LOWER"
+    XA_RATE_HIGHER = "XA_RATE_HIGHER"
+    XA_RATE_LOWER = "XA_RATE_LOWER"
+    THREAT_HIGHER = "THREAT_HIGHER"
+
+    # --- return shape ---
+    CEILING_HIGHER = "CEILING_HIGHER"
+    VOLATILITY_LOWER = "VOLATILITY_LOWER"
+    BONUS_MAGNET = "BONUS_MAGNET"
+    PRICE_EFFICIENCY = "PRICE_EFFICIENCY"
+    POINTS_BREAKDOWN = "POINTS_BREAKDOWN"
+
+    # --- why the choice set was what it was ---
+    POSITION_LOCKED = "POSITION_LOCKED"
+    BUDGET_LOCKED = "BUDGET_LOCKED"
+    NO_UPGRADE_AVAILABLE = "NO_UPGRADE_AVAILABLE"
 
 
 class ReasonPolarity(StrEnum):
@@ -46,17 +90,20 @@ class ReasonPolarity(StrEnum):
 
     SUPPORTS_IN = "supports_in"
     SUPPORTS_OUT = "supports_out"
+    CONTEXT = "context"
+    """Neither. Explains the choice set rather than arguing about a player."""
 
 
 REASON_TEMPLATES: Final[dict[ReasonCode, str]] = {
     ReasonCode.FIXTURE_SWING_POSITIVE: (
-        "Fixtures ease over the next {horizon:.0f} gameweeks: mean opponent strength "
-        "{opponent_strength:.2f} against a league average of {league_average:.2f}."
+        "Kinder fixture: the opponent has conceded {opponent_xg:.2f} expected goals a game "
+        "over their last five, against a league average of {league_average:.2f}."
     ),
     ReasonCode.FIXTURE_SWING_NEGATIVE: (
-        "Fixtures harden over the next {horizon:.0f} gameweeks: mean opponent strength "
-        "{opponent_strength:.2f} against a league average of {league_average:.2f}."
+        "Harder fixture: the opponent has conceded {opponent_xg:.2f} expected goals a game "
+        "over their last five, against a league average of {league_average:.2f}."
     ),
+    ReasonCode.HOME_FIXTURE: "Playing at home.",
     # Expected minutes is a continuous quantity, so it is rendered with a decimal.
     # Integer rounding implied a discreteness the estimate does not have, and it
     # also produced "around 1 minutes expected" whenever the value rounded to one.
@@ -68,19 +115,79 @@ REASON_TEMPLATES: Final[dict[ReasonCode, str]] = {
         "Minutes are a concern: {p_start:.0%} chance of starting, around "
         "{expected_minutes:.1f} minutes expected."
     ),
-    ReasonCode.UNDERLYING_STATS_IMPROVING: (
-        "Stronger underlying numbers: {recent_xgi:.2f} projected goal involvements "
-        "against {baseline_xgi:.2f} for the player leaving."
-    ),
-    ReasonCode.UNDERLYING_STATS_DECLINING: (
-        "Weaker underlying numbers: {recent_xgi:.2f} projected goal involvements "
-        "against {baseline_xgi:.2f} for the alternative."
-    ),
     ReasonCode.AVAILABILITY_RISK_HIGH: (
         "Availability is in doubt: reported {chance_of_playing:.0%} chance of playing."
     ),
+    ReasonCode.UNDERLYING_STATS_IMPROVING: (
+        "Higher projected returns: {recent_xgi:.2f} expected goals and assists this "
+        "gameweek against {baseline_xgi:.2f}."
+    ),
+    ReasonCode.UNDERLYING_STATS_DECLINING: (
+        "Lower projected returns: {recent_xgi:.2f} expected goals and assists this "
+        "gameweek against {baseline_xgi:.2f}."
+    ),
+    ReasonCode.XG_RATE_HIGHER: (
+        "Better shooting numbers: {value:.2f} expected goals per 90 over the last five "
+        "appearances against {other:.2f} — {percentile:.0%} among {position}s."
+    ),
+    ReasonCode.XG_RATE_LOWER: (
+        "Weaker shooting numbers: {value:.2f} expected goals per 90 over the last five "
+        "appearances against {other:.2f} — {percentile:.0%} among {position}s."
+    ),
+    ReasonCode.XA_RATE_HIGHER: (
+        "Better creative numbers: {value:.2f} expected assists per 90 against "
+        "{other:.2f} — {percentile:.0%} among {position}s."
+    ),
+    ReasonCode.XA_RATE_LOWER: (
+        "Weaker creative numbers: {value:.2f} expected assists per 90 against "
+        "{other:.2f} — {percentile:.0%} among {position}s."
+    ),
+    ReasonCode.THREAT_HIGHER: (
+        "More dangerous: threat of {value:.0f} per 90 against {other:.0f} — "
+        "{percentile:.0%} among {position}s."
+    ),
+    ReasonCode.CEILING_HIGHER: (
+        "Bigger ceiling: best return in the last five was {value:.0f} points "
+        "against {other:.0f}."
+    ),
+    ReasonCode.VOLATILITY_LOWER: (
+        "Steadier returns: points vary by {value:.2f} week to week against {other:.2f}."
+    ),
+    ReasonCode.BONUS_MAGNET: (
+        "Bonus-point profile: {value:.1f} BPS per 90 — {percentile:.0%} among {position}s."
+    ),
+    ReasonCode.PRICE_EFFICIENCY: (
+        "Better value: {value:.2f} projected points per million against {other:.2f}."
+    ),
+    ReasonCode.POINTS_BREAKDOWN: (
+        "{total:.2f} projected points = {appearance:.2f} for appearing "
+        "+ {goals:.2f} goals + {assists:.2f} assists + {clean_sheets:.2f} clean sheet "
+        "+ {bonus:.2f} bonus."
+    ),
+    ReasonCode.POSITION_LOCKED: (
+        "A transfer is like-for-like, so only {candidate_count:.0f} {position}s were "
+        "legal replacements — players in other positions were never in contention."
+    ),
+    ReasonCode.BUDGET_LOCKED: (
+        "Budget limits the choice: {budget:.1f}m available, and the cheapest player "
+        "projected to beat him costs {shortfall:.1f}m more than that."
+    ),
+    ReasonCode.NO_UPGRADE_AVAILABLE: (
+        "No legal replacement gained enough to be worth a transfer: the best available "
+        "move was {best_gain:+.2f} points, below the {threshold:.2f} bar."
+    ),
 }
-"""Prose templates. Every placeholder must resolve from a :class:`Reason`'s evidence."""
+"""Prose templates. Every placeholder must resolve from a :class:`Reason`'s evidence or context."""
+
+
+def template_placeholders(template: str) -> frozenset[str]:
+    """Every named placeholder in a template.
+
+    Parsed with the same machinery that renders it, rather than pattern-matched,
+    so format specs (``{value:.2f}``) and escaped braces are handled identically
+    in validation and in display.
+    """
+    return frozenset(name for _, name, _, _ in Formatter().parse(template) if name)
 
 
 class Reason(BaseModel):
@@ -92,7 +199,15 @@ class Reason(BaseModel):
     polarity: ReasonPolarity
     subject: PlayerCode = Field(description="The player this reason is about")
     evidence: dict[str, float] = Field(
-        description="Numeric evidence. Must satisfy every placeholder in the template."
+        default_factory=dict,
+        description="Numeric evidence. Must satisfy every numeric placeholder in the template.",
+    )
+    context: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Non-numeric template slots, such as a position name. Deliberately "
+            "separate from evidence so no quantity can bypass numeric validation."
+        ),
     )
     weight: float = Field(
         ge=0.0,
@@ -106,17 +221,42 @@ class Reason(BaseModel):
         This is where the no-fabrication guarantee is enforced. A reason that
         cannot be rendered from its evidence never gets constructed, so no
         downstream renderer — LLM or otherwise — is ever handed a gap to fill.
+
+        Unused keys are rejected as well. Evidence a template never renders is
+        evidence nobody reads, and in practice it is the signature of a builder
+        that was updated while its template was not — which is exactly how a
+        reason drifts away from the arithmetic it claims to explain.
         """
         template = REASON_TEMPLATES[self.code]
-        try:
-            template.format(**self.evidence)
-        except KeyError as exc:
+        required = template_placeholders(template)
+        supplied = frozenset(self.evidence) | frozenset(self.context)
+
+        overlap = frozenset(self.evidence) & frozenset(self.context)
+        if overlap:
             raise ValueError(
-                f"{self.code} is missing evidence key {exc.args[0]!r}; "
-                f"template requires it and prose may not invent it"
-            ) from exc
+                f"{self.code} defines {sorted(overlap)} in both evidence and context; "
+                "a slot filled from two places has no single source of truth"
+            )
+
+        missing = required - supplied
+        if missing:
+            raise ValueError(
+                f"{self.code} is missing evidence for {sorted(missing)}; "
+                f"the template requires it and prose may not invent it"
+            )
+
+        unused = supplied - required
+        if unused:
+            raise ValueError(
+                f"{self.code} carries {sorted(unused)}, which its template never renders; "
+                "evidence nobody reads is evidence nobody checks"
+            )
+
+        # Prove it renders now rather than at display time, when the failure
+        # would surface in front of a user.
+        template.format(**self.evidence, **self.context)
         return self
 
     def render(self) -> str:
         """Render grounded prose. Safe by construction — validation guaranteed it."""
-        return REASON_TEMPLATES[self.code].format(**self.evidence)
+        return REASON_TEMPLATES[self.code].format(**self.evidence, **self.context)

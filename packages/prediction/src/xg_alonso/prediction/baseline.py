@@ -202,12 +202,20 @@ def predict_frame(
     code_version: str,
     feature_set_version: str,
     horizon_gameweeks: int = 1,
+    with_evidence: bool = True,
 ) -> list[PlayerPrediction]:
     """Predict every row of a feature frame.
 
     Requires ``player_code`` and ``position``. The league-mean team xG used to
     centre the fixture term is computed from this frame when available, so the
     adjustment is relative to the league as observed rather than to a constant.
+
+    Args:
+        with_evidence: Attach whatever the explanatory panel can read from this
+            frame. The slice-1 feature set is much smaller than the catalogue,
+            so most of the panel will be null here — which is the correct
+            outcome. An explanation over the baseline should say less than one
+            over the trained model, not the same amount with invented numbers.
     """
     for required in ("player_code", "position"):
         if required not in features.columns:
@@ -233,21 +241,34 @@ def predict_frame(
         code_version=code_version,
     )
 
+    evidence = None
+    if with_evidence:
+        # Imported here rather than at module scope: the baseline exists so the
+        # vertical slice can run without the trained-model dependency chain, and
+        # a top-level import would reintroduce it.
+        from xg_alonso.prediction.evidence import build_feature_evidence
+
+        evidence = build_feature_evidence(
+            features,
+            positions=[str(p) for p in features["position"].to_list()],
+        )
+
     predictions: list[PlayerPrediction] = []
-    for row in features.iter_rows(named=True):
+    for index, row in enumerate(features.iter_rows(named=True)):
         position = row.get("position")
         if not isinstance(position, str) or position not in Position.__members__:
             continue
-        predictions.append(
-            predict_player(
-                player_code=PlayerCode(int(row["player_code"])),
-                position=Position(position),
-                from_gameweek=from_gameweek,
-                features={k: row.get(k) for k in row},
-                rules=rules,
-                provenance=provenance,
-                horizon_gameweeks=horizon_gameweeks,
-                league_mean_team_xg=league_mean,
-            )
+        prediction = predict_player(
+            player_code=PlayerCode(int(row["player_code"])),
+            position=Position(position),
+            from_gameweek=from_gameweek,
+            features={k: row.get(k) for k in row},
+            rules=rules,
+            provenance=provenance,
+            horizon_gameweeks=horizon_gameweeks,
+            league_mean_team_xg=league_mean,
         )
+        if evidence is not None:
+            prediction = prediction.model_copy(update={"feature_evidence": evidence[index]})
+        predictions.append(prediction)
     return predictions
