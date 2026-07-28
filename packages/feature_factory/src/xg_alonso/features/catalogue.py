@@ -82,6 +82,17 @@ class FeatureSpec:
 
 #: Windows in appearances. Short windows capture form, long ones capture level;
 #: both matter and the evaluation layer decides which earns its place.
+#:
+#: A window of one was removed once and put back. The reasoning for removing it
+#: was sound — a "mean" over a single observation is not a mean, and the
+#: importance run had the model leaning on `minutes_mean_1` harder than on
+#: anything else — but the experiment did not support it: out-of-sample skill on
+#: minutes fell from +60.6% to +57.8% and on starts from +57.7% to +54.4%, and
+#: the projection it was meant to fix did not move. The model simply leaned on
+#: `minutes_mean_3` instead, which was depressed by the same rows.
+#:
+#: The rows were the problem, not the window. See `minutes_when_played_*` in
+#: `recency.py`.
 _WINDOWS: Final[tuple[int, ...]] = (1, 3, 5, 10, 20)
 
 #: Counting metrics. Rolling means and sums are meaningful; per-90 is not,

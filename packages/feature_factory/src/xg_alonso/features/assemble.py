@@ -19,6 +19,7 @@ import polars as pl
 from xg_alonso.features.career import build_career_features
 from xg_alonso.features.catalogue import build_catalogue
 from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
+from xg_alonso.features.recency import build_recency_features
 
 __all__ = ["build_model_features"]
 
@@ -46,4 +47,5 @@ def build_model_features(
     )
     features = build_catalogue(entities, player_stats=player_stats)
     features = build_opponent_features(features, opponent_strength=strength)
-    return build_career_features(features, player_stats=player_stats)
+    features = build_career_features(features, player_stats=player_stats)
+    return build_recency_features(features, player_stats=player_stats)

@@ -48,6 +48,7 @@ from xg_alonso.features.point_in_time import (
     filter_available,
     point_in_time_join,
 )
+from xg_alonso.features.recency import RECENCY_FEATURES, build_recency_features
 from xg_alonso.features.slice1 import (
     SLICE1_FEATURE_SET_VERSION,
     SLICE1_FEATURES,
@@ -61,6 +62,7 @@ __all__ = [
     "CAREER_VERSION",
     "CATALOGUE_VERSION",
     "OPPONENT_FEATURES",
+    "RECENCY_FEATURES",
     "SLICE1_FEATURES",
     "SLICE1_FEATURE_SET_VERSION",
     "Archetype",
@@ -77,6 +79,7 @@ __all__ = [
     "build_model_features",
     "build_opponent_features",
     "build_opponent_strength",
+    "build_recency_features",
     "build_slice1_features",
     "build_team_gameweek_stats",
     "catalogue_specs",
