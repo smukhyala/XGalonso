@@ -24,6 +24,7 @@ from datetime import timedelta
 
 import polars as pl
 
+from xg_alonso.features.career import CAREER_FEATURES, build_career_features
 from xg_alonso.features.catalogue import build_catalogue, feature_names
 from xg_alonso.features.opponent import (
     OPPONENT_FEATURES,
@@ -137,6 +138,11 @@ def build_training_frame(
 
         features = build_catalogue(entities, player_stats=stats)
         features = build_opponent_features(features, opponent_strength=opponent_strength)
+        # Career evidence, so the model can learn the difference between a rate
+        # sustained over four seasons and the same rate seen once. Point-in-time
+        # safe by the same rule as everything else: only seasons that had
+        # finished being played by this gameweek's deadline are visible.
+        features = build_career_features(features, player_stats=stats)
 
         label_frame = outcomes.group_by("player_code").agg(
             [pl.col(c).sum().alias(f"label_{c}") for c in labels]
@@ -156,7 +162,7 @@ def build_training_frame(
     frame = pl.concat(built, how="vertical").sort(["label_season", "label_gameweek", "player_code"])
     return TrainingData(
         frame=frame,
-        feature_columns=tuple(feature_names()) + OPPONENT_FEATURES,
+        feature_columns=tuple(feature_names()) + OPPONENT_FEATURES + CAREER_FEATURES,
         label_columns=tuple(f"label_{c}" for c in labels),
         gameweeks=tuple(sorted({int(g) for g in frame["label_gameweek"].unique()})),
         seasons=tuple(sorted({str(s) for s in frame["label_season"].unique()})),

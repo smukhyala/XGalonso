@@ -40,6 +40,7 @@ from xg_alonso.domain.purchase_prices import parse_transfer_log, reconstruct_pur
 from xg_alonso.domain.rules import SquadRules
 from xg_alonso.domain.scoring import ScoringRules
 from xg_alonso.explanations.reasons import PopulationStats
+from xg_alonso.features.career import build_career_features
 from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
 from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
 from xg_alonso.features.slice1 import (
@@ -337,6 +338,10 @@ def recommend(
         features = build_opponent_features(
             features, opponent_strength=build_opponent_strength(context.player_stats)
         )
+        # Career-length evidence. Every catalogue window is measured in
+        # appearances and tops out at twenty, so a player with four elite
+        # seasons and one with a single hot streak look identical inside it.
+        features = build_career_features(features, player_stats=context.player_stats)
         predictions = predict_with_models(
             features,
             models=models,

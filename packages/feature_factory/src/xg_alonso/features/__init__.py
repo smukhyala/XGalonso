@@ -17,6 +17,11 @@ from xg_alonso.features.archetypes import (
     PlayerArchetype,
     build_archetypes,
 )
+from xg_alonso.features.career import (
+    CAREER_FEATURES,
+    CAREER_VERSION,
+    build_career_features,
+)
 from xg_alonso.features.catalogue import (
     CATALOGUE_VERSION,
     FeatureSpec,
@@ -51,6 +56,8 @@ from xg_alonso.features.slice1 import (
 
 __all__ = [
     "ARCHETYPE_VERSION",
+    "CAREER_FEATURES",
+    "CAREER_VERSION",
     "CATALOGUE_VERSION",
     "OPPONENT_FEATURES",
     "SLICE1_FEATURES",
@@ -64,6 +71,7 @@ __all__ = [
     "assert_detects_leakage",
     "assert_no_leakage",
     "build_archetypes",
+    "build_career_features",
     "build_catalogue",
     "build_opponent_features",
     "build_opponent_strength",

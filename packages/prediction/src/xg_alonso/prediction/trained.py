@@ -139,6 +139,13 @@ class ComponentModels:
     reports: list[FoldReport] = field(default_factory=list)
     trained_on_rows: int = 0
     folds: tuple[WalkForwardFold, ...] = ()
+    dropped_features: tuple[str, ...] = ()
+    """Declared features that were null for every training row.
+
+    Recorded rather than silently discarded: a feature set that quietly shrinks
+    is one whose version string no longer describes it.
+    """
+
     label_means: dict[str, float] = field(default_factory=dict)
     """Population mean per label — what a component is shrunk *toward*.
 
@@ -239,6 +246,32 @@ class ComponentModels:
         return out
 
 
+def usable_features(frame: pl.DataFrame, columns: tuple[str, ...]) -> tuple[str, ...]:
+    """Feature columns that have at least one value in this frame.
+
+    **An entirely-null column crashes the estimator.** HistGradientBoosting bins
+    each feature by taking midpoints between distinct values, and with no values
+    at all the binner asks numpy for a two-wide sliding window over an empty
+    array, which raises rather than degrading. The traceback names
+    `_find_binning_thresholds` and says nothing about which column caused it.
+
+    This is not hypothetical or new: `defensive_contribution` exists for one
+    season only, so any training run that does not include 2025/26 already had
+    an all-null column in the catalogue and would have hit exactly this. It
+    surfaced when career features were added because those are null for players
+    with no prior seasons.
+
+    Dropping such a column loses nothing — a feature with no values cannot split
+    anything — and the caller records which were dropped so a silently shrinking
+    feature set stays visible.
+    """
+    return tuple(
+        name
+        for name in columns
+        if name in frame.columns and frame[name].null_count() < frame.height
+    )
+
+
 def _matrix(frame: pl.DataFrame, columns: tuple[str, ...]) -> np.ndarray:
     """Feature matrix with nulls preserved as NaN.
 
@@ -286,6 +319,16 @@ def train_component_models(
     if training.is_empty():
         raise ValueError("training frame is empty")
 
+    # A feature that is null for every row cannot split anything, and passing one
+    # to the estimator raises from inside its binner rather than degrading.
+    present = usable_features(training, feature_columns)
+    dropped = [name for name in feature_columns if name not in set(present)]
+    if dropped:
+        # Not a warning to a log nobody reads: the fitted artifact records the
+        # columns it actually used, so a later prediction cannot hand it a
+        # feature set it was never fitted on.
+        feature_columns = present
+
     # A globally increasing gameweek index across seasons, so folds never wrap
     # backwards over a season boundary.
     ordered_seasons = sorted(training["label_season"].unique().to_list())
@@ -305,7 +348,9 @@ def train_component_models(
         embargo_gameweeks=embargo_gameweeks,
     )
 
-    result = ComponentModels(feature_columns=feature_columns, folds=tuple(folds))
+    result = ComponentModels(
+        feature_columns=feature_columns, folds=tuple(folds), dropped_features=tuple(dropped)
+    )
 
     for fold in folds:
         train_mask = indexed["__timeline"].is_between(fold.train_start, fold.train_end)

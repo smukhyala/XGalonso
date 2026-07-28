@@ -217,6 +217,37 @@ class TestTrainedModels:
             )
 
 
+class TestAllNullFeatures:
+    """An entirely-null column crashes the estimator's binner.
+
+    Not hypothetical: `defensive_contribution` exists for one season only, so
+    any training run excluding 2025/26 already carried an all-null column. The
+    failure surfaces as a numpy sliding-window error from inside sklearn that
+    names no column.
+    """
+
+    def test_an_all_null_column_is_dropped_rather_than_crashing(self) -> None:
+        from xg_alonso.prediction.trained import usable_features
+
+        frame = pl.DataFrame(
+            {
+                "good": [1.0, 2.0, 3.0, 4.0],
+                "empty": [None, None, None, None],
+                "sparse": [1.0, None, None, 2.0],
+            }
+        )
+        usable = usable_features(frame, ("good", "empty", "sparse"))
+        assert "empty" not in usable
+        assert "good" in usable
+        assert "sparse" in usable, "a partly-null column is still informative"
+
+    def test_a_missing_column_is_not_reported_as_usable(self) -> None:
+        frame = pl.DataFrame({"good": [1.0, 2.0]})
+        from xg_alonso.prediction.trained import usable_features
+
+        assert usable_features(frame, ("good", "absent")) == ("good",)
+
+
 class TestLabelCoverage:
     def test_every_declared_component_label_is_produced(self) -> None:
         data = build_training_frame(_stats(), min_gameweek=4)

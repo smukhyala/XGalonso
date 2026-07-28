@@ -56,6 +56,7 @@ from xg_alonso.explanations.lineup_diff import compare_lineups, selection_from_s
 from xg_alonso.explanations.player import ArchetypeVerdict, Comparable, explain_squad
 from xg_alonso.explanations.reasons import PopulationStats
 from xg_alonso.features.archetypes import ArchetypeModel, build_archetypes
+from xg_alonso.features.career import build_career_features
 from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
 from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
 from xg_alonso.features.slice1 import (
@@ -188,6 +189,10 @@ class DecisionService:
                 features,
                 opponent_strength=build_opponent_strength(self._context.player_stats),
             )
+            # Career-length evidence. Every catalogue window is measured in
+            # appearances and tops out at twenty, so a player with four elite
+            # seasons and one with a single hot streak look identical inside it.
+            features = build_career_features(features, player_stats=self._context.player_stats)
             predictions = predict_with_models(
                 features,
                 models=self._models,
