@@ -9,12 +9,18 @@ dependencies = [
     "scipy>=1.11,<2",
     "xg-alonso-contracts",
     "xg-alonso-domain",
+    # The recommendation contract requires at least one grounded reason, so the
+    # optimizer must build reasons. It shares one builder with the per-player
+    # explanation rather than keeping a second copy, because two builders over
+    # the same evidence are two chances to describe the same player differently.
+    "xg-alonso-explanations",
     "xg-alonso-prediction",
 ]
 
 [tool.uv.sources]
 xg-alonso-contracts = { workspace = true }
 xg-alonso-domain = { workspace = true }
+xg-alonso-explanations = { workspace = true }
 xg-alonso-prediction = { workspace = true }
 
 [build-system]

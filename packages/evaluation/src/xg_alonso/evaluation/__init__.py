@@ -25,6 +25,16 @@ from xg_alonso.evaluation.backtest import (
     score_squad,
     walk_forward,
 )
+from xg_alonso.evaluation.importance import (
+    IMPORTANCE_SCHEMA_VERSION,
+    LABEL_TO_BREAKDOWN,
+    FeatureImportance,
+    ImportanceTable,
+    label_weights_from_predictions,
+    load_importance,
+    permutation_importance,
+    write_importance,
+)
 from xg_alonso.evaluation.policies import (
     POLICIES,
     PolicyName,
@@ -44,12 +54,16 @@ from xg_alonso.evaluation.report import (
 
 __all__ = [
     "POLICIES",
+    "IMPORTANCE_SCHEMA_VERSION",
+    "LABEL_TO_BREAKDOWN",
     "PRICE_BANDS",
     "AccuracyReport",
     "AccuracySlice",
     "BacktestReport",
     "BacktestResult",
+    "FeatureImportance",
     "GameweekOutcome",
+    "ImportanceTable",
     "PolicyName",
     "TopKResult",
     "actual_points",
@@ -57,15 +71,19 @@ __all__ = [
     "compare_to_previous",
     "gameweek_deadlines",
     "highest_form_policy",
+    "label_weights_from_predictions",
     "hold_policy",
+    "load_importance",
     "load_reports",
     "model_policy",
     "most_expensive_policy",
+    "permutation_importance",
     "random_policy",
     "run_policy",
     "score_predictions",
     "score_squad",
     "spearman",
     "walk_forward",
+    "write_importance",
     "write_report",
 ]

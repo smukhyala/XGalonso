@@ -93,6 +93,8 @@ def best_starting_xi(
     picks: Sequence[SquadPick],
     predictions: Mapping[PlayerCode, PlayerPrediction],
     rules: SquadRules,
+    *,
+    required: PlayerCode | None = None,
 ) -> XiSelection:
     """Choose the highest-scoring legal eleven, plus captain, vice and bench.
 
@@ -104,6 +106,11 @@ def best_starting_xi(
             which correctly makes an unpredicted player a last resort rather
             than an error.
         rules: Supplies the positional bounds and the starting-XI size.
+        required: A player who must start. Used to price what benching him
+            actually costs: the difference between the best XI containing him
+            and the best XI overall is exact, where comparing his expected
+            points against the lowest starter's is not — it ignores that the
+            swap may force a different, legal formation.
 
     Returns:
         The best selection found. When no legal shape can be filled, returns an
@@ -114,6 +121,12 @@ def best_starting_xi(
     by_position: dict[Position, list[SquadPick]] = {p: [] for p in Position}
     for pick in picks:
         by_position[pick.position].append(pick)
+
+    required_pick: SquadPick | None = None
+    if required is not None:
+        required_pick = next((p for p in picks if p.player_code == required), None)
+        if required_pick is None:
+            raise ValueError(f"player {required} is not in this squad and cannot be required")
 
     # Sorting once per position is what makes the formation loop cheap: within
     # a shape, the best choice is always the top n.
@@ -129,9 +142,21 @@ def best_starting_xi(
         if any(len(by_position[pos]) < n for pos, n in counts.items()):
             continue  # squad cannot field this shape
 
+        # A required player consumes one slot in his own position, and the rest
+        # of that position is filled from the next best. A shape with no slot
+        # for him is simply not a shape he can start in.
+        if required_pick is not None and counts[required_pick.position] < 1:
+            continue
+
         starters: list[SquadPick] = []
         for position, count in counts.items():
-            starters.extend(by_position[position][:count])
+            pool = by_position[position]
+            if required_pick is not None and position is required_pick.position:
+                others = [p for p in pool if p.player_code != required_pick.player_code]
+                starters.append(required_pick)
+                starters.extend(others[: count - 1])
+            else:
+                starters.extend(pool[:count])
 
         base = sum(_expected(p, predictions) for p in starters)
         captain_pick = max(starters, key=lambda p: (_expected(p, predictions), -int(p.player_code)))
