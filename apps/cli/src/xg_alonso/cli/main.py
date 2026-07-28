@@ -236,21 +236,24 @@ def build_features_command(
 
     reported: tuple[str, ...] = SLICE1_FEATURES
     if full:
-        from xg_alonso.features.catalogue import build_catalogue, feature_names
-        from xg_alonso.features.opponent import (
-            OPPONENT_FEATURES,
-            build_opponent_features,
-            build_opponent_strength,
-        )
+        from xg_alonso.features.assemble import build_model_features
+        from xg_alonso.features.career import CAREER_FEATURES
+        from xg_alonso.features.catalogue import feature_names
+        from xg_alonso.features.opponent import OPPONENT_FEATURES
+        from xg_alonso.features.recency import RECENCY_FEATURES
 
-        features = build_catalogue(features, player_stats=context.player_stats)
-        # Opponent context was previously built only inside the backtest, so
-        # the artifact this command wrote could not be consumed by a trained
-        # model — it was missing thirteen columns the model expects.
-        features = build_opponent_features(
-            features, opponent_strength=build_opponent_strength(context.player_stats)
+        # Built through the shared assembler so the artifact this command
+        # writes is exactly what a trained model consumes. Assembling it
+        # separately is how it previously came to be missing thirteen opponent
+        # columns, and later the career and recency ones.
+        features = build_model_features(features, player_stats=context.player_stats)
+        reported = (
+            tuple(SLICE1_FEATURES)
+            + tuple(feature_names())
+            + OPPONENT_FEATURES
+            + CAREER_FEATURES
+            + RECENCY_FEATURES
         )
-        reported = tuple(SLICE1_FEATURES) + tuple(feature_names()) + OPPONENT_FEATURES
 
     out_dir = data_root / "gold"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -801,8 +804,8 @@ def backtest(
             return result
 
         assert trained is not None
-        from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
-        from xg_alonso.features.opponent import build_opponent_features
+        from xg_alonso.features.assemble import build_model_features
+        from xg_alonso.features.catalogue import CATALOGUE_VERSION
         from xg_alonso.prediction import predict_with_models
 
         _, _, cutoff = _inputs_for(gameweek)
@@ -822,8 +825,9 @@ def backtest(
             .join(fixture, on="player_code", how="left")
             .with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
         )
-        features = build_catalogue(entities, player_stats=all_stats)
-        features = build_opponent_features(features, opponent_strength=opponent_strength)
+        features = build_model_features(
+            entities, player_stats=all_stats, opponent_strength=opponent_strength
+        )
 
         predictions = predict_with_models(
             features,
@@ -1359,7 +1363,7 @@ def score(
         gameweek_deadlines,
         score_predictions,
     )
-    from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
+    from xg_alonso.features.opponent import build_opponent_strength
     from xg_alonso.features.slice1 import build_slice1_features, build_team_gameweek_stats
     from xg_alonso.prediction.baseline import predict_frame
 
@@ -1452,7 +1456,8 @@ def score(
                 feature_set_version="slice1_v1",
             )
         else:
-            from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
+            from xg_alonso.features.assemble import build_model_features
+            from xg_alonso.features.catalogue import CATALOGUE_VERSION
             from xg_alonso.prediction import predict_with_models
 
             fixture = (
@@ -1465,8 +1470,9 @@ def score(
                 .join(fixture, on="player_code", how="left")
                 .with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
             )
-            features = build_catalogue(entities, player_stats=all_stats)
-            features = build_opponent_features(features, opponent_strength=opponent_strength)
+            features = build_model_features(
+                entities, player_stats=all_stats, opponent_strength=opponent_strength
+            )
             predictions = predict_with_models(
                 features,
                 models=trained.models,

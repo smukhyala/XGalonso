@@ -70,6 +70,7 @@ from xg_alonso.pipelines.ingestion import SOURCE_BOOTSTRAP, SOURCE_FIXTURES, Fpl
 from xg_alonso.pipelines.normalization import PLAYER_GAMEWEEK_STATS_SCHEMA, empty_frame
 from xg_alonso.prediction import load_models, predict_with_models
 from xg_alonso.prediction.baseline import predict_frame
+from xg_alonso.prediction.calibration import apply_price_calibration
 from xg_alonso.prediction.form import apply_form_signals, form_reason, load_signals
 from xg_alonso.storage import FileSystemBronzeStore
 
@@ -216,6 +217,17 @@ class DecisionService:
                 code_version="api",
                 feature_set_version=SLICE1_FEATURE_SET_VERSION,
             )
+
+        # Correct the model's measured under-projection of expensive players
+        # before anything downstream reads a number. Left uncorrected it makes
+        # the optimizer bank money rather than upgrade, because the players a
+        # budget would be spent on are exactly the ones scored too low.
+        rows = self._player_rows()
+        prices = {
+            PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
+            for code, row in rows.items()
+        }
+        predictions = apply_price_calibration(predictions, prices)
 
         # Outside information, applied here rather than in each endpoint so that
         # `/players`, `/squad` and `/build-squad` cannot disagree with each

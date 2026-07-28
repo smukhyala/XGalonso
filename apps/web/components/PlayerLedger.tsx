@@ -210,7 +210,16 @@ function Detail({ player }: { player: PlayerExplanation }) {
   return (
     <div className="grid gap-10 pb-9 pt-2 lg:grid-cols-2">
       <div>
-        <p className="eyebrow">Where the {player.expected_points.toFixed(2)} comes from</p>
+        <p className="eyebrow">
+          Where the {player.expected_points.toFixed(2)} comes from
+        </p>
+        {/*
+          The arithmetic and the record sit together deliberately. A component
+          breakdown says how the number was built and cannot say whether it has
+          ever happened; a match record says what happened and cannot say what
+          it adds up to. Shown apart, a reader has to hold one in their head
+          while reading the other.
+        */}
         {player.derivation.length > 0 ? (
           <ul className="mt-4 space-y-4">
             {player.derivation.map((line) => (
@@ -272,6 +281,22 @@ function Detail({ player }: { player: PlayerExplanation }) {
           </p>
         )}
 
+        {player.history.length > 0 && (
+          <div className="mt-8">
+            <p className="eyebrow">Whether it has happened before</p>
+            <div className="mt-4">
+              <History notes={player.history} compact />
+            </div>
+            <p
+              className="mt-4 max-w-md text-[12px] leading-relaxed"
+              style={{ color: "var(--color-dim)" }}
+            >
+              Match results, not projections. Nothing here moved the number above — it is
+              here so the number can be argued with.
+            </p>
+          </div>
+        )}
+
         <p className="eyebrow mt-9">
           {player.is_starter ? "Why he starts" : "Why he sits"}
         </p>
@@ -309,15 +334,6 @@ function Detail({ player }: { player: PlayerExplanation }) {
               ))}
             </ul>
           </>
-        )}
-
-        {player.history.length > 0 && (
-          <div className="mt-9">
-            <p className="eyebrow">His record in this fixture</p>
-            <div className="mt-4">
-              <History notes={player.history} compact />
-            </div>
-          </div>
         )}
 
         {player.archetype && <ArchetypePanel archetype={player.archetype} />}
