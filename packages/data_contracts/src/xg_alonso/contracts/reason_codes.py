@@ -79,6 +79,10 @@ class ReasonCode(StrEnum):
     PRICE_EFFICIENCY = "PRICE_EFFICIENCY"
     POINTS_BREAKDOWN = "POINTS_BREAKDOWN"
 
+    # --- information the API cannot see ---
+    FORM_SIGNAL_POSITIVE = "FORM_SIGNAL_POSITIVE"
+    FORM_SIGNAL_NEGATIVE = "FORM_SIGNAL_NEGATIVE"
+
     # --- why the choice set was what it was ---
     POSITION_LOCKED = "POSITION_LOCKED"
     BUDGET_LOCKED = "BUDGET_LOCKED"
@@ -162,6 +166,12 @@ REASON_TEMPLATES: Final[dict[ReasonCode, str]] = {
         "{total:.2f} projected points = {appearance:.2f} for appearing "
         "+ {goals:.2f} goals + {assists:.2f} assists + {clean_sheets:.2f} clean sheet "
         "+ {bonus:.2f} bonus."
+    ),
+    ReasonCode.FORM_SIGNAL_POSITIVE: (
+        "Recent form outside the data: {summary} Projection raised {shift:.0%}. Source: {source}"
+    ),
+    ReasonCode.FORM_SIGNAL_NEGATIVE: (
+        "Recent form outside the data: {summary} Projection cut {shift:.0%}. Source: {source}"
     ),
     ReasonCode.POSITION_LOCKED: (
         "A transfer is like-for-like, so only {candidate_count:.0f} {position}s were "

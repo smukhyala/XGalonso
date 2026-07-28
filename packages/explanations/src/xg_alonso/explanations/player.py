@@ -175,6 +175,7 @@ def explain_player(
     price: TenthsOfMillion | None = None,
     chance_of_playing: float | None = None,
     archetype: ArchetypeVerdict | None = None,
+    form_reason: Reason | None = None,
 ) -> PlayerExplanation:
     """Assemble one player's justification.
 
@@ -209,11 +210,17 @@ def explain_player(
         evidence=(
             () if prediction.feature_evidence is None else prediction.feature_evidence.ranked()
         ),
-        reasons=build_player_reasons(
-            prediction,
-            population=population,
-            price=price,
-            chance_of_playing=chance_of_playing,
+        reasons=(
+            # First, because it is the one thing on the page the statistics
+            # cannot account for — a reader scanning the list should meet it
+            # before the numbers it contradicts.
+            ((form_reason,) if form_reason is not None else ())
+            + build_player_reasons(
+                prediction,
+                population=population,
+                price=price,
+                chance_of_playing=chance_of_playing,
+            )
         ),
         start_verdict=verdict,
         replacements=tuple(replacements[:3]),
@@ -237,6 +244,7 @@ def explain_squad(
     prices: Mapping[PlayerCode, TenthsOfMillion] | None = None,
     chances_of_playing: Mapping[PlayerCode, float] | None = None,
     archetypes: Mapping[PlayerCode, ArchetypeVerdict] | None = None,
+    form_reasons: Mapping[PlayerCode, Reason] | None = None,
 ) -> list[PlayerExplanation]:
     """Explain every squad member, in squad order.
 
@@ -249,6 +257,7 @@ def explain_squad(
     prices = prices or {}
     chances_of_playing = chances_of_playing or {}
     archetypes = archetypes or {}
+    form_reasons = form_reasons or {}
 
     explanations: list[PlayerExplanation] = []
     for pick in picks:
@@ -270,6 +279,7 @@ def explain_squad(
                 price=prices.get(code),
                 chance_of_playing=chances_of_playing.get(code),
                 archetype=archetypes.get(code),
+                form_reason=form_reasons.get(code),
             )
         )
     return explanations

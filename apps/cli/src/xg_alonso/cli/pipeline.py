@@ -56,6 +56,7 @@ from xg_alonso.pipelines.normalization import (
     normalize_teams,
 )
 from xg_alonso.prediction.baseline import predict_frame
+from xg_alonso.prediction.form import apply_form_signals, load_signals
 from xg_alonso.prediction.inference import predict_with_models
 from xg_alonso.prediction.trained import ComponentModels
 
@@ -64,6 +65,11 @@ from xg_alonso.prediction.trained import ComponentModels
 #: D3 reconstructs real prices from entry/{id}/transfers/, but that endpoint
 #: returns [] until a season produces transfers.
 PRICES_WERE_ASSUMED: dict[int, bool] = {}
+
+#: Where sourced form signals are read from when no path is given. A missing
+#: file means no outside information, which is the correct default: the system
+#: must answer exactly as it always did when nobody has written anything down.
+_DEFAULT_SIGNALS = Path(".data/signals/form_signals.json")
 
 __all__ = [
     "PRICES_WERE_ASSUMED",
@@ -308,6 +314,7 @@ def recommend(
     generated_at: datetime,
     horizon_gameweeks: int = 1,
     models: ComponentModels | None = None,
+    form_signals_path: Path | None = None,
 ) -> tuple[TransferRecommendation, dict[PlayerCode, PlayerPrediction]]:
     """Run the full slice: features, predictions, and the best legal transfer.
 
@@ -358,6 +365,13 @@ def recommend(
             feature_set_version=SLICE1_FEATURE_SET_VERSION,
             horizon_gameweeks=horizon_gameweeks,
         )
+    # Outside information the API cannot see — a poor international tournament,
+    # a public fallout — scaled within a hard clamp and only where a sourced
+    # signal exists. Evaluated against the deadline rather than the wall clock,
+    # so a backtest sees what was live then.
+    predictions = apply_form_signals(
+        predictions, load_signals(form_signals_path or _DEFAULT_SIGNALS), at=cutoff
+    )
     by_code = {p.player_code: p for p in predictions}
 
     # Unavailable players are excluded from the buy list rather than penalised.

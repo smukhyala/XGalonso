@@ -2,7 +2,13 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { api, labelName, type FeatureImportance, type ImportanceResponse } from "@/lib/api";
+import {
+  api,
+  importanceText,
+  labelName,
+  type FeatureImportance,
+  type ImportanceResponse,
+} from "@/lib/api";
 import { explainFamily, explainFeature } from "@/lib/glossary";
 
 /**
@@ -296,7 +302,7 @@ function Ranking({ data, busy }: { data: ImportanceResponse; busy: boolean }) {
                 </span>
 
                 <span className="tnum text-right text-[13px]">
-                  {feature.importance.toExponential(1)}
+                  {importanceText(feature.importance)}
                 </span>
               </button>
 
@@ -306,11 +312,12 @@ function Ranking({ data, busy }: { data: ImportanceResponse; busy: boolean }) {
         })}
       </ol>
       <p className="mt-5 max-w-2xl text-[13px] leading-relaxed" style={{ color: "var(--color-dim)" }}>
-        Bars fade as a feature&rsquo;s rank moves between folds: a solid bar landed in
-        roughly the same place every time, a faint one happened to look important once.
-        Lengths are square-root scaled — importance follows a power law here, and on a
-        linear axis everything below the top feature disappears. The figures on the right
-        are exact.
+        The percentage is how much worse the model got at predicting points when that
+        feature was shuffled — 3.6% means the error grew by 3.6%. Bars fade as a
+        feature&rsquo;s rank moves between folds: a solid bar landed in roughly the same
+        place every time, a faint one happened to look important once. Lengths are
+        square-root scaled, since importance follows a power law here and on a linear
+        axis everything below the top feature disappears.
       </p>
       {data.features_measured > data.features.length && (
         <p className="eyebrow mt-3">
@@ -388,13 +395,14 @@ function FeatureDetail({
                   }}
                 />
               </span>
-              <span className="tnum text-right text-[12px]">{value.toExponential(1)}</span>
+              <span className="tnum text-right text-[12px]">{importanceText(value)}</span>
             </li>
           ))}
         </ul>
         <p className="mt-4 max-w-xs text-[12px] leading-relaxed" style={{ color: "var(--color-dim)" }}>
-          How much shuffling this feature hurt each component model. A red bar means the
-          model predicted that component <em>better</em> without it.
+          How much worse each component model got when this feature was shuffled. A red
+          bar means the model predicted that component <em>better</em> without it — the
+          feature was actively misleading it there.
         </p>
       </div>
     </div>
@@ -442,7 +450,7 @@ function Families({ data }: { data: ImportanceResponse }) {
                     }}
                   />
                 </span>
-                <span className="tnum text-right text-[13px]">{value.toExponential(1)}</span>
+                <span className="tnum text-right text-[13px]">{importanceText(value)}</span>
               </button>
               {isOpen && (
                 <div className="max-w-prose space-y-3 pb-7 pt-1 text-[14px] leading-relaxed">

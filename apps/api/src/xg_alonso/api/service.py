@@ -66,6 +66,7 @@ from xg_alonso.pipelines.ingestion import SOURCE_BOOTSTRAP, SOURCE_FIXTURES, Fpl
 from xg_alonso.pipelines.normalization import PLAYER_GAMEWEEK_STATS_SCHEMA, empty_frame
 from xg_alonso.prediction import load_models, predict_with_models
 from xg_alonso.prediction.baseline import predict_frame
+from xg_alonso.prediction.form import apply_form_signals, form_reason, load_signals
 from xg_alonso.storage import FileSystemBronzeStore
 
 if TYPE_CHECKING:
@@ -214,6 +215,16 @@ class DecisionService:
                 code_version="api",
                 feature_set_version=SLICE1_FEATURE_SET_VERSION,
             )
+
+        # Outside information, applied here rather than in each endpoint so that
+        # `/players`, `/squad` and `/build-squad` cannot disagree with each
+        # other about the same player — the failure mode this module's header
+        # already records once.
+        predictions = apply_form_signals(
+            predictions,
+            load_signals(self._config.data_root / "signals" / "form_signals.json"),
+            at=cutoff,
+        )
 
         self._predictions[key] = predictions
         return predictions
@@ -447,6 +458,19 @@ class DecisionService:
         state = self._load_squad(entry_id, squad_file)
         return self._squad_response(state, prices_assumed=PRICES_WERE_ASSUMED.get(entry_id, False))
 
+    def _form_reasons(self, gameweek: GameweekId) -> dict[PlayerCode, Reason]:
+        """Sourced outside information, as grounded reasons.
+
+        Evaluated against the deadline rather than the wall clock so the
+        explanation matches the prediction, which was adjusted at the same
+        moment.
+        """
+        signals = load_signals(self._config.data_root / "signals" / "form_signals.json")
+        at = self._context.deadline_for(gameweek)
+        return {
+            code: form_reason(signal, code, weight=2.0) for code, signal in signals.live(at).items()
+        }
+
     def _names(self) -> dict[int, str]:
         return {code: str(row["web_name"]) for code, row in self._player_rows().items()}
 
@@ -562,6 +586,7 @@ class DecisionService:
             prices=prices,
             chances_of_playing=chances,
             archetypes=self._archetype_verdicts(gameweek, by_code),
+            form_reasons=self._form_reasons(gameweek),
         )
 
         out: list[PlayerExplanationOut] = []
@@ -756,6 +781,7 @@ class DecisionService:
             prices=prices,
             chances_of_playing=chances,
             archetypes=self._archetype_verdicts(gameweek, by_code),
+            form_reasons=self._form_reasons(gameweek),
         )
 
         from xg_alonso.api.main import FeatureValueOut, PlayerExplanationOut

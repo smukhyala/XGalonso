@@ -311,13 +311,14 @@ class TestBudget:
         state, _ = build_squad(_pool(), rules=rules, entry_id=EntryId(1), gameweek=GameweekId(1))
         assert int(state.bank) >= 0
 
-    def test_tie_break_spends_idle_money_on_the_bench(self, rules: SquadRules) -> None:
-        """Money that cannot buy XI points should still buy the best bench.
+    def test_the_bench_is_cheap_rather_than_strong(self, rules: SquadRules) -> None:
+        """Bench quality is points that are almost never collected.
 
-        Bench players score zero, so which bench is chosen is a free variable.
-        Left arbitrary it produces unstable squads and a meaningless bank; the
-        tie-break resolves it toward the strongest affordable bench, which costs
-        nothing in XI points and is worth something once autosubs are modelled.
+        A substitute scores only when a starter is withdrawn or Bench Boost is
+        played, and the chip is not modelled (D5). The tie-break used to buy the
+        strongest affordable bench, which spent the eleven's budget on returns
+        that never arrive. It now buys the cheapest bench that can still autosub,
+        so the remainder comes back as bank.
         """
         pool = _pool()
         by_code = {c.player_code: c for c in pool}
@@ -325,9 +326,6 @@ class TestBudget:
             pool, rules=rules, entry_id=EntryId(1), gameweek=GameweekId(1)
         )
 
-        # Local optimality of the bench: no unused candidate of the same
-        # position is both affordable and better than the bench player he would
-        # replace. A merely-nonzero bench would pass by luck; this would not.
         squad = {p.player_code for p in state.picks}
         clubs: dict[int, int] = {}
         for pick in state.picks:
@@ -335,21 +333,47 @@ class TestBudget:
 
         for benched in selection.bench:
             outgoing = by_code[benched.player_code]
-            headroom = int(state.bank) + int(outgoing.price)
             for other in pool:
                 if other.player_code in squad or other.position is not outgoing.position:
-                    continue
-                if int(other.price) > headroom:
                     continue
                 club = int(other.team_id)
                 allowance = clubs.get(club, 0) - (1 if club == int(outgoing.team_id) else 0)
                 if allowance >= rules.max_per_club:
                     continue
-                assert other.expected_points <= outgoing.expected_points + 1e-9, (
-                    f"{other.player_code} ({other.expected_points:.3f}) is affordable and "
-                    f"better than benched {outgoing.player_code} "
-                    f"({outgoing.expected_points:.3f}) — the tie-break left money idle"
+                # A swap that is cheaper *and* at least as likely to appear
+                # would strictly improve the bench, so none should exist.
+                cheaper = int(other.price) < int(outgoing.price)
+                plays_as_much = (
+                    other.prediction.components.minutes.p_appearance
+                    >= outgoing.prediction.components.minutes.p_appearance - 1e-9
                 )
+                assert not (cheaper and plays_as_much), (
+                    f"{other.player_code} is cheaper than benched {outgoing.player_code} "
+                    "and no less likely to play — the bench is overpaying"
+                )
+
+    def test_a_cheaper_bench_does_not_cost_the_eleven(self, rules: SquadRules) -> None:
+        """The change is where leftover money goes, not how good the XI is.
+
+        The solver already maximised the eleven subject to the whole-squad
+        budget, so preferring a cheap bench must leave the projection untouched.
+        This checks the reported optimum still equals what the chosen fifteen
+        actually field — if the tie-break had grown into a second objective, the
+        solver would be reporting a squad it no longer optimises.
+        """
+        pool = _pool()
+        state, selection = build_squad(
+            pool, rules=rules, entry_id=EntryId(1), gameweek=GameweekId(1)
+        )
+        fielded = starting_xi_points(
+            state.picks, {c.player_code: c.prediction for c in pool}, rules
+        )
+        assert selection.expected_points == pytest.approx(fielded)
+
+    def test_leftover_money_comes_back_as_bank(self, rules: SquadRules) -> None:
+        """A cheap bench is only worth having if the saving is actually banked."""
+        state, _ = build_squad(_pool(), rules=rules, entry_id=EntryId(1), gameweek=GameweekId(1))
+        assert int(state.bank) > 0
 
     def test_impossible_budget_raises_with_a_useful_message(self, rules: SquadRules) -> None:
         broke = rules.model_copy(update={"total_budget": TenthsOfMillion(100)})

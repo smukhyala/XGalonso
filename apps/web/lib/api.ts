@@ -245,6 +245,28 @@ function suffix(value: number): string {
   return "th";
 }
 
+/**
+ * Importance as a percentage a person can read.
+ *
+ * These values are a fraction of the model's baseline error, so a percentage is
+ * the literal reading: 0.036 means shuffling the feature made the model 3.6%
+ * worse. Exponent notation said the same thing and communicated nothing —
+ * "3.6e-2" next to "5.9e-4" asks a reader to compare mantissas and exponents in
+ * their head, which is exactly the arithmetic a chart exists to avoid.
+ *
+ * Small values keep two significant figures rather than rounding to "0.0%",
+ * because the tail of this ranking is where the "did this feature do anything"
+ * question actually lives.
+ */
+export function importanceText(value: number): string {
+  const percent = value * 100;
+  const magnitude = Math.abs(percent);
+  if (magnitude === 0) return "0%";
+  if (magnitude < 0.01) return `${percent < 0 ? "−" : ""}<0.01%`;
+  const decimals = magnitude >= 10 ? 1 : magnitude >= 1 ? 2 : 3;
+  return `${percent.toFixed(decimals)}%`;
+}
+
 /** Money is stored in tenths of a million everywhere in this system. */
 export function money(tenths: number): string {
   return `£${(tenths / 10).toFixed(1)}m`;

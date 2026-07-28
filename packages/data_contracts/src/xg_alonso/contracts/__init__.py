@@ -22,6 +22,13 @@ from xg_alonso.contracts.evidence import (
     panel_feature_names,
 )
 from xg_alonso.contracts.folds import WalkForwardFold, walk_forward_folds
+from xg_alonso.contracts.form import (
+    FORM_SIGNAL_CLAMP,
+    FormDirection,
+    FormSignal,
+    FormStrength,
+    SignalSet,
+)
 from xg_alonso.contracts.identifiers import (
     EntryId,
     FixtureId,
@@ -68,6 +75,7 @@ from xg_alonso.contracts.storage import BronzeSnapshotStore, SnapshotRef, TableS
 __all__ = [
     "EVIDENCE_PANEL_VERSION",
     "EXPLANATORY_PANEL",
+    "FORM_SIGNAL_CLAMP",
     "FOUR_TIMESTAMP_FIELDS",
     "REASON_TEMPLATES",
     "BaselineComparison",
@@ -79,6 +87,9 @@ __all__ = [
     "FeatureEvidence",
     "FeatureValue",
     "FixtureId",
+    "FormDirection",
+    "FormSignal",
+    "FormStrength",
     "GameweekId",
     "MinutesPrediction",
     "PanelEntry",
@@ -93,6 +104,7 @@ __all__ = [
     "ReasonPolarity",
     "RunManifest",
     "Season",
+    "SignalSet",
     "SnapshotRef",
     "SourceTimestamps",
     "SquadPick",

@@ -22,6 +22,7 @@ from xg_alonso.prediction.dataset import (
     build_training_frame,
 )
 from xg_alonso.prediction.evidence import attach_feature_evidence, build_feature_evidence
+from xg_alonso.prediction.form import apply_form_signals, form_reason, load_signals
 from xg_alonso.prediction.inference import (
     SavedModel,
     load_models,
@@ -47,11 +48,14 @@ __all__ = [
     "FoldReport",
     "SavedModel",
     "TrainingData",
+    "apply_form_signals",
     "attach_feature_evidence",
     "build_feature_evidence",
     "build_training_frame",
     "estimator_fingerprint",
+    "form_reason",
     "load_models",
+    "load_signals",
     "model_summary",
     "predict_frame",
     "predict_player",
