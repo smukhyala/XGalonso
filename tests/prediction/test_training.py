@@ -270,6 +270,7 @@ class TestZeroInflatedLabelsDoNotCollapse:
                         "expected_assists": quality * 0.5,
                         "expected_goal_involvements": quality * 1.4,
                         "expected_goals_conceded": 1.8 - quality,
+                        "defensive_contribution": float(week % 5) + quality,
                         "selected": 100000 * quality + week,
                         "transfers_in": 5000 * quality + week * 3,
                         "transfers_out": 3000 * (1 - quality) + week * 2,

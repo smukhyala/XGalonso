@@ -41,7 +41,7 @@ __all__ = [
     "feature_names",
 ]
 
-CATALOGUE_VERSION: Final[str] = "catalogue_v1"
+CATALOGUE_VERSION: Final[str] = "catalogue_v2"
 
 #: Per-90 scaling for rate features.
 _DENOMINATOR_SCALE: Final[float] = 90.0
@@ -98,6 +98,12 @@ _COUNT_METRICS: Final[tuple[str, ...]] = (
     "bonus",
     "bps",
     "total_points",
+    # Defensive actions. FPL began paying these in 2025/26, so the column exists
+    # for one season only and is null across the backfill — which is why it is
+    # declared here rather than modelled: HistGradientBoosting reads a null as
+    # "unknown" and branches on it, and the explanation layer needs the raw
+    # value to say anything sensible about a centre-back.
+    "defensive_contribution",
     # Market state. Ownership and transfer flow describe what the market
     # believed, which is information no per-90 rate contains.
     "selected",
@@ -126,6 +132,7 @@ _RATE_METRICS: Final[tuple[str, ...]] = (
     "creativity",
     "influence",
     "ict_index",
+    "defensive_contribution",
 )
 
 #: Metrics whose variance is interpretable. A volatile points return is a real

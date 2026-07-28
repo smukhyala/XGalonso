@@ -13,9 +13,11 @@ import pytest
 
 from xg_alonso.contracts.evidence import (
     EXPLANATORY_PANEL,
+    PANEL_BY_POSITION,
     FeatureEvidence,
     FeatureValue,
     panel_feature_names,
+    panel_for,
 )
 from xg_alonso.contracts.identifiers import PlayerCode
 from xg_alonso.contracts.reason_codes import (
@@ -68,6 +70,65 @@ class TestPanel:
     def test_panel_is_small_enough_to_read(self) -> None:
         """Curation is the point. A panel of 171 explains nothing."""
         assert len(EXPLANATORY_PANEL) <= 20
+
+
+class TestPositionalPanels:
+    """A shared panel described half the squad with statistics that cannot move
+    their score. These pin the positional split down."""
+
+    def test_every_position_has_a_panel(self) -> None:
+        assert set(PANEL_BY_POSITION) == {"GKP", "DEF", "MID", "FWD"}
+
+    def test_a_keeper_is_not_judged_on_attacking_output(self) -> None:
+        """The defect: a keeper ranked in the 2nd percentile for expected goals.
+
+        True, uninformative, and the percentile made it read as a criticism.
+        """
+        names = {entry.name for entry in panel_for("GKP")}
+        assert "expected_goals_per90_5" not in names
+        assert "expected_assists_per90_5" not in names
+        assert "threat_per90_5" not in names
+
+    def test_a_keeper_is_judged_on_what_actually_pays_him(self) -> None:
+        names = {entry.name for entry in panel_for("GKP")}
+        assert "saves_per90_5" in names
+        assert "clean_sheets_mean_5" in names
+        assert "expected_goals_conceded_per90_5" in names
+
+    def test_a_forward_is_not_shown_clean_sheets(self) -> None:
+        """A forward is paid nothing for one, so it cannot move his score."""
+        names = {entry.name for entry in panel_for("FWD")}
+        assert "clean_sheets_mean_5" not in names
+
+    def test_a_defender_sees_both_halves_of_his_job(self) -> None:
+        names = {entry.name for entry in panel_for("DEF")}
+        assert "clean_sheets_mean_5" in names
+        assert "defensive_contribution_per90_5" in names
+        assert "threat_per90_5" in names, "attacking output separates wing-backs from centre-halves"
+
+    def test_every_position_sees_minutes_and_fixture(self) -> None:
+        """Minutes and fixture decide everybody, whatever their position."""
+        for position in PANEL_BY_POSITION:
+            names = {entry.name for entry in panel_for(position)}
+            assert "minutes_mean_5" in names
+            assert "opponent_conceded_xg_mean_5" in names
+
+    def test_an_unknown_position_degrades_rather_than_raising(self) -> None:
+        """A prediction should not fail because a position string is unfamiliar."""
+        assert panel_for("SWEEPER")
+
+    def test_conflicting_orientations_are_declared_where_they_matter(self) -> None:
+        """Goals conceded is the one panel value where more is worse."""
+        conceded = next(
+            entry for entry in panel_for("DEF") if entry.name == "expected_goals_conceded_per90_5"
+        )
+        assert not conceded.higher_is_better
+
+    def test_the_union_panel_is_derived_not_duplicated(self) -> None:
+        """Two hand-maintained lists would drift; this one is computed."""
+        union = {entry.name for entry in EXPLANATORY_PANEL}
+        every = {entry.name for panel in PANEL_BY_POSITION.values() for entry in panel}
+        assert union == every
 
 
 class TestFeatureValue:

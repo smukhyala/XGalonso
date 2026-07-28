@@ -21,10 +21,10 @@ import polars as pl
 
 from xg_alonso.contracts.evidence import (
     EVIDENCE_PANEL_VERSION,
-    EXPLANATORY_PANEL,
     FeatureEvidence,
     FeatureValue,
     PanelEntry,
+    panel_for,
 )
 from xg_alonso.contracts.prediction import PlayerPrediction
 
@@ -87,16 +87,26 @@ def build_feature_evidence(
     frame: pl.DataFrame,
     *,
     positions: Sequence[str],
-    panel: Sequence[PanelEntry] = EXPLANATORY_PANEL,
+    panel: Sequence[PanelEntry] | None = None,
     panel_version: str = EVIDENCE_PANEL_VERSION,
 ) -> list[FeatureEvidence]:
-    """Materialise the panel for every row of a feature frame.
+    """Materialise the appropriate panel for every row of a feature frame.
+
+    **Each player gets his own position's panel.** A single shared panel put
+    "points per 90" in front of a goalkeeper and ranked him in the 2nd
+    percentile for expected goals — both true, neither useful, and the
+    percentile made the irrelevance look like a finding. What a keeper is
+    judged on is saves, clean sheets and the quality of the defence in front of
+    him, and that is now what his evidence contains.
 
     Args:
         frame: The frame the model predicted on. Rows are positional; the
             returned list is aligned to it.
-        positions: Each row's position, used to scope percentile ranking.
-        panel: Which features to carry. Defaults to the declared panel.
+        positions: Each row's position. Selects the panel *and* scopes the
+            percentile ranking.
+        panel: Override the per-position panels with one shared list. Used by
+            tests and by callers that genuinely want a uniform set; production
+            callers should leave this alone.
         panel_version: Recorded on each result so a stored prediction can be
             checked against the panel that produced it.
 
@@ -109,23 +119,40 @@ def build_feature_evidence(
             "percentiles would be scoped to the wrong players"
         )
 
-    raw = {entry.name: _column_values(frame, entry) for entry in panel}
+    # Every entry any position might ask for, resolved once. Reading a column
+    # per position would re-scan the frame four times for the features they
+    # share, which is most of them.
+    panels: dict[str, tuple[PanelEntry, ...]] = {}
+    for position in set(positions):
+        panels[position] = tuple(panel) if panel is not None else panel_for(position)
+
+    entries: dict[str, PanelEntry] = {}
+    for members in panels.values():
+        for entry in members:
+            entries.setdefault(entry.name, entry)
+
+    raw = {name: _column_values(frame, entry) for name, entry in entries.items()}
 
     # Rank inside each position separately, then scatter back into row order.
+    #
+    # Ranking stays scoped to *position*, not to the panel: a percentile answers
+    # "where does he sit among players he competes with for a squad slot", and
+    # that population is every player of his position regardless of which
+    # features are being shown.
     by_position: dict[str, list[int]] = {}
     for index, position in enumerate(positions):
         by_position.setdefault(position, []).append(index)
 
-    ranked: dict[str, list[float | None]] = {entry.name: [None] * frame.height for entry in panel}
-    for indices in by_position.values():
-        for entry in panel:
+    ranked: dict[str, list[float | None]] = {name: [None] * frame.height for name in entries}
+    for position, indices in by_position.items():
+        for entry in panels[position]:
             column = raw[entry.name]
             group_percentiles = _percentiles([column[i] for i in indices])
             for slot, index in enumerate(indices):
                 ranked[entry.name][index] = group_percentiles[slot]
 
     results: list[FeatureEvidence] = []
-    for index in range(frame.height):
+    for index, position in enumerate(positions):
         values = tuple(
             FeatureValue(
                 name=entry.name,
@@ -135,7 +162,7 @@ def build_feature_evidence(
                 percentile=ranked[entry.name][index],
                 higher_is_better=entry.higher_is_better,
             )
-            for entry in panel
+            for entry in panels[position]
         )
         results.append(FeatureEvidence(panel_version=panel_version, values=values))
     return results

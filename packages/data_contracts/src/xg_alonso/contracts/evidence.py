@@ -34,14 +34,16 @@ from pydantic import BaseModel, ConfigDict, Field
 __all__ = [
     "EVIDENCE_PANEL_VERSION",
     "EXPLANATORY_PANEL",
+    "PANEL_BY_POSITION",
     "FeatureEvidence",
     "FeatureValue",
     "PanelEntry",
     "panel_feature_names",
+    "panel_for",
     "panel_source_columns",
 ]
 
-EVIDENCE_PANEL_VERSION: Final[str] = "panel_v2"
+EVIDENCE_PANEL_VERSION: Final[str] = "panel_v3"
 
 
 class PanelEntry(BaseModel):
@@ -85,50 +87,24 @@ class PanelEntry(BaseModel):
         return self.sources or (self.name,)
 
 
-#: The declared panel. Membership is deliberate, not generated: each entry earns
-#: its place by being something a manager would recognise as a reason.
-#:
-#: Windows are fixed at five appearances — the shortest that is not pure noise —
-#: because an explanation citing a twenty-match mean describes a player's past
-#: rather than his form, and form is what a transfer decision turns on.
-#:
-#: Several entries carry `sources` so the same concept resolves on both feature
-#: sets. Without that, an explanation over the closed-form baseline could name no
-#: statistic at all, since the baseline spells expected goals `xg_per90_shrunk`
-#: while the catalogue spells it `expected_goals_per90_5`.
-EXPLANATORY_PANEL: Final[tuple[PanelEntry, ...]] = (
-    PanelEntry(
-        name="expected_goals_per90_5",
-        label="expected goals per 90",
-        family="player_rate",
-        sources=("expected_goals_per90_5", "xg_per90_shrunk"),
-    ),
-    PanelEntry(
-        name="expected_assists_per90_5",
-        label="expected assists per 90",
-        family="player_rate",
-        sources=("expected_assists_per90_5", "xa_per90_shrunk"),
-    ),
-    PanelEntry(
-        name="expected_goal_involvements_per90_10",
-        label="expected goal involvements per 90",
-        family="player_rate",
-        sources=("expected_goal_involvements_per90_10", "xgi_per90_shrunk"),
-    ),
-    PanelEntry(name="threat_per90_5", label="threat per 90", family="player_rate"),
-    PanelEntry(name="creativity_per90_5", label="creativity per 90", family="player_rate"),
-    PanelEntry(name="bps_per90_5", label="bonus points system per 90", family="player_rate"),
-    PanelEntry(
-        name="total_points_per90_5",
-        label="points per 90",
-        family="player_rate",
-        sources=("total_points_per90_5", "points_per90_shrunk"),
-    ),
+# --- position-specific panels ------------------------------------------------
+#
+# A single panel for every position produced explanations that read as nonsense
+# for half the squad. "Points per 90" is a sensible thing to say about a
+# midfielder and a strange thing to say about a goalkeeper, who accumulates
+# points by saving shots and keeping clean sheets and cannot meaningfully be
+# ranked on an attacking rate at all. Worse, the percentile made it look
+# rigorous: a keeper sits in the 2nd percentile for expected goals per 90
+# against *keepers*, which is true, uninformative, and reads as a criticism.
+#
+# So the panel is chosen per position. Each list below is what a manager would
+# actually weigh for that position, in the order they would weigh it.
+
+_CORE: Final[tuple[PanelEntry, ...]] = (
     PanelEntry(
         name="minutes_mean_5",
         label="minutes, last five",
         family="player_performance",
-        sources=("minutes_mean_5",),
     ),
     PanelEntry(
         name="starts_mean_5",
@@ -141,40 +117,226 @@ EXPLANATORY_PANEL: Final[tuple[PanelEntry, ...]] = (
         label="points per match, last five",
         family="player_performance",
     ),
-    PanelEntry(name="total_points_max_5", label="best return, last five", family="player_ceiling"),
+    PanelEntry(
+        name="opponent_conceded_xg_mean_5",
+        label="opponent expected goals conceded",
+        family="opponent",
+    ),
+    PanelEntry(name="is_home", label="playing at home", family="fixture"),
+)
+"""Shared by every position: minutes, form and fixture decide everybody."""
+
+_GOALKEEPER: Final[tuple[PanelEntry, ...]] = (
+    PanelEntry(name="saves_per90_5", label="saves per 90", family="player_rate"),
+    PanelEntry(
+        name="clean_sheets_mean_5",
+        label="clean-sheet rate, last five",
+        family="player_performance",
+    ),
+    PanelEntry(
+        name="expected_goals_conceded_per90_5",
+        label="expected goals conceded per 90",
+        family="player_rate",
+        higher_is_better=False,
+    ),
+    PanelEntry(
+        name="bps_per90_5",
+        label="bonus points system per 90",
+        family="player_rate",
+    ),
+)
+"""A keeper scores through saves, clean sheets and bonus. Nothing else applies.
+
+Note that ``saves_per90`` and ``expected_goals_conceded_per90`` pull in opposite
+directions and both belong here: a keeper on a leaky team faces more shots and
+banks more save points, while a keeper behind a good defence banks clean sheets.
+Showing one without the other would recommend the wrong keeper for the wrong
+reason.
+"""
+
+_DEFENDER: Final[tuple[PanelEntry, ...]] = (
+    PanelEntry(
+        name="clean_sheets_mean_5",
+        label="clean-sheet rate, last five",
+        family="player_performance",
+    ),
+    PanelEntry(
+        name="expected_goals_conceded_per90_5",
+        label="expected goals conceded per 90",
+        family="player_rate",
+        higher_is_better=False,
+    ),
+    PanelEntry(
+        name="defensive_contribution_per90_5",
+        label="defensive actions per 90",
+        family="player_rate",
+    ),
+    PanelEntry(
+        name="threat_per90_5",
+        label="attacking threat per 90",
+        family="player_rate",
+    ),
+    PanelEntry(
+        name="creativity_per90_5",
+        label="creativity per 90",
+        family="player_rate",
+    ),
+    PanelEntry(
+        name="expected_goals_per90_5",
+        label="expected goals per 90",
+        family="player_rate",
+        sources=("expected_goals_per90_5", "xg_per90_shrunk"),
+    ),
+    PanelEntry(
+        name="bps_per90_5",
+        label="bonus points system per 90",
+        family="player_rate",
+    ),
+)
+"""Defenders are two jobs in one position.
+
+Clean sheets and defensive actions price the defending; threat and creativity
+price the attacking, which is what separates a wing-back from a centre-half and
+is most of the reason one defender outscores another at the same price.
+"""
+
+_MIDFIELDER: Final[tuple[PanelEntry, ...]] = (
+    PanelEntry(
+        name="expected_goals_per90_5",
+        label="expected goals per 90",
+        family="player_rate",
+        sources=("expected_goals_per90_5", "xg_per90_shrunk"),
+    ),
+    PanelEntry(
+        name="expected_assists_per90_5",
+        label="expected assists per 90",
+        family="player_rate",
+        sources=("expected_assists_per90_5", "xa_per90_shrunk"),
+    ),
+    PanelEntry(name="threat_per90_5", label="attacking threat per 90", family="player_rate"),
+    PanelEntry(name="creativity_per90_5", label="creativity per 90", family="player_rate"),
+    PanelEntry(
+        name="defensive_contribution_per90_5",
+        label="defensive actions per 90",
+        family="player_rate",
+    ),
+    PanelEntry(
+        name="bps_per90_5",
+        label="bonus points system per 90",
+        family="player_rate",
+    ),
+    PanelEntry(
+        name="clean_sheets_mean_5",
+        label="clean-sheet rate, last five",
+        family="player_performance",
+    ),
+)
+"""Midfielders can score through any route, so the panel is the widest.
+
+Clean sheets are included because a midfielder is paid one point for them, and
+defensive actions because a holding midfielder now banks points a creator never
+will.
+"""
+
+_FORWARD: Final[tuple[PanelEntry, ...]] = (
+    PanelEntry(
+        name="expected_goals_per90_5",
+        label="expected goals per 90",
+        family="player_rate",
+        sources=("expected_goals_per90_5", "xg_per90_shrunk"),
+    ),
+    PanelEntry(name="threat_per90_5", label="attacking threat per 90", family="player_rate"),
+    PanelEntry(
+        name="expected_assists_per90_5",
+        label="expected assists per 90",
+        family="player_rate",
+        sources=("expected_assists_per90_5", "xa_per90_shrunk"),
+    ),
+    PanelEntry(
+        name="expected_goal_involvements_per90_10",
+        label="expected goal involvements per 90",
+        family="player_rate",
+        sources=("expected_goal_involvements_per90_10", "xgi_per90_shrunk"),
+    ),
+    PanelEntry(
+        name="bps_per90_5",
+        label="bonus points system per 90",
+        family="player_rate",
+    ),
+    PanelEntry(
+        name="total_points_max_5",
+        label="best return, last five",
+        family="player_ceiling",
+    ),
+)
+"""A forward earns almost everything through goals, so the panel leads with xG.
+
+Clean sheets are absent: a forward is paid nothing for one, and including it
+would put a number on screen that cannot move his score.
+"""
+
+_SHAPE: Final[tuple[PanelEntry, ...]] = (
     PanelEntry(
         name="total_points_std_10",
         label="points volatility",
         family="player_volatility",
         higher_is_better=False,
     ),
-    PanelEntry(
-        name="opponent_conceded_xg_mean_5",
-        label="opponent expected goals conceded",
-        family="opponent",
-    ),
-    PanelEntry(
-        name="opponent_clean_sheets_against_mean_5",
-        label="opponent clean sheets kept",
-        family="opponent",
-        higher_is_better=False,
-    ),
-    PanelEntry(name="is_home", label="playing at home", family="fixture"),
+)
+"""Return shape, appended to every position. Two players averaging the same are
+not the same player if one alternates hauls and blanks."""
+
+#: Keyed by the position's short name rather than by the `Position` enum, which
+#: lives in `contracts.prediction` — and `contracts.prediction` imports
+#: `FeatureEvidence` from here. Importing the enum back would close that loop.
+#: `Position` is a `StrEnum`, so callers can index this with either form.
+PANEL_BY_POSITION: Final[dict[str, tuple[PanelEntry, ...]]] = {
+    "GKP": _CORE + _GOALKEEPER + _SHAPE,
+    "DEF": _CORE + _DEFENDER + _SHAPE,
+    "MID": _CORE + _MIDFIELDER + _SHAPE,
+    "FWD": _CORE + _FORWARD + _SHAPE,
+}
+
+
+def panel_for(position: str) -> tuple[PanelEntry, ...]:
+    """The panel for one position, by short name (``GKP``, ``DEF``, ...).
+
+    Falls back to the shared core for anything unrecognised rather than raising:
+    an unknown position should cost an explanation its detail, not stop a
+    prediction being made.
+    """
+    return PANEL_BY_POSITION.get(str(position), _CORE)
+
+
+#: Every entry across every position, de-duplicated.
+#:
+#: Derived rather than declared. It used to be the single hand-written panel and
+#: is kept only for callers that need the full vocabulary — a stored prediction
+#: reader, say — so leaving it as a second hand-maintained list would guarantee
+#: the two drifted.
+EXPLANATORY_PANEL: Final[tuple[PanelEntry, ...]] = tuple(
+    {entry.name: entry for panel in PANEL_BY_POSITION.values() for entry in panel}.values()
 )
 
 
 def panel_feature_names() -> tuple[str, ...]:
-    """Canonical names, one per panel entry."""
-    return tuple(entry.name for entry in EXPLANATORY_PANEL)
+    """Canonical names, one per entry, across every position's panel."""
+    seen: list[str] = []
+    for panel in PANEL_BY_POSITION.values():
+        for entry in panel:
+            if entry.name not in seen:
+                seen.append(entry.name)
+    return tuple(seen)
 
 
 def panel_source_columns() -> tuple[str, ...]:
     """Every column any panel entry may read, across all feature sets."""
     seen: list[str] = []
-    for entry in EXPLANATORY_PANEL:
-        for column in entry.columns():
-            if column not in seen:
-                seen.append(column)
+    for panel in PANEL_BY_POSITION.values():
+        for entry in panel:
+            for column in entry.columns():
+                if column not in seen:
+                    seen.append(column)
     return tuple(seen)
 
 
