@@ -1681,6 +1681,7 @@ name = "xg-alonso-features"
 version = "0.1.0"
 source = { editable = "packages/feature_factory" }
 dependencies = [
+    { name = "numpy" },
     { name = "polars" },
     { name = "xg-alonso-contracts" },
     { name = "xg-alonso-domain" },
@@ -1689,6 +1690,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "numpy", specifier = ">=1.26,<3" },
     { name = "polars", specifier = ">=1.20,<2" },
     { name = "xg-alonso-contracts", editable = "packages/data_contracts" },
     { name = "xg-alonso-domain", editable = "packages/domain" },

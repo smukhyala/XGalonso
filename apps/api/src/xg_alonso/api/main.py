@@ -174,6 +174,32 @@ class TransferOptionOut(BaseModel):
     reasons: list[ReasonOut]
 
 
+class ComparableOut(BaseModel):
+    player_code: int
+    name: str
+    expected_points: float
+    price: int | None
+
+
+class ArchetypeOut(BaseModel):
+    """What kind of player this is, and who else is that kind."""
+
+    label: str
+    size: int
+    rank_within: int = Field(
+        description="His place by projected points inside his archetype, 1 being highest."
+    )
+    comparables: list[ComparableOut]
+    caveat: str = Field(
+        description=(
+            "Why the within-archetype rank is not itself the argument for "
+            "picking him. Archetypes are clustered on style and output "
+            "together, so a cluster is partly defined by how good its members "
+            "are and 'best in his cluster' would be close to circular."
+        )
+    )
+
+
 class PlayerExplanationOut(BaseModel):
     """Everything the system can honestly say about one squad member."""
 
@@ -197,6 +223,7 @@ class PlayerExplanationOut(BaseModel):
     legal_replacements: int
     replacements: list[TransferOptionOut]
     no_replacement_reasons: list[ReasonOut]
+    archetype: ArchetypeOut | None = None
 
 
 class RecommendationResponse(BaseModel):
@@ -220,6 +247,26 @@ class RecommendationResponse(BaseModel):
     )
     candidates_considered: int = 0
     legal_moves: int = 0
+    provenance: Provenance
+
+
+class SquadBuildResponse(BaseModel):
+    """A squad built from scratch — the gameweek-1 answer.
+
+    Separate from `SquadResponse` because it carries the justification for each
+    pick. At gameweek 1 there is no squad to transfer from and transfers are
+    unlimited, so "which single move is best" is the wrong question entirely;
+    the question is which fifteen, and why each of them over the alternatives.
+    """
+
+    gameweek: int
+    formation: str
+    squad_value: int
+    bank: int
+    projected_points: float
+    players: list[SquadPlayer]
+    explanations: list[PlayerExplanationOut]
+    candidates_considered: int
     provenance: Provenance
 
 
@@ -314,6 +361,20 @@ def build_squad(service: ServiceDep) -> SquadResponse:
     """A squad built from scratch — the gameweek-1 answer."""
     try:
         return service.build_squad()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/build-squad/explained", response_model=SquadBuildResponse)
+def build_squad_explained(service: ServiceDep) -> SquadBuildResponse:
+    """The optimal fifteen from scratch, with a justification for every pick.
+
+    This is the gameweek-1 answer. Transfers are unlimited before the first
+    deadline, so recommending one swap — which is what `/recommend` does — is
+    answering a question nobody is asking.
+    """
+    try:
+        return service.build_squad_explained()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

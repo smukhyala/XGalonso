@@ -31,7 +31,14 @@ from xg_alonso.contracts.squad import SquadPick
 from xg_alonso.domain.rules import SquadRules
 from xg_alonso.explanations.reasons import PopulationStats, build_player_reasons
 
-__all__ = ["PlayerExplanation", "StartVerdict", "explain_player", "explain_squad"]
+__all__ = [
+    "ArchetypeVerdict",
+    "Comparable",
+    "PlayerExplanation",
+    "StartVerdict",
+    "explain_player",
+    "explain_squad",
+]
 
 
 @dataclass(frozen=True)
@@ -59,6 +66,36 @@ class StartVerdict:
 
 
 @dataclass(frozen=True)
+class Comparable:
+    """One player this player resembles, with the gap between them."""
+
+    player_code: PlayerCode
+    expected_points: float
+    price: TenthsOfMillion | None
+
+
+@dataclass(frozen=True)
+class ArchetypeVerdict:
+    """What kind of player this is, and how he ranks among that kind.
+
+    **The rank here is against his own archetype, and that is a weaker claim
+    than it looks.** Archetypes are clustered on style *and* output, so a
+    cluster is partly defined by how good its members are — "best in his
+    cluster" would be close to circular. The rank is reported because it is a
+    fact a reader can check, not as an argument that he is the right pick. The
+    argument for picking him lives in `PlayerExplanation.reasons`, which
+    compares him against his position and his price, not against his cluster.
+    """
+
+    label: str
+    size: int
+    rank_within: int
+    """His position by expected points inside his archetype, 1 being highest."""
+
+    comparables: tuple[Comparable, ...]
+
+
+@dataclass(frozen=True)
 class PlayerExplanation:
     """Everything the product can honestly say about one squad member."""
 
@@ -77,6 +114,7 @@ class PlayerExplanation:
     start_verdict: StartVerdict
     replacements: tuple[TransferOption, ...]
     no_replacement_reasons: tuple[Reason, ...]
+    archetype: ArchetypeVerdict | None = None
 
     @property
     def has_upgrade(self) -> bool:
@@ -134,6 +172,7 @@ def explain_player(
     population: PopulationStats | None = None,
     price: TenthsOfMillion | None = None,
     chance_of_playing: float | None = None,
+    archetype: ArchetypeVerdict | None = None,
 ) -> PlayerExplanation:
     """Assemble one player's justification.
 
@@ -179,6 +218,7 @@ def explain_player(
         no_replacement_reasons=(
             () if best_move is None or best_move.option is not None else best_move.reasons
         ),
+        archetype=archetype,
     )
 
 
@@ -194,6 +234,7 @@ def explain_squad(
     population: PopulationStats | None = None,
     prices: Mapping[PlayerCode, TenthsOfMillion] | None = None,
     chances_of_playing: Mapping[PlayerCode, float] | None = None,
+    archetypes: Mapping[PlayerCode, ArchetypeVerdict] | None = None,
 ) -> list[PlayerExplanation]:
     """Explain every squad member, in squad order.
 
@@ -205,6 +246,7 @@ def explain_squad(
     board_by_player = board_by_player or {}
     prices = prices or {}
     chances_of_playing = chances_of_playing or {}
+    archetypes = archetypes or {}
 
     explanations: list[PlayerExplanation] = []
     for pick in picks:
@@ -225,6 +267,7 @@ def explain_squad(
                 population=population,
                 price=prices.get(code),
                 chance_of_playing=chances_of_playing.get(code),
+                archetype=archetypes.get(code),
             )
         )
     return explanations

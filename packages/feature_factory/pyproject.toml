@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Deterministic, point-in-time-safe candidate feature generation."
 requires-python = ">=3.12"
 dependencies = [
+    "numpy>=1.26,<3",
     "polars>=1.20,<2",
     "xg-alonso-contracts",
     "xg-alonso-domain",

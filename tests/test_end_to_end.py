@@ -116,7 +116,6 @@ def _synthetic_history(payload: dict[str, Any]) -> pl.DataFrame:
                 "expected_assists": quality * 7.0,
                 "expected_goal_involvements": quality * 22.0,
                 "expected_goals_conceded": 30.0,
-                "defensive_contribution": 12.0,
                 "defensive_contribution": None,
                 "value": element["now_cost"],
                 "kickoff_time": season_end,

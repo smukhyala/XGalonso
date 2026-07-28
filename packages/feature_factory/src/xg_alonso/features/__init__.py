@@ -10,6 +10,13 @@ rebuilds features with future records appended and fails if any value moved,
 and its negative control proves the harness itself still has teeth.
 """
 
+from xg_alonso.features.archetypes import (
+    ARCHETYPE_VERSION,
+    Archetype,
+    ArchetypeModel,
+    PlayerArchetype,
+    build_archetypes,
+)
 from xg_alonso.features.catalogue import (
     CATALOGUE_VERSION,
     FeatureSpec,
@@ -43,15 +50,20 @@ from xg_alonso.features.slice1 import (
 )
 
 __all__ = [
+    "ARCHETYPE_VERSION",
     "CATALOGUE_VERSION",
     "OPPONENT_FEATURES",
     "SLICE1_FEATURES",
     "SLICE1_FEATURE_SET_VERSION",
+    "Archetype",
+    "ArchetypeModel",
     "FeatureSpec",
     "LeakageDetected",
+    "PlayerArchetype",
     "as_of_join",
     "assert_detects_leakage",
     "assert_no_leakage",
+    "build_archetypes",
     "build_catalogue",
     "build_opponent_features",
     "build_opponent_strength",

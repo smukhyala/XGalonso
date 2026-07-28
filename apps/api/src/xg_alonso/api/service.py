@@ -50,8 +50,9 @@ from xg_alonso.contracts.reason_codes import Reason
 from xg_alonso.contracts.recommendation import TransferOption
 from xg_alonso.contracts.squad import SquadState
 from xg_alonso.evaluation.importance import load_importance
-from xg_alonso.explanations.player import explain_squad
+from xg_alonso.explanations.player import ArchetypeVerdict, Comparable, explain_squad
 from xg_alonso.explanations.reasons import PopulationStats
+from xg_alonso.features.archetypes import ArchetypeModel, build_archetypes
 from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
 from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
 from xg_alonso.features.slice1 import (
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
         Provenance,
         ReasonOut,
         RecommendationResponse,
+        SquadBuildResponse,
         SquadPlayer,
         SquadResponse,
         TransferOptionOut,
@@ -110,6 +112,7 @@ class DecisionService:
         self._context = self._load_context()
         self._models = self._load_models()
         self._predictions: dict[int, list[PlayerPrediction]] = {}
+        self._archetypes: dict[int, ArchetypeModel] = {}
 
     # -- loading ----------------------------------------------------------
 
@@ -199,6 +202,89 @@ class DecisionService:
 
         self._predictions[key] = predictions
         return predictions
+
+    def _archetype_model(self, gameweek: GameweekId) -> ArchetypeModel:
+        """Cluster the whole player population into archetypes, cached per gameweek.
+
+        Built from the same feature frame the predictions came from, so a
+        player's archetype and his projection describe the same player at the
+        same cutoff.
+        """
+        key = int(gameweek)
+        if key in self._archetypes:
+            return self._archetypes[key]
+
+        cutoff = self._context.deadline_for(gameweek)
+        entities = build_entities(self._context, cutoff=cutoff)
+        features = build_catalogue(entities, player_stats=self._context.player_stats)
+        features = build_opponent_features(
+            features,
+            opponent_strength=build_opponent_strength(self._context.player_stats),
+        )
+        model = build_archetypes(
+            features,
+            positions=[str(p) for p in features["position"].to_list()],
+            player_codes=[int(c) for c in features["player_code"].to_list()],
+        )
+        self._archetypes[key] = model
+        return model
+
+    _ARCHETYPE_CAVEAT = (
+        "Archetypes are clustered on playing style and output together, so a "
+        "cluster is partly defined by how good its members are. Read this rank "
+        "as a fact about the group, not as the argument for picking him — that "
+        "argument is in the evidence above, which compares him against his "
+        "position and his price."
+    )
+
+    def _archetype_verdicts(
+        self,
+        gameweek: GameweekId,
+        by_code: dict[PlayerCode, PlayerPrediction],
+    ) -> dict[PlayerCode, ArchetypeVerdict]:
+        """Each player's archetype, his rank inside it, and his nearest comps."""
+        model = self._archetype_model(gameweek)
+        rows = self._player_rows()
+
+        verdicts: dict[PlayerCode, ArchetypeVerdict] = {}
+        for placement in model.players:
+            code = PlayerCode(placement.player_code)
+            archetype = model.archetype_of(placement.player_code)
+            if archetype is None or code not in by_code:
+                continue
+
+            members = [
+                member
+                for member in model.members(placement.position, placement.archetype)
+                if PlayerCode(member) in by_code
+            ]
+            ordered = sorted(
+                members,
+                key=lambda member: -by_code[PlayerCode(member)].expected_points,
+            )
+            rank = (
+                ordered.index(placement.player_code) + 1 if placement.player_code in ordered else 0
+            )
+
+            verdicts[code] = ArchetypeVerdict(
+                label=archetype.label,
+                size=archetype.size,
+                rank_within=rank,
+                comparables=tuple(
+                    Comparable(
+                        player_code=PlayerCode(other),
+                        expected_points=round(by_code[PlayerCode(other)].expected_points, 2),
+                        price=(
+                            TenthsOfMillion(int(rows[other]["current_price"]))
+                            if other in rows
+                            else None
+                        ),
+                    )
+                    for other in placement.comparables
+                    if PlayerCode(other) in by_code
+                ),
+            )
+        return verdicts
 
     # -- shaping ----------------------------------------------------------
 
@@ -428,6 +514,7 @@ class DecisionService:
         if board is None:
             return []
 
+        gameweek = squad.gameweek
         rows = self._player_rows()
         names = self._names()
         selection = best_starting_xi(squad.picks, by_code, self._context.squad_rules)
@@ -459,6 +546,7 @@ class DecisionService:
             ),
             prices=prices,
             chances_of_playing=chances,
+            archetypes=self._archetype_verdicts(gameweek, by_code),
         )
 
         out: list[PlayerExplanationOut] = []
@@ -492,9 +580,32 @@ class DecisionService:
                     legal_replacements=0 if entry is None else entry.legal_replacements,
                     replacements=[self._option_out(option) for option in explanation.replacements],
                     no_replacement_reasons=self._reasons_out(explanation.no_replacement_reasons),
+                    archetype=self._archetype_out(explanation.archetype),
                 )
             )
         return out
+
+    def _archetype_out(self, verdict: Any) -> Any:
+        from xg_alonso.api.main import ArchetypeOut, ComparableOut
+
+        if verdict is None:
+            return None
+        names = self._names()
+        return ArchetypeOut(
+            label=verdict.label,
+            size=verdict.size,
+            rank_within=verdict.rank_within,
+            comparables=[
+                ComparableOut(
+                    player_code=int(c.player_code),
+                    name=names.get(int(c.player_code), "unknown"),
+                    expected_points=c.expected_points,
+                    price=None if c.price is None else int(c.price),
+                )
+                for c in verdict.comparables
+            ],
+            caveat=self._ARCHETYPE_CAVEAT,
+        )
 
     def recommend(self, entry_id: int, *, squad_file: Path | None = None) -> RecommendationResponse:
         from xg_alonso.api.main import RecommendationResponse
@@ -559,6 +670,126 @@ class DecisionService:
             candidates_considered=0 if board is None else board.candidates_considered,
             legal_moves=0 if board is None else board.legal_moves,
             provenance=self._provenance(next(iter(by_code.values()))),
+        )
+
+    def build_squad_explained(self) -> SquadBuildResponse:
+        """The optimal fifteen from scratch, with a case for every pick.
+
+        The gameweek-1 answer. Before the first deadline there is no squad to
+        transfer from and transfers are unlimited, so the single-transfer
+        recommendation is answering a question nobody is asking.
+
+        No transfer board is built here, for the same reason: "who would replace
+        him" has no meaning when every player was chosen freely and could be
+        swapped at no cost. What each pick carries instead is why *he* projects
+        as he does, what kind of player he is, and who else is that kind.
+        """
+        from xg_alonso.api.main import SquadBuildResponse
+
+        gameweek = self._context.next_gameweek()
+        predictions = self._predict(gameweek)
+        rows = self._player_rows()
+
+        available = {
+            code: row for code, row in rows.items() if row.get("status") in (None, "a", "d")
+        }
+        candidates = [
+            SquadCandidate(
+                player_code=p.player_code,
+                position=p.position,
+                team_id=TeamId(int(available[int(p.player_code)]["team_id"])),
+                price=TenthsOfMillion(int(available[int(p.player_code)]["current_price"])),
+                prediction=p,
+            )
+            for p in predictions
+            if int(p.player_code) in available
+        ]
+        by_code = {p.player_code: p for p in predictions}
+
+        squad, selection = build_squad(
+            candidates,
+            rules=self._context.squad_rules,
+            entry_id=EntryId(0),
+            gameweek=gameweek,
+            predictions=by_code,
+        )
+
+        base = self._squad_response(squad, prices_assumed=False)
+        starters = frozenset(p.player_code for p in selection.starters)
+        prices = {
+            pick.player_code: TenthsOfMillion(int(pick.current_price)) for pick in squad.picks
+        }
+        chances = {
+            PlayerCode(code): float(row["chance_of_playing_next_round"]) / 100.0
+            for code, row in rows.items()
+            if row.get("chance_of_playing_next_round") is not None
+        }
+
+        explanations = explain_squad(
+            picks=squad.picks,
+            predictions=by_code,
+            rules=self._context.squad_rules,
+            starters=starters,
+            baseline_points=selection.expected_points,
+            population=PopulationStats.from_predictions(
+                predictions,
+                prices={
+                    PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
+                    for code, row in rows.items()
+                },
+            ),
+            prices=prices,
+            chances_of_playing=chances,
+            archetypes=self._archetype_verdicts(gameweek, by_code),
+        )
+
+        from xg_alonso.api.main import FeatureValueOut, PlayerExplanationOut
+
+        names = self._names()
+        shaped: list[PlayerExplanationOut] = []
+        for explanation in explanations:
+            code = int(explanation.player_code)
+            shaped.append(
+                PlayerExplanationOut(
+                    player_code=code,
+                    name=names.get(code, "unknown"),
+                    position=str(rows[code]["position"]) if code in rows else "",
+                    expected_points=round(explanation.expected_points, 2),
+                    breakdown=self._breakdown_out(by_code[explanation.player_code]),
+                    evidence=[
+                        FeatureValueOut(
+                            name=value.name,
+                            label=value.label,
+                            family=value.family,
+                            value=None if value.value is None else round(value.value, 3),
+                            percentile=(
+                                None if value.percentile is None else round(value.percentile, 3)
+                            ),
+                            higher_is_better=value.higher_is_better,
+                        )
+                        for value in explanation.evidence
+                    ],
+                    reasons=self._reasons_out(explanation.reasons),
+                    is_starter=explanation.start_verdict.is_starter,
+                    start_margin=round(explanation.start_verdict.margin, 2),
+                    forced_by_quota=explanation.start_verdict.forced_by_quota,
+                    legal_replacements=0,
+                    replacements=[],
+                    no_replacement_reasons=[],
+                    archetype=self._archetype_out(explanation.archetype),
+                )
+            )
+
+        return SquadBuildResponse(
+            gameweek=int(gameweek),
+            formation=base.formation,
+            squad_value=base.squad_value,
+            bank=base.bank,
+            projected_points=base.projected_points,
+            players=base.players,
+            explanations=shaped,
+            candidates_considered=len(candidates),
+            provenance=base.provenance,
         )
 
     def feature_importance(
