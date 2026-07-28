@@ -490,12 +490,8 @@ class DecisionService:
                     start_margin=round(explanation.start_verdict.margin, 2),
                     forced_by_quota=explanation.start_verdict.forced_by_quota,
                     legal_replacements=0 if entry is None else entry.legal_replacements,
-                    replacements=[
-                        self._option_out(option) for option in explanation.replacements
-                    ],
-                    no_replacement_reasons=self._reasons_out(
-                        explanation.no_replacement_reasons
-                    ),
+                    replacements=[self._option_out(option) for option in explanation.replacements],
+                    no_replacement_reasons=self._reasons_out(explanation.no_replacement_reasons),
                 )
             )
         return out
@@ -582,18 +578,14 @@ class DecisionService:
 
         path = self._config.data_root / "gold" / "feature_importance.parquet"
         if not path.exists():
-            raise LookupError(
-                f"no importance table at {path}. Run `xg importance` to measure it."
-            )
+            raise LookupError(f"no importance table at {path}. Run `xg importance` to measure it.")
 
         frame = load_importance(path)
         if frame.is_empty():
             raise LookupError("the importance table is empty; re-run `xg importance`.")
 
         labels = sorted(frame["label"].unique().to_list())
-        degenerate = sorted(
-            frame.filter(pl.col("degenerate_label"))["label"].unique().to_list()
-        )
+        degenerate = sorted(frame.filter(pl.col("degenerate_label"))["label"].unique().to_list())
         weights = {
             str(row["label"]): float(row["label_weight"])
             for row in frame.select(["label", "label_weight"]).unique().iter_rows(named=True)
@@ -606,9 +598,7 @@ class DecisionService:
             scoped = scoped.filter(pl.col("family") == family)
 
         if scoped.is_empty():
-            raise LookupError(
-                f"no importance rows for label={label!r} family={family!r}"
-            )
+            raise LookupError(f"no importance rows for label={label!r} family={family!r}")
 
         # A single label is already a like-for-like comparison, so weighting it
         # would only rescale every row by the same constant and make the numbers
@@ -661,15 +651,11 @@ class DecisionService:
             label_weights=weights,
             folds_measured=int(frame["fold_index"].n_unique()),
             features_measured=int(frame["feature_name"].n_unique()),
-            features_with_no_effect=int(
-                ranked.filter(pl.col("importance") <= 0.0).height
-            ),
+            features_with_no_effect=int(ranked.filter(pl.col("importance") <= 0.0).height),
             catalogue_version=str(frame["catalogue_version"][0]),
             model_fingerprint=fingerprint,
             computed_at=frame["computed_at"][0],
-            stale=(
-                self._models is not None and self._models.fingerprint() != fingerprint
-            ),
+            stale=(self._models is not None and self._models.fingerprint() != fingerprint),
         )
 
     @staticmethod

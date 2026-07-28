@@ -265,10 +265,8 @@ def _as_option(
         hit_cost=candidate.hit_cost,
         risk_penalty=round(candidate.risk_penalty, 6),
         bank_after=candidate.bank_after,
-        reasons=_build_reasons(
-            candidate, population=population, candidate_count=candidate_count
-        ),
-        )
+        reasons=_build_reasons(candidate, population=population, candidate_count=candidate_count),
+    )
 
 
 def build_transfer_board(
@@ -325,9 +323,7 @@ def build_transfer_board(
                     player_out=code,
                     position=pick.position,
                     legal_replacements=legal,
-                    option=_as_option(
-                        best, population=population, candidate_count=legal
-                    ),
+                    option=_as_option(best, population=population, candidate_count=legal),
                 )
             )
             continue

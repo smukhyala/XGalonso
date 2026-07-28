@@ -233,7 +233,7 @@ class FeatureImportanceOut(BaseModel):
             "Mean standard deviation of this feature's rank across folds. "
             "Null when fewer than two folds were measured, because a zero "
             "there would read as perfect stability rather than as no evidence."
-        )
+        ),
     )
     per_label: dict[str, float] = Field(default_factory=dict)
 
@@ -321,9 +321,7 @@ def build_squad(service: ServiceDep) -> SquadResponse:
 @app.get("/features/importance", response_model=FeatureImportanceResponse)
 def feature_importance(
     service: ServiceDep,
-    label: Annotated[
-        str | None, Query(description="Restrict to one component label.")
-    ] = None,
+    label: Annotated[str | None, Query(description="Restrict to one component label.")] = None,
     family: Annotated[str | None, Query(description="Restrict to one catalogue family.")] = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 60,
 ) -> FeatureImportanceResponse:

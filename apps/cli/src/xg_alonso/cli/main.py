@@ -1535,9 +1535,7 @@ def importance(
     out: Annotated[
         Path | None, typer.Option("--out", help="Where to write the importance table.")
     ] = None,
-    repeats: Annotated[
-        int, typer.Option("--repeats", help="Shuffles per feature.")
-    ] = 5,
+    repeats: Annotated[int, typer.Option("--repeats", help="Shuffles per feature.")] = 5,
     top: Annotated[int, typer.Option("--top", help="How many features to print.")] = 25,
     min_gameweek: Annotated[
         int, typer.Option("--min-gw", help="Skip opening gameweeks with empty windows.")
@@ -1594,9 +1592,7 @@ def importance(
     # what separates a real effect from one lucky window.
     ordered = sorted(data.seasons)
     offset = {season: index * 100 for index, season in enumerate(ordered)}
-    timeline = pl.col("label_season").replace_strict(offset, default=0) + pl.col(
-        "label_gameweek"
-    )
+    timeline = pl.col("label_season").replace_strict(offset, default=0) + pl.col("label_gameweek")
 
     windows: list[tuple[int, pl.DataFrame]] = []
     for fold in models.folds:

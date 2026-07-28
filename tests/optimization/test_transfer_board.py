@@ -182,10 +182,7 @@ def _squad(bank: int = 20, free_transfers: int = 1) -> SquadState:
 
 
 def _owned_predictions() -> dict[PlayerCode, PlayerPrediction]:
-    return {
-        PlayerCode(code): _prediction(code, 2.0, position)
-        for position, code in _LAYOUT
-    }
+    return {PlayerCode(code): _prediction(code, 2.0, position) for position, code in _LAYOUT}
 
 
 def _market(*, better_forward: bool = True) -> list[Candidate]:
@@ -203,9 +200,7 @@ def _market(*, better_forward: bool = True) -> list[Candidate]:
                     position=position,
                     team_id=TeamId(20),
                     price=TenthsOfMillion(60),
-                    prediction=_prediction(
-                        code, points, position, xg=0.8 if points > 5 else 0.1
-                    ),
+                    prediction=_prediction(code, points, position, xg=0.8 if points > 5 else 0.1),
                 )
             )
             code += 1
@@ -232,7 +227,9 @@ class TestCoverage:
         board = _board()
         listed = [entry.player_out for entry in board.by_player]
         assert len(listed) == 15
-        assert sorted(int(c) for c in listed) == [code for _, code in sorted(_LAYOUT, key=lambda p: p[1])]
+        assert sorted(int(c) for c in listed) == [
+            code for _, code in sorted(_LAYOUT, key=lambda p: p[1])
+        ]
 
     def test_a_player_with_no_move_still_carries_a_reason(self) -> None:
         board = _board(better_forward=False)

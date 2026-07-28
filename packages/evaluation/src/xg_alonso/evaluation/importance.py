@@ -145,9 +145,7 @@ class ImportanceTable:
                 totals.get(row.feature_name, 0.0) + row.relative_delta * weight
             )
             counts[row.feature_name] = counts.get(row.feature_name, 0) + 1
-        return {
-            name: totals[name] / counts[name] for name in totals if counts[name] > 0
-        }
+        return {name: totals[name] / counts[name] for name in totals if counts[name] > 0}
 
     def by_family(self) -> dict[str, float]:
         """Weighted importance summed within each catalogue family.
@@ -207,9 +205,7 @@ class ImportanceTable:
                 if len(positions) > 1:
                     spreads.setdefault(name, []).append(float(np.std(positions)))
 
-        return {
-            name: sum(values) / len(values) for name, values in spreads.items() if values
-        }
+        return {name: sum(values) / len(values) for name, values in spreads.items() if values}
 
     def degenerate_labels(self) -> tuple[str, ...]:
         return tuple(sorted({row.label for row in self.rows if row.degenerate_label}))
@@ -396,9 +392,7 @@ def permutation_importance(
             deltas: list[float] = []
             for _ in range(n_repeats):
                 base_matrix[:, position] = generator.permutation(original)
-                permuted = float(
-                    np.mean(np.abs(_predict(model, label, base_matrix) - truth))
-                )
+                permuted = float(np.mean(np.abs(_predict(model, label, base_matrix) - truth)))
                 deltas.append(permuted - baseline)
             base_matrix[:, position] = original
 

@@ -1,7 +1,7 @@
 # Explainable Recommendations — Design
 
 **Date:** 2026-07-27
-**Status:** Approved
+**Status:** Implemented
 
 ---
 
@@ -98,14 +98,17 @@ model does not use.
 ```python
 class FeatureValue(BaseModel):
     """One feature's value for one player, with the context that makes it legible."""
+
     name: str
-    value: float | None          # None when the feature could not be computed
-    percentile: float | None     # Rank within the same position, 0-1
-    family: str                  # From the catalogue spec
+    value: float | None  # None when the feature could not be computed
+    percentile: float | None  # Rank within the same position, 0-1
+    family: str  # From the catalogue spec
+
 
 class FeatureEvidence(BaseModel):
     panel_version: str
     values: tuple[FeatureValue, ...]
+
     def get(self, name: str) -> FeatureValue | None: ...
 ```
 
@@ -192,9 +195,10 @@ New module `packages/explanations/src/xg_alonso/explanations/player.py`.
 @dataclass(frozen=True)
 class StartVerdict:
     is_starter: bool
-    margin: float              # Points ahead of, or behind, the marginal XI place
+    margin: float  # Points ahead of, or behind, the marginal XI place
     marginal_player: PlayerCode | None
-    formation_note: str        # e.g. "the 3-defender minimum forces a DEF into the XI"
+    formation_note: str  # e.g. "the 3-defender minimum forces a DEF into the XI"
+
 
 @dataclass(frozen=True)
 class ReplacementOption:
@@ -203,14 +207,15 @@ class ReplacementOption:
     price_delta: int
     reasons: tuple[Reason, ...]
 
+
 @dataclass(frozen=True)
 class PlayerExplanation:
     player_code: PlayerCode
     breakdown: PointsBreakdown
-    evidence: tuple[FeatureValue, ...]     # Panel, sorted by |percentile - 0.5| desc
+    evidence: tuple[FeatureValue, ...]  # Panel, sorted by |percentile - 0.5| desc
     start_verdict: StartVerdict
-    replacements: tuple[ReplacementOption, ...]   # Top 3, may be empty
-    no_replacement_reason: Reason | None          # Grounded, when replacements is empty
+    replacements: tuple[ReplacementOption, ...]  # Top 3, may be empty
+    no_replacement_reason: Reason | None  # Grounded, when replacements is empty
 ```
 
 `explain_player` is a pure function over `(prediction, percentiles, squad, ranked_transfers,
@@ -242,10 +247,11 @@ class TransferOption:
     bank_after: TenthsOfMillion
     reasons: tuple[Reason, ...]
 
+
 @dataclass(frozen=True)
 class TransferBoard:
-    top: tuple[TransferOption, ...]              # Global best, default 8
-    by_player: tuple[PlayerBestMove, ...]        # One entry per squad player, all 15
+    top: tuple[TransferOption, ...]  # Global best, default 8
+    by_player: tuple[PlayerBestMove, ...]  # One entry per squad player, all 15
     candidates_considered: int
     legal_moves: int
 ```
@@ -405,3 +411,73 @@ plain-language note on why correlated features split.
 5. §F API and web surfaces.
 
 Each stage is independently testable, per the repository's testing philosophy.
+
+
+---
+
+## What changed during implementation
+
+Recorded because the design was written before the code met the data, and three
+things it assumed turned out to be wrong.
+
+### The panel needed source aliases
+
+The design assumed one feature set. There are two, and they spell the same
+concept differently: the catalogue has `expected_goals_per90_5`, the closed-form
+baseline has `xg_per90_shrunk`. Since the API defaults to the baseline — a
+deliberate choice, so it cannot silently disagree with the CLI — every attacking
+reason fell silent on the surface that actually runs.
+
+`PanelEntry` therefore gained `sources`, an ordered list of columns that supply
+the entry. The panel names a *concept*; each feature set resolves it however it
+spells it. Panel version moved to `panel_v2`.
+
+### `minutes_mean_3` became `minutes_mean_5`
+
+The slice-1 baseline builds a five-appearance mean, not a three. Aliasing a
+three-match label onto a five-match column would have put a false window in the
+prose, so the panel entry moved to the window both sets share.
+
+### Rank stability was measured wrongly, twice
+
+The first implementation pooled every label into one ranking and reported the
+spread of a feature's rank across *components*. That number was enormous for
+every feature — a minutes feature legitimately ranks first for minutes and last
+for saves — and rendered as an instability warning on the entire catalogue.
+
+Fixed to rank within `(fold, label)` and compare across folds for the same
+label. That exposed a second problem: the CLI measured only the final fold, so
+there was nothing to compare and the metric returned zero, which reads as
+*perfectly stable* rather than as *never checked*. `xg importance` now measures
+every validation window, and `stability()` returns an empty mapping below two
+folds so the surfaces can say "not measured" instead of printing a zero.
+
+### The Feature Lab needed a non-linear axis
+
+Importance follows a power law here: `minutes_mean_1` scores 3.5× the next
+feature and several hundred times the tail. On a linear axis the top bar filled
+its row and the other seventy-nine collapsed into invisibility. Bar lengths are
+square-root scaled, order is preserved exactly, and the exact figures stay in a
+column beside them.
+
+## Measured result
+
+Against `late.pkl`, 184 features x 9 labels x 6 walk-forward folds:
+
+| Family | Weighted importance |
+|---|---|
+| player performance | 6.25e-2 |
+| player volume | 6.5e-3 |
+| player volatility | 5.9e-3 |
+| opponent | 4.6e-3 |
+| player rate | 3.0e-3 |
+| player ceiling | 9.2e-4 |
+| player floor | 5.9e-4 |
+| fixture | 6.0e-5 |
+
+42 of 184 features did not improve out-of-sample error at all.
+
+`minutes_mean_1` leads by a distance, which is the expected shape — minutes gate
+every other component. Note the caveat recorded in `LABEL_TO_BREAKDOWN`: the
+label weighting credits minutes only with appearance points, so its true
+importance is higher than this method can show. The figure is a floor.

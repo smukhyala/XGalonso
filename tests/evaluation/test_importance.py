@@ -171,9 +171,7 @@ class TestHonesty:
         """Deltas are not clipped: a feature that misleads the model should say so."""
         frame = _frame()
         table = _table(frame, _models(frame))
-        assert all(
-            row.mae_delta == row.permuted_mae - row.baseline_mae for row in table.rows
-        )
+        assert all(row.mae_delta == row.permuted_mae - row.baseline_mae for row in table.rows)
 
 
 class TestAggregation:

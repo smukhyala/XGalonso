@@ -51,11 +51,69 @@ export interface SquadResponse {
   provenance: Provenance;
 }
 
+export type Polarity = "supports_in" | "supports_out" | "context";
+
 export interface Reason {
   code: string;
   text: string;
   subject: number;
+  subject_name: string;
+  polarity: Polarity;
   weight: number;
+}
+
+export interface FeatureValue {
+  name: string;
+  label: string;
+  family: string;
+  value: number | null;
+  percentile: number | null;
+  higher_is_better: boolean;
+}
+
+export interface Breakdown {
+  appearance: number;
+  goals: number;
+  assists: number;
+  clean_sheets: number;
+  goals_conceded: number;
+  saves: number;
+  cards: number;
+  defensive_contribution: number;
+  bonus: number;
+  total: number;
+}
+
+export interface TransferOption {
+  player_out: number;
+  player_out_name: string;
+  player_in: number;
+  player_in_name: string;
+  position: Position;
+  selling_price: number;
+  purchase_price: number;
+  gross_gain: number;
+  net_gain: number;
+  hit_cost: number;
+  risk_penalty: number;
+  bank_after: number;
+  reasons: Reason[];
+}
+
+export interface PlayerExplanation {
+  player_code: number;
+  name: string;
+  position: Position;
+  expected_points: number;
+  breakdown: Breakdown;
+  evidence: FeatureValue[];
+  reasons: Reason[];
+  is_starter: boolean;
+  start_margin: number;
+  forced_by_quota: boolean;
+  legal_replacements: number;
+  replacements: TransferOption[];
+  no_replacement_reasons: Reason[];
 }
 
 export interface Recommendation {
@@ -71,7 +129,34 @@ export interface Recommendation {
   expected_gain: number;
   risk: number;
   reasons: Reason[];
+  alternatives: TransferOption[];
+  players: PlayerExplanation[];
+  candidates_considered: number;
+  legal_moves: number;
   provenance: Provenance;
+}
+
+export interface FeatureImportance {
+  feature_name: string;
+  family: string;
+  importance: number;
+  rank_stability: number | null;
+  per_label: Record<string, number>;
+}
+
+export interface ImportanceResponse {
+  features: FeatureImportance[];
+  families: Record<string, number>;
+  degenerate_labels: string[];
+  labels: string[];
+  label_weights: Record<string, number>;
+  folds_measured: number;
+  features_measured: number;
+  features_with_no_effect: number;
+  catalogue_version: string;
+  model_fingerprint: string;
+  computed_at: string;
+  stale: boolean;
 }
 
 export interface Health {
@@ -106,7 +191,30 @@ export const api = {
     get<Recommendation>(
       `/recommend/${entryId}${squadFile ? `?squad_file=${encodeURIComponent(squadFile)}` : ""}`,
     ),
+  importance: (label?: string, limit = 60) =>
+    get<ImportanceResponse>(
+      `/features/importance?limit=${limit}${label ? `&label=${encodeURIComponent(label)}` : ""}`,
+    ),
 };
+
+/** Component labels read as `label_goals_scored`; people do not. */
+export function labelName(label: string): string {
+  return label.replace(/^label_/, "").replace(/_/g, " ");
+}
+
+/** A percentile as the phrase a person would say, not a decimal. */
+export function percentileText(percentile: number | null): string | null {
+  if (percentile === null) return null;
+  return `${Math.round(percentile * 100)}${suffix(Math.round(percentile * 100))}`;
+}
+
+function suffix(value: number): string {
+  if (value % 100 >= 11 && value % 100 <= 13) return "th";
+  if (value % 10 === 1) return "st";
+  if (value % 10 === 2) return "nd";
+  if (value % 10 === 3) return "rd";
+  return "th";
+}
 
 /** Money is stored in tenths of a million everywhere in this system. */
 export function money(tenths: number): string {

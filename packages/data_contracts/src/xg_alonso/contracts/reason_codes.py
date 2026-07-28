@@ -147,8 +147,7 @@ REASON_TEMPLATES: Final[dict[ReasonCode, str]] = {
         "{percentile:.0%} among {position}s."
     ),
     ReasonCode.CEILING_HIGHER: (
-        "Bigger ceiling: best return in the last five was {value:.0f} points "
-        "against {other:.0f}."
+        "Bigger ceiling: best return in the last five was {value:.0f} points against {other:.0f}."
     ),
     ReasonCode.VOLATILITY_LOWER: (
         "Steadier returns: points vary by {value:.2f} week to week against {other:.2f}."

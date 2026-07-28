@@ -39,6 +39,7 @@ from xg_alonso.domain.pricing import selling_price
 from xg_alonso.domain.purchase_prices import parse_transfer_log, reconstruct_purchase_prices
 from xg_alonso.domain.rules import SquadRules
 from xg_alonso.domain.scoring import ScoringRules
+from xg_alonso.explanations.reasons import PopulationStats
 from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
 from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
 from xg_alonso.features.slice1 import (
@@ -46,7 +47,6 @@ from xg_alonso.features.slice1 import (
     build_slice1_features,
     build_team_gameweek_stats,
 )
-from xg_alonso.explanations.reasons import PopulationStats
 from xg_alonso.optimization.transfer import Candidate, best_single_transfer
 from xg_alonso.pipelines.ingestion.fpl_client import FplApiClient
 from xg_alonso.pipelines.normalization import (

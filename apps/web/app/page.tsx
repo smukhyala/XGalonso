@@ -1,7 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { Alternatives } from "@/components/Alternatives";
 import { Pitch } from "@/components/Pitch";
+import { PlayerLedger } from "@/components/PlayerLedger";
 import { TheCall } from "@/components/TheCall";
 import {
   api,
@@ -85,6 +88,10 @@ export default function Page() {
         )}
       </div>
 
+      {call && <Alternatives options={call.alternatives} />}
+
+      {call && <PlayerLedger players={call.players} />}
+
       {board.length > 0 && <Board players={board} />}
 
       {squad && <Footnote squad={squad} />}
@@ -124,6 +131,10 @@ function Masthead({
         )}
       </div>
 
+      <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
+      <Link href="/features" className="eyebrow transition-opacity hover:opacity-70">
+        Feature lab →
+      </Link>
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -150,6 +161,7 @@ function Masthead({
           Load
         </button>
       </form>
+      </div>
     </header>
   );
 }

@@ -17,7 +17,6 @@ from xg_alonso.contracts.evidence import (
     FeatureValue,
     panel_feature_names,
 )
-from xg_alonso.features.slice1 import SLICE1_FEATURES
 from xg_alonso.contracts.identifiers import PlayerCode
 from xg_alonso.contracts.reason_codes import (
     REASON_TEMPLATES,
@@ -28,6 +27,7 @@ from xg_alonso.contracts.reason_codes import (
 )
 from xg_alonso.features.catalogue import feature_names
 from xg_alonso.features.opponent import OPPONENT_FEATURES
+from xg_alonso.features.slice1 import SLICE1_FEATURES
 
 
 class TestPanel:
@@ -77,9 +77,7 @@ class TestFeatureValue:
 
     def test_an_extreme_percentile_is_notable(self) -> None:
         for percentile in (0.05, 0.95):
-            value = FeatureValue(
-                name="x", label="x", family="f", value=1.0, percentile=percentile
-            )
+            value = FeatureValue(name="x", label="x", family="f", value=1.0, percentile=percentile)
             assert value.is_notable
 
     def test_a_missing_percentile_is_never_notable(self) -> None:
@@ -94,7 +92,7 @@ class TestFeatureValue:
         assert volatile.favourability == pytest.approx(0.1)
 
     def test_percentile_outside_the_unit_interval_is_rejected(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="less than or equal to 1"):
             FeatureValue(name="x", label="x", family="f", value=1.0, percentile=1.4)
 
 
@@ -134,8 +132,8 @@ class TestVocabulary:
             code=code,
             polarity=ReasonPolarity.CONTEXT,
             subject=PlayerCode(1),
-            evidence={name: 1.0 for name in placeholders - textual},
-            context={name: "MID" for name in placeholders & textual},
+            evidence=dict.fromkeys(placeholders - textual, 1.0),
+            context=dict.fromkeys(placeholders & textual, "MID"),
             weight=0.0,
         )
         rendered = reason.render()

@@ -2,6 +2,10 @@
 # Data and artifacts — never committed. Raw data is immutable and lives outside
 # git; see docs/architecture/01_repository_structure.md.
 # ---------------------------------------------------------------------------
+# Both forms: a trailing slash matches only a directory, so a `.data` symlink
+# pointing at the real store — which is a convenient way to share one dataset
+# between worktrees — slipped past the ignore and got committed once.
+.data
 .data/
 .data/bronze/
 .data/silver/

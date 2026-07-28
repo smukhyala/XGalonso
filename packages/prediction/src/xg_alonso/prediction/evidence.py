@@ -116,9 +116,7 @@ def build_feature_evidence(
     for index, position in enumerate(positions):
         by_position.setdefault(position, []).append(index)
 
-    ranked: dict[str, list[float | None]] = {
-        entry.name: [None] * frame.height for entry in panel
-    }
+    ranked: dict[str, list[float | None]] = {entry.name: [None] * frame.height for entry in panel}
     for indices in by_position.values():
         for entry in panel:
             column = raw[entry.name]

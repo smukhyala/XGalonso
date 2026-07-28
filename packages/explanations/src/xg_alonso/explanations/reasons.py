@@ -287,13 +287,17 @@ def build_transfer_reasons(
     in_ceiling = _value(incoming, _CEILING)
     out_ceiling = _value(outgoing, _CEILING)
     if _materially_greater(in_ceiling, out_ceiling):
-        assert in_ceiling is not None and out_ceiling is not None  # guarded above
+        # `_materially_greater` returns False for either side being None, so both
+        # are known here. Narrowed with locals rather than an assert so the type
+        # holds without a runtime check that only ever documents the guard above.
+        ceiling_in = float(in_ceiling or 0.0)
+        ceiling_out = float(out_ceiling or 0.0)
         reasons.append(
             Reason(
                 code=ReasonCode.CEILING_HIGHER,
                 polarity=ReasonPolarity.SUPPORTS_IN,
                 subject=incoming.player_code,
-                evidence={"value": in_ceiling, "other": out_ceiling},
+                evidence={"value": ceiling_in, "other": ceiling_out},
                 weight=magnitude * 0.25,
             )
         )
@@ -301,13 +305,14 @@ def build_transfer_reasons(
     in_volatility = _value(incoming, _VOLATILITY)
     out_volatility = _value(outgoing, _VOLATILITY)
     if _materially_greater(out_volatility, in_volatility):
-        assert in_volatility is not None and out_volatility is not None  # guarded above
+        volatility_in = float(in_volatility or 0.0)
+        volatility_out = float(out_volatility or 0.0)
         reasons.append(
             Reason(
                 code=ReasonCode.VOLATILITY_LOWER,
                 polarity=ReasonPolarity.SUPPORTS_IN,
                 subject=incoming.player_code,
-                evidence={"value": in_volatility, "other": out_volatility},
+                evidence={"value": volatility_in, "other": volatility_out},
                 weight=magnitude * 0.2,
             )
         )

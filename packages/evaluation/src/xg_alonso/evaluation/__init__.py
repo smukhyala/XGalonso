@@ -53,9 +53,9 @@ from xg_alonso.evaluation.report import (
 )
 
 __all__ = [
-    "POLICIES",
     "IMPORTANCE_SCHEMA_VERSION",
     "LABEL_TO_BREAKDOWN",
+    "POLICIES",
     "PRICE_BANDS",
     "AccuracyReport",
     "AccuracySlice",
@@ -71,8 +71,8 @@ __all__ = [
     "compare_to_previous",
     "gameweek_deadlines",
     "highest_form_policy",
-    "label_weights_from_predictions",
     "hold_policy",
+    "label_weights_from_predictions",
     "load_importance",
     "load_reports",
     "model_policy",

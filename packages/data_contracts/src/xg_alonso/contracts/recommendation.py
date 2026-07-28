@@ -165,8 +165,7 @@ class PlayerBestMove(BaseModel):
             )
         if self.option is not None and self.option.move.player_out != self.player_out:
             raise ValueError(
-                f"move sells {self.option.move.player_out} but this entry is for "
-                f"{self.player_out}"
+                f"move sells {self.option.move.player_out} but this entry is for {self.player_out}"
             )
         return self
 
