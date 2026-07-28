@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- The conviction ring, which is the product's signature mark. -->
+  <rect width="32" height="32" rx="7" fill="#0A1014"/>
+  <circle cx="16" cy="16" r="9" fill="none" stroke="#1E2C35" stroke-width="3"/>
+  <circle cx="16" cy="16" r="9" fill="none" stroke="#5BD99A" stroke-width="3"
+          stroke-linecap="round" stroke-dasharray="42 57" transform="rotate(-90 16 16)"/>
+</svg>

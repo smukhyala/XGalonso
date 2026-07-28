@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/*
+  Floodlit night.
+
+  The palette is deliberately not neutral black with one bright accent — that
+  is the reflexive dark-mode answer and it carries no information. Here the
+  ground is the blue-black of a stadium under lights, and the accents are a
+  *positional system*: every colour on the page tells you what a player is.
+  Nothing is coloured for decoration.
+*/
+@theme {
+  --color-pitch: #0a1014;
+  --color-surface: #111a20;
+  --color-raised: #16222a;
+  --color-line: #1e2c35;
+  --color-chalk: #e8edf0;
+  --color-muted: #7a8b95;
+  --color-dim: #4a5b66;
+
+  /* Positional identity. Also the only saturated colour on the page. */
+  --color-gkp: #f2b441;
+  --color-def: #4fa8d8;
+  --color-mid: #5bd99a;
+  --color-fwd: #e8674f;
+
+  --color-gain: #5bd99a;
+  --color-loss: #e8674f;
+
+  --font-display: var(--font-archivo), system-ui, sans-serif;
+  --font-body: var(--font-instrument), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    background: var(--color-pitch);
+    color: var(--color-chalk);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    /* A faint vertical wash, brighter at the top like floodlights. */
+    background:
+      radial-gradient(120% 70% at 50% -10%, #16252e 0%, transparent 60%),
+      var(--color-pitch);
+    min-height: 100vh;
+  }
+
+  /* Figures must align in columns; this is a table of numbers as much as a page. */
+  .tnum {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  ::selection {
+    background: var(--color-mid);
+    color: var(--color-pitch);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-mid);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+}
+
+@layer components {
+  /* Eyebrow labels. Used only where a section genuinely needs naming. */
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-dim);
+  }
+
+  .hairline {
+    height: 1px;
+    background: linear-gradient(
+      to right,
+      transparent,
+      var(--color-line) 12%,
+      var(--color-line) 88%,
+      transparent
+    );
+  }
+}
+
+/* Page-load sequence: one orchestrated reveal rather than scattered effects. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rise {
+  animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes draw {
+  from {
+    stroke-dashoffset: var(--dash, 100);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise,
+  [class*="animate-"] {
+    animation: none !important;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}
