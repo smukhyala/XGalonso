@@ -236,21 +236,24 @@ def build_features_command(
 
     reported: tuple[str, ...] = SLICE1_FEATURES
     if full:
-        from xg_alonso.features.catalogue import build_catalogue, feature_names
-        from xg_alonso.features.opponent import (
-            OPPONENT_FEATURES,
-            build_opponent_features,
-            build_opponent_strength,
-        )
+        from xg_alonso.features.assemble import build_model_features
+        from xg_alonso.features.career import CAREER_FEATURES
+        from xg_alonso.features.catalogue import feature_names
+        from xg_alonso.features.opponent import OPPONENT_FEATURES
+        from xg_alonso.features.recency import RECENCY_FEATURES
 
-        features = build_catalogue(features, player_stats=context.player_stats)
-        # Opponent context was previously built only inside the backtest, so
-        # the artifact this command wrote could not be consumed by a trained
-        # model — it was missing thirteen columns the model expects.
-        features = build_opponent_features(
-            features, opponent_strength=build_opponent_strength(context.player_stats)
+        # Built through the shared assembler so the artifact this command
+        # writes is exactly what a trained model consumes. Assembling it
+        # separately is how it previously came to be missing thirteen opponent
+        # columns, and later the career and recency ones.
+        features = build_model_features(features, player_stats=context.player_stats)
+        reported = (
+            tuple(SLICE1_FEATURES)
+            + tuple(feature_names())
+            + OPPONENT_FEATURES
+            + CAREER_FEATURES
+            + RECENCY_FEATURES
         )
-        reported = tuple(SLICE1_FEATURES) + tuple(feature_names()) + OPPONENT_FEATURES
 
     out_dir = data_root / "gold"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -801,8 +804,8 @@ def backtest(
             return result
 
         assert trained is not None
-        from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
-        from xg_alonso.features.opponent import build_opponent_features
+        from xg_alonso.features.assemble import build_model_features
+        from xg_alonso.features.catalogue import CATALOGUE_VERSION
         from xg_alonso.prediction import predict_with_models
 
         _, _, cutoff = _inputs_for(gameweek)
@@ -822,8 +825,9 @@ def backtest(
             .join(fixture, on="player_code", how="left")
             .with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
         )
-        features = build_catalogue(entities, player_stats=all_stats)
-        features = build_opponent_features(features, opponent_strength=opponent_strength)
+        features = build_model_features(
+            entities, player_stats=all_stats, opponent_strength=opponent_strength
+        )
 
         predictions = predict_with_models(
             features,
@@ -1286,8 +1290,8 @@ def build_squad_command(
 def _predict_all(context: SliceContext, gameweek: GameweekId, models: object | None):  # type: ignore[no-untyped-def]
     """Predict every player, via the trained models when supplied."""
     from xg_alonso.cli.pipeline import build_entities
-    from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
-    from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
+    from xg_alonso.features.assemble import build_model_features
+    from xg_alonso.features.catalogue import CATALOGUE_VERSION
     from xg_alonso.features.slice1 import build_slice1_features, build_team_gameweek_stats
     from xg_alonso.prediction import predict_with_models
     from xg_alonso.prediction.baseline import predict_frame
@@ -1296,10 +1300,7 @@ def _predict_all(context: SliceContext, gameweek: GameweekId, models: object | N
     entities = build_entities(context, cutoff=cutoff)
 
     if models is not None:
-        features = build_catalogue(entities, player_stats=context.player_stats)
-        features = build_opponent_features(
-            features, opponent_strength=build_opponent_strength(context.player_stats)
-        )
+        features = build_model_features(entities, player_stats=context.player_stats)
         return predict_with_models(
             features,
             models=models,  # type: ignore[arg-type]
@@ -1362,7 +1363,7 @@ def score(
         gameweek_deadlines,
         score_predictions,
     )
-    from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
+    from xg_alonso.features.opponent import build_opponent_strength
     from xg_alonso.features.slice1 import build_slice1_features, build_team_gameweek_stats
     from xg_alonso.prediction.baseline import predict_frame
 
@@ -1455,7 +1456,8 @@ def score(
                 feature_set_version="slice1_v1",
             )
         else:
-            from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
+            from xg_alonso.features.assemble import build_model_features
+            from xg_alonso.features.catalogue import CATALOGUE_VERSION
             from xg_alonso.prediction import predict_with_models
 
             fixture = (
@@ -1468,8 +1470,9 @@ def score(
                 .join(fixture, on="player_code", how="left")
                 .with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
             )
-            features = build_catalogue(entities, player_stats=all_stats)
-            features = build_opponent_features(features, opponent_strength=opponent_strength)
+            features = build_model_features(
+                entities, player_stats=all_stats, opponent_strength=opponent_strength
+            )
             predictions = predict_with_models(
                 features,
                 models=trained.models,
@@ -1520,4 +1523,266 @@ def score(
             "cannot rank anybody on this output.",
             fg=typer.colors.RED,
             bold=True,
+        )
+
+
+@app.command()
+def importance(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    model_path: Annotated[
+        Path | None, typer.Option("--model", help="Fitted model to measure.")
+    ] = None,
+    seasons: Annotated[
+        str, typer.Option("--seasons", help="Comma-separated seasons to measure on.")
+    ] = "2024-25",
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Where to write the importance table.")
+    ] = None,
+    repeats: Annotated[int, typer.Option("--repeats", help="Shuffles per feature.")] = 5,
+    top: Annotated[int, typer.Option("--top", help="How many features to print.")] = 25,
+    min_gameweek: Annotated[
+        int, typer.Option("--min-gw", help="Skip opening gameweeks with empty windows.")
+    ] = 4,
+) -> None:
+    """Measure which features actually earn their place.
+
+    The catalogue declares 171 features and nothing measured whether any of them
+    helped. This shuffles each one in turn on rows the model was **not** fitted
+    on and records what happens to out-of-sample error — so a feature that only
+    ever helped by memorising shows nothing here, which is the point.
+
+    Read the family totals alongside the flat ranking. Correlated features
+    substitute for one another, so each scores low individually while the family
+    they belong to matters a great deal; a flat ranking alone would say the
+    opposite.
+    """
+    from xg_alonso.contracts.provenance import utc_now
+    from xg_alonso.evaluation.importance import (
+        ImportanceTable,
+        label_weights_from_predictions,
+        permutation_importance,
+        write_importance,
+    )
+    from xg_alonso.features.catalogue import CATALOGUE_VERSION, catalogue_specs
+    from xg_alonso.features.opponent import OPPONENT_FEATURES
+    from xg_alonso.prediction import build_training_frame, load_models
+
+    stats_path = data_root / "silver" / "player_gameweek_stats.parquet"
+    if not stats_path.exists():
+        raise typer.BadParameter("no backfill found. Run `xg backfill` first.")
+
+    resolved_model = model_path or (data_root / "models" / "component_models.pkl")
+    if not resolved_model.exists():
+        raise typer.BadParameter(f"no model at {resolved_model}. Run `xg train` first.")
+
+    saved = load_models(resolved_model)
+    models = saved.models
+
+    wanted = [s.strip() for s in seasons.split(",")]
+    typer.echo(f"  building measurement frame from {', '.join(wanted)} ...")
+    data = build_training_frame(
+        pl.read_parquet(stats_path), seasons=wanted, min_gameweek=min_gameweek
+    )
+    typer.echo(f"    {data.rows:,} rows x {len(data.feature_columns)} features")
+
+    # Measure on each walk-forward validation window in turn. Those are the only
+    # rows the model genuinely did not train on — the refit at the end of
+    # training saw everything, so measuring on the full frame would describe the
+    # fit and quietly call it evidence.
+    #
+    # Every fold rather than just the last, because a single fold cannot show
+    # whether a feature's importance holds up: rank stability across folds is
+    # what separates a real effect from one lucky window.
+    ordered = sorted(data.seasons)
+    offset = {season: index * 100 for index, season in enumerate(ordered)}
+    timeline = pl.col("label_season").replace_strict(offset, default=0) + pl.col("label_gameweek")
+
+    windows: list[tuple[int, pl.DataFrame]] = []
+    for fold in models.folds:
+        rows = data.frame.filter(timeline.is_between(fold.validate_start, fold.validate_end))
+        if not rows.is_empty():
+            windows.append((fold.fold_index, rows))
+
+    if not windows:
+        typer.secho(
+            "  WARNING: no validation window has rows for these seasons; falling back "
+            "to the full frame, which overlaps training and is not out-of-sample.",
+            fg=typer.colors.YELLOW,
+        )
+        windows = [(0, data.frame)]
+
+    typer.echo(
+        f"    measuring on {len(windows)} fold(s), "
+        f"{sum(rows.height for _, rows in windows):,} held-out rows"
+    )
+
+    # Opponent features come from a separate generator, so a catalogue-only map
+    # files them under "unknown" — which then reads as a family that does not
+    # matter, when in fact it is the only fixture information the model has.
+    families = {spec.name: spec.family for spec in catalogue_specs()}
+    for name in OPPONENT_FEATURES:
+        families[name] = "fixture" if name == "is_home" else "opponent"
+
+    # Weight each label by how much it actually moves a points total, measured
+    # from a predicted population rather than assumed from the scoring values.
+    context = _load_context(data_root, parse_season(DEFAULT_SEASON))
+    gameweek = context.next_gameweek()
+    predictions = _predict_all(context, gameweek, models)
+    weights = label_weights_from_predictions(predictions)
+
+    typer.echo(
+        f"  permuting {len(models.feature_columns)} features x "
+        f"{len(models.models)} labels x {repeats} repeats x {len(windows)} fold(s) ..."
+    )
+    computed_at = utc_now()
+    tables = [
+        permutation_importance(
+            models,
+            rows,
+            label_columns=data.label_columns,
+            families=families,
+            label_weights=weights,
+            catalogue_version=CATALOGUE_VERSION,
+            computed_at=computed_at,
+            n_repeats=repeats,
+            fold_index=fold_index,
+        )
+        for fold_index, rows in windows
+    ]
+    table = ImportanceTable(
+        rows=tuple(row for measured in tables for row in measured.rows),
+        catalogue_version=CATALOGUE_VERSION,
+        model_fingerprint=models.fingerprint(),
+        computed_at=computed_at,
+        label_weights=weights,
+    )
+
+    destination = out or (data_root / "gold" / "feature_importance.parquet")
+    write_importance(table, destination)
+
+    ranked = sorted(table.by_feature().items(), key=lambda kv: -kv[1])
+    stability = table.stability()
+
+    typer.echo(f"\n  Top {min(top, len(ranked))} features, weighted across components:")
+    if stability:
+        typer.echo(f"    {'feature':<38}{'importance':>12}{'rank sd':>10}")
+        for name, value in ranked[:top]:
+            typer.echo(f"    {name:<38}{value:>12.5f}{stability.get(name, 0.0):>10.1f}")
+    else:
+        # Only one fold had rows, so there is nothing to compare a rank against.
+        # Printing a zero here would read as "perfectly stable".
+        typer.echo(f"    {'feature':<38}{'importance':>12}")
+        for name, value in ranked[:top]:
+            typer.echo(f"    {name:<38}{value:>12.5f}")
+        typer.echo("    (rank stability needs at least two folds with rows)")
+
+    typer.echo("\n  By family (correlated features split, so read these too):")
+    for family, value in sorted(table.by_family().items(), key=lambda kv: -kv[1]):
+        typer.echo(f"    {family:<38}{value:>12.5f}")
+
+    dead = [name for name, value in ranked if value <= 0.0]
+    if dead:
+        typer.echo(
+            f"\n  {len(dead)} of {len(ranked)} features did not improve out-of-sample error."
+        )
+
+    degenerate = table.degenerate_labels()
+    if degenerate:
+        typer.secho(
+            f"\n  NOTE: {len(degenerate)} label(s) output a constant and are excluded "
+            f"from the ranking: {', '.join(degenerate)}.\n"
+            "  Ranking features by their effect on a constant would be arithmetic "
+            "without meaning.",
+            fg=typer.colors.YELLOW,
+        )
+
+    typer.echo(f"\n  saved -> {destination}")
+
+
+@app.command(name="refresh-plan")
+def refresh_plan_command(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    entry_id: Annotated[
+        int | None, typer.Option("--entry", help="Weight your own players more heavily.")
+    ] = None,
+    squad_file: Annotated[
+        Path | None, typer.Option("--squad-file", help="Squad payload instead of the API.")
+    ] = None,
+    budget: Annotated[int, typer.Option("--budget", help="Maximum lookups.")] = 20,
+    model_path: Annotated[
+        Path | None, typer.Option("--model", help="Use a fitted model for relevance.")
+    ] = None,
+) -> None:
+    """Show which clubs are worth looking up for form, and which are not.
+
+    The naive alternative is one lookup per player per gameweek — about 600 a
+    week, most of them about players nobody will own. This asks per club
+    instead, because team news is published that way, and skips anyone whose
+    form cannot change a decision: too low-scoring to start, too expensive to
+    buy, or already covered by a signal that has not gone stale.
+
+    Prints the plan without fetching anything. What fetches the answers lives
+    outside this repository, which is what keeps the prediction path free of a
+    network dependency.
+    """
+    from xg_alonso.contracts.identifiers import TeamId
+    from xg_alonso.prediction.form import load_signals
+    from xg_alonso.prediction.refresh import plan_refresh
+
+    context = _load_context(data_root, parse_season(season))
+    gameweek = context.next_gameweek()
+    cutoff = context.deadline_for(gameweek)
+
+    models = None
+    if model_path is not None and model_path.exists():
+        from xg_alonso.prediction import load_models
+
+        models = load_models(model_path).models
+
+    predictions = _predict_all(context, gameweek, models)
+    rows = {int(r["player_code"]): r for r in context.players.iter_rows(named=True)}
+
+    teams = {PlayerCode(code): TeamId(int(row["team_id"])) for code, row in rows.items()}
+    prices = {
+        PlayerCode(code): TenthsOfMillion(int(row["current_price"])) for code, row in rows.items()
+    }
+    team_names = {int(r["team_id"]): str(r["name"]) for r in context.teams.iter_rows(named=True)}
+
+    owned: frozenset[PlayerCode] = frozenset()
+    affordable: TenthsOfMillion | None = None
+    if entry_id is not None or squad_file is not None:
+        state = _squad_state(context, entry_id or 0, squad_file)
+        owned = frozenset(pick.player_code for pick in state.picks)
+        affordable = TenthsOfMillion(
+            max(int(pick.selling_price) for pick in state.picks) + int(state.bank)
+        )
+
+    plan = plan_refresh(
+        predictions,
+        teams=teams,
+        prices=prices,
+        signals=load_signals(data_root / "signals" / "form_signals.json"),
+        at=cutoff,
+        owned=owned,
+        affordable_at=affordable,
+        budget=budget,
+    )
+
+    typer.echo(f"\n  {plan.describe()}\n")
+    if not plan.requests:
+        typer.echo("  Nothing worth looking up: every relevant player already has a")
+        typer.echo("  signal that has not gone stale.")
+        return
+
+    typer.echo(f"    {'club':<24}{'players':>9}   why")
+    for request in plan.requests:
+        club = team_names.get(int(request.team_id), f"team {int(request.team_id)}")
+        typer.echo(f"    {club:<24}{len(request.players):>9}   {request.reason}")
+
+    naive = plan.total_players
+    if naive > plan.lookups:
+        typer.echo(
+            f"\n  {plan.lookups} lookups instead of {naive} "
+            f"({naive / max(plan.lookups, 1):.0f}x fewer)."
         )

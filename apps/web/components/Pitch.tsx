@@ -29,7 +29,10 @@ const GOAL_LINE = 106;
 const BENCH_LABEL_Y = 118;
 const BENCH_Y = 125;
 
-const RADIUS = 4.6;
+// Token size. Dropped from 4.6 because at that radius eleven tokens crowded the
+// pitch and the shape — which is the whole reason the XI is drawn rather than
+// listed — stopped being legible behind them.
+const RADIUS = 3.4;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
 function Token({
@@ -57,7 +60,7 @@ function Token({
         1,
       )} projected points, ${Math.round(conviction * 100)}% chance of starting`}
     >
-      <circle cx={x} cy={y} r={RADIUS + 1.4} fill="var(--color-pitch)" opacity={0.85} />
+      <circle cx={x} cy={y} r={RADIUS + 1.1} fill="var(--color-pitch)" opacity={0.85} />
 
       {/* Conviction ring: how much of the circle is drawn is p(start). */}
       <circle
@@ -81,23 +84,23 @@ function Token({
         style={{ transition: "stroke-dasharray 700ms cubic-bezier(0.16,1,0.3,1)" }}
       />
 
-      <circle cx={x} cy={y} r={RADIUS - 1.1} fill={colour} opacity={0.13} />
+      <circle cx={x} cy={y} r={RADIUS - 0.85} fill={colour} opacity={0.13} />
 
       <text
         x={x}
         y={y + 0.9}
         textAnchor="middle"
         className="tnum"
-        style={{ fontSize: 3.1, fill: colour, fontWeight: 600 }}
+        style={{ fontSize: 2.4, fill: colour, fontWeight: 600 }}
       >
         {player.expected_points.toFixed(1)}
       </text>
 
       <text
         x={x}
-        y={y + RADIUS + 4.2}
+        y={y + RADIUS + 3.4}
         textAnchor="middle"
-        style={{ fontSize: 2.6, fill: "var(--color-chalk)", letterSpacing: "0.02em" }}
+        style={{ fontSize: 2.15, fill: "var(--color-chalk)", letterSpacing: "0.02em" }}
       >
         {player.name.length > 12 ? `${player.name.slice(0, 11)}…` : player.name}
       </text>
@@ -105,19 +108,19 @@ function Token({
       {(player.is_captain || player.is_vice_captain) && (
         <>
           <circle
-            cx={x + RADIUS - 0.3}
-            cy={y - RADIUS + 0.3}
-            r={2.1}
+            cx={x + RADIUS - 0.2}
+            cy={y - RADIUS + 0.2}
+            r={1.65}
             fill={player.is_captain ? colour : "var(--color-pitch)"}
             stroke={colour}
             strokeWidth={0.6}
           />
           <text
-            x={x + RADIUS - 0.3}
-            y={y - RADIUS + 1.1}
+            x={x + RADIUS - 0.2}
+            y={y - RADIUS + 0.85}
             textAnchor="middle"
             style={{
-              fontSize: 2.2,
+              fontSize: 1.75,
               fontWeight: 700,
               fill: player.is_captain ? "var(--color-pitch)" : colour,
             }}

@@ -24,12 +24,14 @@ from datetime import timedelta
 
 import polars as pl
 
-from xg_alonso.features.catalogue import build_catalogue, feature_names
+from xg_alonso.features.assemble import build_model_features
+from xg_alonso.features.career import CAREER_FEATURES
+from xg_alonso.features.catalogue import feature_names
 from xg_alonso.features.opponent import (
     OPPONENT_FEATURES,
-    build_opponent_features,
     build_opponent_strength,
 )
+from xg_alonso.features.recency import RECENCY_FEATURES
 
 __all__ = [
     "COMPONENT_LABELS",
@@ -83,7 +85,7 @@ def build_training_frame(
     player_stats: pl.DataFrame,
     *,
     seasons: Sequence[str] | None = None,
-    min_gameweek: int = 4,
+    min_gameweek: int = 1,
     progress: bool = False,
 ) -> TrainingData:
     """Assemble features-as-of-deadline plus same-gameweek labels.
@@ -91,8 +93,21 @@ def build_training_frame(
     Args:
         player_stats: Canonical ``player_gameweek_stats`` across all seasons.
         seasons: Restrict to these seasons. All of them when omitted.
-        min_gameweek: Skip the opening gameweeks of each season, where rolling
-            windows are nearly empty and rows would mostly encode the prior.
+        min_gameweek: Skip the opening gameweeks of each season.
+
+            **Defaults to 1, having previously defaulted to 4.** The old default
+            was defended on the grounds that early-season rolling windows are
+            nearly empty and mostly encode the prior — which is true, and was
+            the wrong conclusion. Excluding those rows did not stop the model
+            being *asked* about gameweek 1; it only stopped it having ever seen
+            one. The result was extrapolation across a regime with no training
+            examples, and it showed: a four-season 2,750-minute striker was
+            projected to play 27 minutes because his last match, three months
+            earlier in a dead rubber, was a zero.
+
+            Early rows are exactly where the recency features earn their place,
+            so the model can now learn what a stale window is worth instead of
+            being shielded from the question.
         progress: Print a line per gameweek processed.
 
     Returns:
@@ -135,8 +150,9 @@ def build_training_frame(
             )
         )
 
-        features = build_catalogue(entities, player_stats=stats)
-        features = build_opponent_features(features, opponent_strength=opponent_strength)
+        features = build_model_features(
+            entities, player_stats=stats, opponent_strength=opponent_strength
+        )
 
         label_frame = outcomes.group_by("player_code").agg(
             [pl.col(c).sum().alias(f"label_{c}") for c in labels]
@@ -156,7 +172,9 @@ def build_training_frame(
     frame = pl.concat(built, how="vertical").sort(["label_season", "label_gameweek", "player_code"])
     return TrainingData(
         frame=frame,
-        feature_columns=tuple(feature_names()) + OPPONENT_FEATURES,
+        feature_columns=(
+            tuple(feature_names()) + OPPONENT_FEATURES + CAREER_FEATURES + RECENCY_FEATURES
+        ),
         label_columns=tuple(f"label_{c}" for c in labels),
         gameweeks=tuple(sorted({int(g) for g in frame["label_gameweek"].unique()})),
         seasons=tuple(sorted({str(s) for s in frame["label_season"].unique()})),

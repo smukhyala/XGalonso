@@ -85,24 +85,107 @@ export function TheCall({ recommendation }: { recommendation: Recommendation }) 
         <Figure label="Bank after" value={money(recommendation.bank_after)} />
       </dl>
 
-      {recommendation.reasons.length > 0 && (
-        <div className="mt-9">
-          <p className="eyebrow">Because</p>
-          <ul className="mt-4 space-y-3">
-            {recommendation.reasons.map((reason) => (
-              <li key={`${reason.code}-${reason.subject}`} className="flex gap-3.5">
-                <span
-                  aria-hidden
-                  className="mt-[0.55rem] h-px w-5 shrink-0"
-                  style={{ background: "var(--color-dim)" }}
-                />
-                <span className="text-[15px] leading-relaxed text-chalk/90">{reason.text}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <Because recommendation={recommendation} />
     </section>
+  );
+}
+
+/**
+ * The evidence, grouped under the player each piece is about.
+ *
+ * This is the fix for the screen that read as self-contradictory. The reasons
+ * were always correct and always carried a subject, and the subject was thrown
+ * away at render — so "minutes look secure: 100%" sat directly above "minutes
+ * are a concern: 60%" in one flat list, with nothing to say they described
+ * different people. Grouping under a named heading is the whole repair.
+ */
+function Because({ recommendation }: { recommendation: Recommendation }) {
+  const { player_out: out, player_in: incoming } = recommendation;
+  if (recommendation.reasons.length === 0) return null;
+
+  const forIn = recommendation.reasons.filter((r) => r.polarity === "supports_in");
+  const forOut = recommendation.reasons.filter((r) => r.polarity === "supports_out");
+  const context = recommendation.reasons.filter((r) => r.polarity === "context");
+
+  return (
+    <div className="mt-10">
+      <p className="eyebrow">Because</p>
+
+      <div className="mt-5 grid gap-8 sm:grid-cols-2">
+        <Side
+          verb="Buying"
+          name={incoming?.name ?? "the incoming player"}
+          colour={incoming ? POSITION_COLOR[incoming.position] : "var(--color-mid)"}
+          reasons={forIn}
+        />
+        <Side
+          verb="Selling"
+          name={out?.name ?? "the outgoing player"}
+          colour={out ? POSITION_COLOR[out.position] : "var(--color-loss)"}
+          reasons={forOut}
+        />
+      </div>
+
+      {context.length > 0 && (
+        <ul className="mt-8 space-y-2.5">
+          {context.map((reason) => (
+            <li
+              key={`${reason.code}-${reason.subject}`}
+              className="max-w-xl text-[13px] leading-relaxed"
+              style={{ color: "var(--color-dim)" }}
+            >
+              {reason.text}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {recommendation.legal_moves > 0 && (
+        <p className="eyebrow mt-6">
+          {recommendation.legal_moves.toLocaleString()} legal moves evaluated across{" "}
+          {recommendation.candidates_considered.toLocaleString()} buyable players
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Side({
+  verb,
+  name,
+  colour,
+  reasons,
+}: {
+  verb: string;
+  name: string;
+  colour: string;
+  reasons: Recommendation["reasons"];
+}) {
+  return (
+    <div>
+      <p className="text-[13px]">
+        <span className="eyebrow">{verb}</span>{" "}
+        <span style={{ color: colour }}>{name}</span>
+      </p>
+      {reasons.length > 0 ? (
+        <ul className="mt-3 space-y-3">
+          {reasons.map((reason) => (
+            <li key={`${reason.code}-${reason.subject}`} className="flex gap-3">
+              <span
+                aria-hidden
+                className="mt-[0.5rem] h-px w-3.5 shrink-0"
+                style={{ background: colour, opacity: 0.6 }}
+              />
+              <span className="text-[14px] leading-relaxed text-chalk/90">{reason.text}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-3 text-[13px]" style={{ color: "var(--color-dim)" }}>
+          Nothing here argues either way.
+        </p>
+      )}
+    </div>
   );
 }
 

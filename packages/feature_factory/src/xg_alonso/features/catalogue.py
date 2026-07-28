@@ -41,7 +41,7 @@ __all__ = [
     "feature_names",
 ]
 
-CATALOGUE_VERSION: Final[str] = "catalogue_v1"
+CATALOGUE_VERSION: Final[str] = "catalogue_v2"
 
 #: Per-90 scaling for rate features.
 _DENOMINATOR_SCALE: Final[float] = 90.0
@@ -82,6 +82,17 @@ class FeatureSpec:
 
 #: Windows in appearances. Short windows capture form, long ones capture level;
 #: both matter and the evaluation layer decides which earns its place.
+#:
+#: A window of one was removed once and put back. The reasoning for removing it
+#: was sound — a "mean" over a single observation is not a mean, and the
+#: importance run had the model leaning on `minutes_mean_1` harder than on
+#: anything else — but the experiment did not support it: out-of-sample skill on
+#: minutes fell from +60.6% to +57.8% and on starts from +57.7% to +54.4%, and
+#: the projection it was meant to fix did not move. The model simply leaned on
+#: `minutes_mean_3` instead, which was depressed by the same rows.
+#:
+#: The rows were the problem, not the window. See `minutes_when_played_*` in
+#: `recency.py`.
 _WINDOWS: Final[tuple[int, ...]] = (1, 3, 5, 10, 20)
 
 #: Counting metrics. Rolling means and sums are meaningful; per-90 is not,
@@ -98,6 +109,12 @@ _COUNT_METRICS: Final[tuple[str, ...]] = (
     "bonus",
     "bps",
     "total_points",
+    # Defensive actions. FPL began paying these in 2025/26, so the column exists
+    # for one season only and is null across the backfill — which is why it is
+    # declared here rather than modelled: HistGradientBoosting reads a null as
+    # "unknown" and branches on it, and the explanation layer needs the raw
+    # value to say anything sensible about a centre-back.
+    "defensive_contribution",
     # Market state. Ownership and transfer flow describe what the market
     # believed, which is information no per-90 rate contains.
     "selected",
@@ -126,6 +143,7 @@ _RATE_METRICS: Final[tuple[str, ...]] = (
     "creativity",
     "influence",
     "ict_index",
+    "defensive_contribution",
 )
 
 #: Metrics whose variance is interpretable. A volatile points return is a real

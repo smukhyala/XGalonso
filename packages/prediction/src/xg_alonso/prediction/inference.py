@@ -17,10 +17,11 @@ import pickle
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import polars as pl
 
+from xg_alonso.contracts.evidence import FeatureEvidence
 from xg_alonso.contracts.identifiers import GameweekId, PlayerCode
 from xg_alonso.contracts.prediction import (
     ComponentExpectations,
@@ -30,6 +31,7 @@ from xg_alonso.contracts.prediction import (
 )
 from xg_alonso.contracts.provenance import PredictionProvenance
 from xg_alonso.domain.scoring import ScoringRules, assemble_points
+from xg_alonso.prediction.evidence import build_feature_evidence
 from xg_alonso.prediction.trained import (
     TRAINED_MODEL_NAME,
     TRAINED_MODEL_VERSION,
@@ -109,6 +111,27 @@ def load_models(path: Path) -> SavedModel:
     return loaded
 
 
+#: Days of inactivity beyond which the last match stops describing the next one.
+#: Matches the staleness threshold the recency features use.
+_STALE_DAYS: Final[float] = 42.0
+
+
+def _established_minutes_floor(
+    minutes_when_played: float | None, appearance_rate: float | None
+) -> float | None:
+    """What a player's own record says he plays, ignoring his last match.
+
+    ``appearance_rate x minutes_when_played`` is the expectation implied by how
+    often he features and how long he lasts when he does — the same two facts a
+    fixture-based rolling mean multiplies together and then loses.
+    """
+    if minutes_when_played is None or appearance_rate is None:
+        return None
+    if minutes_when_played <= 0.0 or appearance_rate <= 0.0:
+        return None
+    return float(appearance_rate) * float(minutes_when_played)
+
+
 def _minutes_from(expected_minutes: float, p_start: float) -> MinutesPrediction:
     """Assemble a coherent minutes distribution from two model outputs.
 
@@ -147,6 +170,7 @@ def predict_with_models(
     feature_set_version: str,
     horizon_gameweeks: int = 1,
     shrink_by_skill: bool = False,
+    with_evidence: bool = True,
 ) -> list[PlayerPrediction]:
     """Predict components with the trained models and assemble them into points.
 
@@ -157,6 +181,11 @@ def predict_with_models(
         shrink_by_skill: Blend each component toward its population mean in
             proportion to measured out-of-sample skill, so a weakly-predicted
             component cannot drive a recommendation as hard as a strong one.
+        with_evidence: Attach the explanatory feature panel, ranked within
+            position across this batch. On by default because a prediction that
+            cannot be traced to its inputs cannot be explained — the whole
+            reason the recommendation screen could only cite model output was
+            that this frame used to be discarded here.
     """
     for required in ("player_code", "position"):
         if required not in features.columns:
@@ -166,6 +195,26 @@ def predict_with_models(
 
     predicted = models.predict(features, shrink_by_skill=shrink_by_skill)
 
+    evidence: list[FeatureEvidence] | None = None
+    if with_evidence:
+        evidence = build_feature_evidence(
+            features,
+            positions=[str(p) for p in features["position"].to_list()],
+        )
+
+    def _optional_column(frame: pl.DataFrame, name: str) -> list[float | None]:
+        """A feature column when the frame carries it, all-null when it does not.
+
+        The floor is a refinement, so a feature set without the recency columns
+        must still predict rather than fail.
+        """
+        if name not in frame.columns:
+            return [None] * frame.height
+        return [
+            None if value is None else float(value)
+            for value in frame[name].cast(pl.Float64, strict=False).to_list()
+        ]
+
     def column(label: str, default: float = 0.0) -> list[float]:
         values = predicted.get(label)
         if values is None:
@@ -174,6 +223,31 @@ def predict_with_models(
 
     minutes = column("label_minutes")
     starts = column("label_starts")
+
+    # --- stale-form floor -------------------------------------------------
+    #
+    # **Why a rule and not a feature.** Three attempts to fix this with features
+    # failed and are recorded because the failures are informative: adding
+    # `days_since_last_match` did nothing, removing the single-match window cost
+    # skill (minutes +60.6% to +57.8%) and changed no projection, and adding
+    # appearance-conditioned minutes did not move it either. The model had the
+    # right inputs each time and kept its answer.
+    #
+    # It kept it because the relationship it learned is correct on average. A
+    # player who did not feature in his club's last fixture usually is not
+    # starting the next one, and that holds across almost all of the training
+    # data. It fails for one subpopulation — an established starter rested in a
+    # dead rubber before a long break — and four seasons contain three season
+    # openers, which is not enough examples to learn the exception from.
+    #
+    # So the exception is stated rather than learned, and bounded so it cannot
+    # do anything else: only when the recent window is genuinely stale, and only
+    # ever raising a projection to what the player's own appearance record
+    # already implies. It cannot invent minutes for someone who does not play.
+    stale = _optional_column(features, "form_is_stale")
+    when_played = _optional_column(features, "minutes_when_played_mean_5")
+    appearance_rate = _optional_column(features, "appearance_rate_10")
+    days_since = _optional_column(features, "days_since_last_match")
     goals = column("label_goals_scored")
     assists = column("label_assists")
     clean_sheets = column("label_clean_sheets")
@@ -200,7 +274,20 @@ def predict_with_models(
         if not isinstance(position, str) or position not in Position.__members__:
             continue
 
-        minute_prediction = _minutes_from(minutes[index], starts[index])
+        expected = minutes[index]
+        started = starts[index]
+
+        is_stale = (stale[index] or 0.0) >= 0.5 or (days_since[index] or 0.0) >= _STALE_DAYS
+        if is_stale:
+            floor = _established_minutes_floor(when_played[index], appearance_rate[index])
+            if floor is not None and floor > expected:
+                expected = floor
+                # A start probability of 0.3 alongside 72 expected minutes is
+                # incoherent, so the two are raised together — the contract's
+                # own invariants would reject the pair otherwise.
+                started = max(started, min(1.0, floor / _FULL_MATCH))
+
+        minute_prediction = _minutes_from(expected, started)
         scale = horizon_gameweeks
 
         components = ComponentExpectations(
@@ -244,6 +331,7 @@ def predict_with_models(
                 expected_points_sd=round(sd, 6),
                 scoring_rules_version=rules.version,
                 provenance=provenance,
+                feature_evidence=None if evidence is None else evidence[index],
             )
         )
     return out

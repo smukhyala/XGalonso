@@ -1,7 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { Alternatives } from "@/components/Alternatives";
+import { Derivation, Horizon } from "@/components/Depth";
+import { History } from "@/components/History";
+import { LineupDiff } from "@/components/LineupDiff";
 import { Pitch } from "@/components/Pitch";
+import { PlayerLedger } from "@/components/PlayerLedger";
+import { SquadBuild } from "@/components/SquadBuild";
 import { TheCall } from "@/components/TheCall";
 import {
   api,
@@ -10,8 +17,20 @@ import {
   type Health,
   type PlayerSummary,
   type Recommendation,
+  type SquadBuild as SquadBuildData,
   type SquadResponse,
 } from "@/lib/api";
+
+/**
+ * Two modes, because there are two questions.
+ *
+ * Before the first deadline transfers are unlimited and nobody owns a squad, so
+ * the only sensible question is which fifteen to pick. After it, the squad is
+ * fixed and the question becomes which single move improves it. Answering the
+ * second at gameweek 1 — which is all this page used to do — recommends one
+ * transfer to a manager who has infinite ones.
+ */
+type Mode = "squad" | "transfer";
 
 // Your real GW1 squad, transcribed from the Pick Team screen. Swap back to
 // example_squad.json for the synthetic fixture. Once the GW1 deadline passes,
@@ -22,10 +41,18 @@ export default function Page() {
   const [health, setHealth] = useState<Health | null>(null);
   const [squad, setSquad] = useState<SquadResponse | null>(null);
   const [call, setCall] = useState<Recommendation | null>(null);
+  const [build, setBuild] = useState<SquadBuildData | null>(null);
   const [board, setBoard] = useState<PlayerSummary[]>([]);
   const [entryId, setEntryId] = useState("1234567");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
+  const [mode, setMode] = useState<Mode | null>(null);
+
+  // Null until health arrives, then gameweek 1 defaults to squad mode. Chosen
+  // rather than guessed, and overridable — a manager planning a wildcard wants
+  // squad mode in gameweek 20.
+  const resolvedMode: Mode =
+    mode ?? (health && health.next_gameweek === 1 ? "squad" : "transfer");
 
   const load = useCallback(async (id: string) => {
     setBusy(true);
@@ -52,9 +79,28 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (resolvedMode !== "squad" || build) return;
+    setBusy(true);
+    api
+      .buildSquadExplained()
+      .then(setBuild)
+      .catch((cause) =>
+        setError(cause instanceof Error ? cause.message : "Could not build a squad."),
+      )
+      .finally(() => setBusy(false));
+  }, [resolvedMode, build]);
+
   return (
     <main className="mx-auto max-w-6xl px-6 pb-28 sm:px-10">
-      <Masthead health={health} entryId={entryId} onEntryId={setEntryId} onSubmit={() => load(entryId)} />
+      <Masthead
+        health={health}
+        entryId={entryId}
+        onEntryId={setEntryId}
+        onSubmit={() => load(entryId)}
+        mode={resolvedMode}
+        onMode={setMode}
+      />
 
       {error && (
         <p
@@ -66,24 +112,38 @@ export default function Page() {
         </p>
       )}
 
-      <div className="mt-14 grid gap-16 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
-        <div>
-          {busy && !call ? <Skeleton /> : call && <TheCall recommendation={call} />}
-          {squad && <Ledger squad={squad} />}
+      {resolvedMode === "squad" ? (
+        <div className="mt-14">
+          {busy && !build ? <Skeleton /> : build && <SquadBuild build={build} />}
         </div>
+      ) : (
+        <>
+          <div className="mt-14 grid gap-16 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
+            <div>
+              {busy && !call ? <Skeleton /> : call && <TheCall recommendation={call} />}
+              {squad && <Ledger squad={squad} />}
+            </div>
 
-        {squad && (
-          <div className="rise" style={{ animationDelay: "0.2s" }}>
-            <div className="flex items-baseline justify-between">
-              <p className="eyebrow">The eleven</p>
-              <p className="eyebrow">{squad.formation}</p>
-            </div>
-            <div className="mt-5">
-              <Pitch players={squad.players} />
-            </div>
+            {squad && (
+              <div className="rise" style={{ animationDelay: "0.2s" }}>
+                <div className="flex items-baseline justify-between">
+                  <p className="eyebrow">The eleven</p>
+                  <p className="eyebrow">{squad.formation}</p>
+                </div>
+                <div className="mt-5">
+                  <Pitch players={squad.players} />
+                </div>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+
+          {call?.lineup && <LineupDiff lineup={call.lineup} />}
+
+          {call && <Alternatives options={call.alternatives} />}
+
+          {call && <PlayerLedger players={call.players} />}
+        </>
+      )}
 
       {board.length > 0 && <Board players={board} />}
 
@@ -97,11 +157,15 @@ function Masthead({
   entryId,
   onEntryId,
   onSubmit,
+  mode,
+  onMode,
 }: {
   health: Health | null;
   entryId: string;
   onEntryId: (value: string) => void;
   onSubmit: () => void;
+  mode: Mode;
+  onMode: (mode: Mode) => void;
 }) {
   return (
     <header className="flex flex-wrap items-center justify-between gap-6 pt-10">
@@ -124,6 +188,24 @@ function Masthead({
         )}
       </div>
 
+      <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
+      <div className="flex items-center gap-5" role="group" aria-label="Mode">
+        <ModeTab
+          label="Build a squad"
+          active={mode === "squad"}
+          onClick={() => onMode("squad")}
+        />
+        <ModeTab
+          label="Transfer"
+          active={mode === "transfer"}
+          onClick={() => onMode("transfer")}
+        />
+      </div>
+
+      <Link href="/features" className="eyebrow transition-opacity hover:opacity-70">
+        Feature lab →
+      </Link>
+      {mode === "transfer" && (
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -150,7 +232,34 @@ function Masthead({
           Load
         </button>
       </form>
+      )}
+      </div>
     </header>
+  );
+}
+
+function ModeTab({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className="border-b pb-0.5 text-[13px] transition-colors"
+      style={{
+        color: active ? "var(--color-chalk)" : "var(--color-dim)",
+        borderColor: active ? "var(--color-chalk)" : "transparent",
+      }}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -187,21 +296,24 @@ function Stat({ label, value, unit }: { label: string; value: string; unit?: str
 }
 
 function Board({ players }: { players: PlayerSummary[] }) {
+  const [open, setOpen] = useState<number | null>(null);
   const ceiling = Math.max(...players.map((p) => p.expected_points));
   return (
     <section className="rise mt-24" style={{ animationDelay: "0.3s" }}>
       <div className="flex items-baseline justify-between">
         <p className="eyebrow">Best available</p>
-        <p className="eyebrow hidden sm:block">Projected points · this gameweek</p>
+        <p className="eyebrow hidden sm:block">Open a row for the full breakdown</p>
       </div>
       <div className="hairline mt-5" />
 
       <ol className="mt-2">
         {players.map((player, index) => (
-          <li
-            key={player.player_code}
-            className="grid grid-cols-[2.5rem_1fr_auto] items-center gap-4 border-b py-3.5 sm:grid-cols-[2.5rem_1fr_7rem_5rem_auto]"
-            style={{ borderColor: "var(--color-line)" }}
+          <li key={player.player_code} className="border-b" style={{ borderColor: "var(--color-line)" }}>
+          <button
+            type="button"
+            onClick={() => setOpen(open === player.player_code ? null : player.player_code)}
+            aria-expanded={open === player.player_code}
+            className="grid w-full grid-cols-[2.5rem_1fr_auto] items-center gap-4 py-3.5 text-left transition-opacity hover:opacity-80 sm:grid-cols-[2.5rem_1fr_7rem_5rem_auto]"
           >
             <span className="tnum text-xs text-dim">{String(index + 1).padStart(2, "0")}</span>
 
@@ -230,9 +342,39 @@ function Board({ players }: { players: PlayerSummary[] }) {
             <span className="tnum hidden text-sm text-muted sm:block">{money(player.price)}</span>
 
             <span className="tnum text-right text-sm">{player.expected_points.toFixed(2)}</span>
+          </button>
+
+          {open === player.player_code && (
+            <div className="grid gap-10 pb-9 pl-[3.5rem] pr-2 pt-1 lg:grid-cols-2">
+              <Derivation lines={player.derivation} />
+
+              <div className="space-y-9">
+                <Horizon weeks={player.horizon} total={player.horizon_total} />
+
+                <div>
+                  <p className="eyebrow">Whether it has happened before</p>
+                  <div className="mt-3">
+                    {player.history.length > 0 ? (
+                      <History notes={player.history} compact />
+                    ) : (
+                      <p className="text-[13px]" style={{ color: "var(--color-dim)" }}>
+                        No prior meetings with this opponent, and not enough history in
+                        this gameweek to say anything worth saying.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           </li>
         ))}
       </ol>
+      <p className="mt-5 max-w-2xl text-[13px] leading-relaxed" style={{ color: "var(--color-dim)" }}>
+        These are match results, not projections — what he did, against this opponent, in
+        this gameweek, in seasons that have been played. They sit next to the model rather
+        than inside it: nothing here moves a number.
+      </p>
     </section>
   );
 }

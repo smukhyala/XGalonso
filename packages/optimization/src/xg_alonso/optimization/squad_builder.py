@@ -35,13 +35,19 @@ Because the inner choice is itself a maximisation, the solver's optimum equals
 equivalence on random squads rather than trusting it.
 
 **On leftover budget.** A squad that banks money looks wrong and usually is not.
-Bench players contribute exactly zero, so bench spend is a free variable: at the
-optimum, forcing every last 0.1m to be spent changes the objective by 0.0000.
-Bank is therefore a readout, never a lever — there is deliberately no minimum
-spend constraint here, and adding one would trade real points for a cosmetic
-number. What the tie-break below *does* do is spend idle money on the best bench
-available, which costs nothing and is worth something the moment autosubs are
-modelled.
+Bench players contribute exactly zero to the objective, so bench spend is a free
+variable: at the optimum, forcing every last 0.1m to be spent changes the score
+by 0.0000. Bank is therefore a readout, never a lever — there is deliberately no
+minimum spend constraint here, and adding one would trade real points for a
+cosmetic number.
+
+What the tie-break does with that free variable is buy the *cheapest bench that
+can still autosub*, rather than the highest-scoring one. A substitute only ever
+scores when a starter is withdrawn or Bench Boost is played, and the chip is not
+modelled (D5) — so paying for bench quality spends the eleven's budget on points
+that are almost never collected. The eleven is unaffected either way; the
+difference is whether the remainder sits in a fourth substitute or in the bank,
+and the bank is a transfer a manager can actually make.
 """
 
 from __future__ import annotations
@@ -67,17 +73,59 @@ from xg_alonso.optimization.lineup import CAPTAIN_MULTIPLIER, XiSelection, best_
 
 __all__ = ["SquadCandidate", "build_squad"]
 
-#: Weight on total squad expected points, used only to break ties between
-#: squads whose *elevens* score identically. Bench players are worth zero to the
-#: objective, so without this the choice of bench — and therefore how much of the
-#: budget is used — is arbitrary and can differ between otherwise identical runs.
+#: Weight on the bench tie-break, used only to choose between squads whose
+#: *elevens* score identically.
 #:
-#: The bound that keeps it a tie-break rather than a second objective: squad
-#: total expected points cannot exceed roughly 15 x 10 = 150, so this term can
-#: shift the objective by at most 1.5e-4. Any XI difference larger than that
-#: wins outright, and differences smaller than it are below the noise floor of
-#: the predictions being optimised over.
-_TIE_BREAK_WEIGHT = 1e-6
+#: **This used to maximise total squad points, and that was the wrong tie-break.**
+#: A bench player scores nothing unless a starter is withdrawn or the Bench Boost
+#: chip is played, and the chip is not modelled at all (D5). Preferring the
+#: highest-scoring bench therefore spent real money buying points that, in the
+#: overwhelming majority of gameweeks, are never collected — and it spent that
+#: money out of the same budget the eleven draws on.
+#:
+#: The eleven itself does not change: the solver already maximises it subject to
+#: the whole-squad budget, so the optimum was correct before and is correct now.
+#: What changes is where the leftover goes. It now comes back as bank, which is
+#: transfer flexibility a manager can actually use, instead of sitting in a
+#: fourth substitute who will not play.
+#:
+#: The bound that keeps it a tie-break rather than a second objective: a bench
+#: of four cannot cost more than about 4 x 150 = 600, so this term can shift the
+#: objective by at most 6e-5. Any XI difference larger than that wins outright,
+#: and differences smaller than it are far below the noise floor of the
+#: predictions being optimised over.
+_BENCH_COST_WEIGHT = 1e-7
+
+#: What a bench player who is certain to play is worth, in price units, against
+#: one who is certain not to.
+#:
+#: A bench is not merely dead weight: when a starter is withdrawn before kick-off
+#: an autosub takes his place, and a substitute who never plays cannot. So the
+#: cheapest possible bench is not the best one — five tenths of a million is
+#: worth paying for a substitute who actually appears. Expressed in price units
+#: so it trades against cost in the same currency rather than through a second
+#: opaque weight.
+_BENCH_PLAYS_BONUS = 5.0
+
+#: Weight on spending the budget *on the eleven*, used only to break ties.
+#:
+#: **Unspent money at gameweek 1 scores nothing.** Before the first deadline
+#: transfers are unlimited, so there is no future move for a bank balance to
+#: fund — it is simply budget that was not converted into players. That is not
+#: true mid-season, where money buys flexibility, which is why this is a
+#: squad-build tie-break and not a change to the objective.
+#:
+#: It only ever decides between elevens the model scores as equal, and the model
+#: is *measurably* least able to tell them apart at exactly the prices this
+#: pushes toward: on a held-out season its rank correlation falls from 0.67 in
+#: the budget tier to 0.31 above £11m, while it under-projects the £8-11m tier
+#: by 0.35 points a gameweek. Where it claims indifference between a cheap
+#: player and an expensive one, the expensive one is the better bet, because the
+#: model's own error is in that direction.
+#:
+#: Bounded like every other tie-break here: an eleven cannot cost more than
+#: about 11 x 150 = 1650, so this shifts the objective by at most 1.6e-4.
+_XI_SPEND_WEIGHT = 1e-7
 
 _POSITIONS: tuple[Position, ...] = (Position.GKP, Position.DEF, Position.MID, Position.FWD)
 
@@ -143,15 +191,29 @@ def _solve(
 
     ep = np.array([points.get(c.player_code, 0.0) for c in candidates], dtype=float)
     price = np.array([int(c.price) for c in candidates], dtype=float)
+    appearance = np.array(
+        [c.prediction.components.minutes.p_appearance for c in candidates], dtype=float
+    )
 
     x0, y0, c0 = 0, n, 2 * n
 
-    # milp minimises, so the maximisation is negated. The tie-break rides on the
-    # squad variables, where it can only distinguish otherwise-equal optima.
+    # milp minimises, so the maximisation is negated.
     objective = np.zeros(3 * n, dtype=float)
     objective[y0 : y0 + n] = -ep
     objective[c0 : c0 + n] = -ep * (CAPTAIN_MULTIPLIER - 1)
-    objective[x0 : x0 + n] = -ep * _TIE_BREAK_WEIGHT
+
+    # Bench tie-break. A player is on the bench exactly when he is in the squad
+    # and not in the XI, so putting +cost on the squad variable and -cost on the
+    # XI variable charges it to bench members only and cancels for starters —
+    # no extra variable needed for a quantity that is already implied.
+    bench_cost = (price - _BENCH_PLAYS_BONUS * appearance) * _BENCH_COST_WEIGHT
+    objective[x0 : x0 + n] += bench_cost
+    objective[y0 : y0 + n] -= bench_cost
+
+    # Reward spending on the eleven, so a tie is broken toward the squad that
+    # converts more of the budget into players who actually score. Applied to
+    # the XI variable only, so it never argues for an expensive bench.
+    objective[y0 : y0 + n] -= price * _XI_SPEND_WEIGHT
 
     rows: list[int] = []
     cols: list[int] = []

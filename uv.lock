@@ -1545,6 +1545,7 @@ dependencies = [
     { name = "xg-alonso-cli" },
     { name = "xg-alonso-contracts" },
     { name = "xg-alonso-domain" },
+    { name = "xg-alonso-evaluation" },
     { name = "xg-alonso-explanations" },
     { name = "xg-alonso-features" },
     { name = "xg-alonso-ingestion" },
@@ -1562,6 +1563,7 @@ requires-dist = [
     { name = "xg-alonso-cli", editable = "apps/cli" },
     { name = "xg-alonso-contracts", editable = "packages/data_contracts" },
     { name = "xg-alonso-domain", editable = "packages/domain" },
+    { name = "xg-alonso-evaluation", editable = "packages/evaluation" },
     { name = "xg-alonso-explanations", editable = "packages/explanations" },
     { name = "xg-alonso-features", editable = "packages/feature_factory" },
     { name = "xg-alonso-ingestion", editable = "pipelines/ingestion" },
@@ -1679,6 +1681,7 @@ name = "xg-alonso-features"
 version = "0.1.0"
 source = { editable = "packages/feature_factory" }
 dependencies = [
+    { name = "numpy" },
     { name = "polars" },
     { name = "xg-alonso-contracts" },
     { name = "xg-alonso-domain" },
@@ -1687,6 +1690,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "numpy", specifier = ">=1.26,<3" },
     { name = "polars", specifier = ">=1.20,<2" },
     { name = "xg-alonso-contracts", editable = "packages/data_contracts" },
     { name = "xg-alonso-domain", editable = "packages/domain" },
@@ -1743,6 +1747,7 @@ dependencies = [
     { name = "scipy" },
     { name = "xg-alonso-contracts" },
     { name = "xg-alonso-domain" },
+    { name = "xg-alonso-explanations" },
     { name = "xg-alonso-prediction" },
 ]
 
@@ -1753,6 +1758,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.11,<2" },
     { name = "xg-alonso-contracts", editable = "packages/data_contracts" },
     { name = "xg-alonso-domain", editable = "packages/domain" },
+    { name = "xg-alonso-explanations", editable = "packages/explanations" },
     { name = "xg-alonso-prediction", editable = "packages/prediction" },
 ]
 

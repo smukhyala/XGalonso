@@ -13,7 +13,22 @@ designed several incompatible ways, so each now has exactly one definition:
 - :mod:`~xg_alonso.contracts.storage` — the storage protocols
 """
 
+from xg_alonso.contracts.evidence import (
+    EVIDENCE_PANEL_VERSION,
+    EXPLANATORY_PANEL,
+    FeatureEvidence,
+    FeatureValue,
+    PanelEntry,
+    panel_feature_names,
+)
 from xg_alonso.contracts.folds import WalkForwardFold, walk_forward_folds
+from xg_alonso.contracts.form import (
+    FORM_SIGNAL_CLAMP,
+    FormDirection,
+    FormSignal,
+    FormStrength,
+    SignalSet,
+)
 from xg_alonso.contracts.identifiers import (
     EntryId,
     FixtureId,
@@ -58,6 +73,9 @@ from xg_alonso.contracts.squad import ChipState, ChipStatus, SquadPick, SquadSta
 from xg_alonso.contracts.storage import BronzeSnapshotStore, SnapshotRef, TableStore
 
 __all__ = [
+    "EVIDENCE_PANEL_VERSION",
+    "EXPLANATORY_PANEL",
+    "FORM_SIGNAL_CLAMP",
     "FOUR_TIMESTAMP_FIELDS",
     "REASON_TEMPLATES",
     "BaselineComparison",
@@ -66,9 +84,15 @@ __all__ = [
     "ChipStatus",
     "ComponentExpectations",
     "EntryId",
+    "FeatureEvidence",
+    "FeatureValue",
     "FixtureId",
+    "FormDirection",
+    "FormSignal",
+    "FormStrength",
     "GameweekId",
     "MinutesPrediction",
+    "PanelEntry",
     "PlayerCode",
     "PlayerElementId",
     "PlayerPrediction",
@@ -80,6 +104,7 @@ __all__ = [
     "ReasonPolarity",
     "RunManifest",
     "Season",
+    "SignalSet",
     "SnapshotRef",
     "SourceTimestamps",
     "SquadPick",
@@ -94,6 +119,7 @@ __all__ = [
     "TransferRecommendation",
     "WalkForwardFold",
     "format_money",
+    "panel_feature_names",
     "parse_season",
     "utc_now",
     "walk_forward_folds",

@@ -13,11 +13,15 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from xg_alonso.contracts.identifiers import EntryId, GameweekId, PlayerCode, TenthsOfMillion
+from xg_alonso.contracts.prediction import Position
 from xg_alonso.contracts.reason_codes import Reason
 
 __all__ = [
     "BaselineComparison",
+    "PlayerBestMove",
+    "TransferBoard",
     "TransferMove",
+    "TransferOption",
     "TransferPackage",
     "TransferRecommendation",
 ]
@@ -105,6 +109,92 @@ class BaselineComparison(BaseModel):
         return self.delta > 0
 
 
+class TransferOption(BaseModel):
+    """One evaluated move, carried to the surface rather than discarded.
+
+    The optimizer has always scored every legal transfer and returned them
+    ranked. Only the first survived to the product, so a user saw one option
+    with no sense of what it beat — which makes a recommendation impossible to
+    disagree with intelligently.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    move: TransferMove
+    gross_gain: float = Field(description="Expected points gained before hit and risk")
+    net_gain: float = Field(description="After the hit cost and the uncertainty penalty")
+    hit_cost: int = Field(ge=0)
+    risk_penalty: float = Field(ge=0.0)
+    bank_after: TenthsOfMillion
+    reasons: tuple[Reason, ...] = ()
+
+    @property
+    def rank_key(self) -> tuple[float, int, int]:
+        """Stable ordering: best net gain first, ties broken on player codes."""
+        return (-self.net_gain, int(self.move.player_in), int(self.move.player_out))
+
+
+class PlayerBestMove(BaseModel):
+    """The best legal move for one squad member, or a grounded reason there is none.
+
+    Every squad member appears, including those with nothing worth doing. A
+    player who is simply absent from the output reads as one the system did not
+    consider, and that ambiguity is what makes a recommendation feel arbitrary:
+    the question "why not him?" has no answer anywhere on the screen.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    player_out: PlayerCode
+    position: Position
+    legal_replacements: int = Field(
+        ge=0, description="How many players could legally have taken this slot"
+    )
+    option: TransferOption | None = None
+    reasons: tuple[Reason, ...] = Field(
+        default=(),
+        description="Why there is no move, when there is none. Empty when one exists.",
+    )
+
+    @model_validator(mode="after")
+    def _absence_is_explained(self) -> PlayerBestMove:
+        if self.option is None and not self.reasons:
+            raise ValueError(
+                f"player {self.player_out} has no move and no reason for it; "
+                "an unexplained absence is indistinguishable from an oversight"
+            )
+        if self.option is not None and self.option.move.player_out != self.player_out:
+            raise ValueError(
+                f"move sells {self.option.move.player_out} but this entry is for {self.player_out}"
+            )
+        return self
+
+
+class TransferBoard(BaseModel):
+    """Every move worth showing, and the accounting behind the search."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    top: tuple[TransferOption, ...] = Field(description="Globally best moves, ranked")
+    by_player: tuple[PlayerBestMove, ...] = Field(
+        description="One entry per squad member, in squad order"
+    )
+    candidates_considered: int = Field(ge=0, description="Buyable players evaluated")
+    legal_moves: int = Field(ge=0, description="Moves that passed every constraint")
+
+    @model_validator(mode="after")
+    def _board_is_consistent(self) -> TransferBoard:
+        seen = [entry.player_out for entry in self.by_player]
+        if len(seen) != len(set(seen)):
+            raise ValueError("by_player lists the same player twice")
+        if self.legal_moves > 0 and not self.top:
+            raise ValueError(
+                f"{self.legal_moves} legal moves were found but none were returned; "
+                "a silently truncated board reads as an empty market"
+            )
+        return self
+
+
 class TransferRecommendation(BaseModel):
     """A complete, auditable recommendation."""
 
@@ -125,6 +215,15 @@ class TransferRecommendation(BaseModel):
     generated_at: datetime
     run_id: str
     optimizer_config_hash: str = Field(description="Which objective weights produced this")
+
+    board: TransferBoard | None = Field(
+        default=None,
+        description=(
+            "The alternatives this recommendation was chosen from. Optional so "
+            "existing callers keep working, but the API populates it: a "
+            "recommendation shown without its runners-up cannot be argued with."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_grounded(self) -> TransferRecommendation:

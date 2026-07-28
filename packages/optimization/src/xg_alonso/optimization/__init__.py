@@ -9,6 +9,14 @@ alternative and measured against the hold baseline. Holding is a real answer:
 most gameweeks the correct move is to keep the transfer.
 """
 
+from xg_alonso.optimization.horizon import (
+    DEFAULT_DISCOUNT,
+    DEFAULT_HORIZON,
+    HorizonValue,
+    discount_weights,
+    transfer_is_worth_a_hit,
+    value_over_horizon,
+)
 from xg_alonso.optimization.lineup import (
     CAPTAIN_MULTIPLIER,
     XiSelection,
@@ -28,16 +36,22 @@ from xg_alonso.optimization.transfer import (
 
 __all__ = [
     "CAPTAIN_MULTIPLIER",
+    "DEFAULT_DISCOUNT",
+    "DEFAULT_HORIZON",
     "HOLD_BASELINE",
     "Candidate",
+    "HorizonValue",
     "SquadCandidate",
     "TransferCandidate",
     "XiSelection",
     "best_single_transfer",
     "best_starting_xi",
     "build_squad",
+    "discount_weights",
     "hold_expected_points",
     "legal_formations",
     "rank_single_transfers",
     "starting_xi_points",
+    "transfer_is_worth_a_hit",
+    "value_over_horizon",
 ]

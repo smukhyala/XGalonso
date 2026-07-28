@@ -13,6 +13,7 @@ dependencies = [
     "xg-alonso-prediction",
     "xg-alonso-optimization",
     "xg-alonso-explanations",
+    "xg-alonso-evaluation",
     "xg-alonso-ingestion",
     "xg-alonso-normalization",
     "xg-alonso-storage",
@@ -26,6 +27,7 @@ xg-alonso-features = { workspace = true }
 xg-alonso-prediction = { workspace = true }
 xg-alonso-optimization = { workspace = true }
 xg-alonso-explanations = { workspace = true }
+xg-alonso-evaluation = { workspace = true }
 xg-alonso-ingestion = { workspace = true }
 xg-alonso-normalization = { workspace = true }
 xg-alonso-storage = { workspace = true }
