@@ -419,6 +419,20 @@ class FeatureEvidence(BaseModel):
         found = self.get(name)
         return None if found is None else found.value
 
+    def ranked(self) -> tuple[FeatureValue, ...]:
+        """The whole panel, most distinguishing first, unmeasured values last.
+
+        Distinct from :meth:`notable`, which filters to what stands out. The
+        panel is chosen per position precisely so a reader can see the metrics
+        that matter for *that* position — hiding the middling ones defeats the
+        purpose, because "his clean-sheet rate is unremarkable" is itself
+        something a manager wants to know before buying a defender.
+        """
+        measured = [v for v in self.values if v.percentile is not None]
+        unmeasured = [v for v in self.values if v.percentile is None]
+        measured.sort(key=lambda v: -abs((v.percentile or 0.5) - 0.5))
+        return tuple(measured + unmeasured)
+
     def notable(self) -> tuple[FeatureValue, ...]:
         """Distinguishing values, most distinguishing first.
 

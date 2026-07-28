@@ -103,11 +103,13 @@ class PlayerExplanation:
     expected_points: float
     breakdown: PointsBreakdown
     evidence: tuple[FeatureValue, ...]
-    """Panel values that distinguish him, most distinguishing first.
+    """His position's whole panel, most distinguishing first.
 
-    Filtered to the notable ones. A player at the 51st percentile for everything
-    has nothing to say about himself, and listing fourteen middling numbers to
-    prove it would bury the players who do.
+    Not filtered to what stands out. The panel is chosen per position so that a
+    reader sees the metrics that decide *that* position, and an unremarkable
+    clean-sheet rate is itself information when you are buying a defender.
+    Ordering by distinctiveness puts what separates him at the top without
+    hiding the rest.
     """
 
     reasons: tuple[Reason, ...]
@@ -205,7 +207,7 @@ def explain_player(
         expected_points=prediction.expected_points,
         breakdown=prediction.breakdown,
         evidence=(
-            () if prediction.feature_evidence is None else prediction.feature_evidence.notable()
+            () if prediction.feature_evidence is None else prediction.feature_evidence.ranked()
         ),
         reasons=build_player_reasons(
             prediction,

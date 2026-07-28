@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Alternatives } from "@/components/Alternatives";
 import { Pitch } from "@/components/Pitch";
 import { PlayerLedger } from "@/components/PlayerLedger";
+import { SquadBuild } from "@/components/SquadBuild";
 import { TheCall } from "@/components/TheCall";
 import {
   api,
@@ -13,8 +14,20 @@ import {
   type Health,
   type PlayerSummary,
   type Recommendation,
+  type SquadBuild as SquadBuildData,
   type SquadResponse,
 } from "@/lib/api";
+
+/**
+ * Two modes, because there are two questions.
+ *
+ * Before the first deadline transfers are unlimited and nobody owns a squad, so
+ * the only sensible question is which fifteen to pick. After it, the squad is
+ * fixed and the question becomes which single move improves it. Answering the
+ * second at gameweek 1 — which is all this page used to do — recommends one
+ * transfer to a manager who has infinite ones.
+ */
+type Mode = "squad" | "transfer";
 
 // Your real GW1 squad, transcribed from the Pick Team screen. Swap back to
 // example_squad.json for the synthetic fixture. Once the GW1 deadline passes,
@@ -25,10 +38,18 @@ export default function Page() {
   const [health, setHealth] = useState<Health | null>(null);
   const [squad, setSquad] = useState<SquadResponse | null>(null);
   const [call, setCall] = useState<Recommendation | null>(null);
+  const [build, setBuild] = useState<SquadBuildData | null>(null);
   const [board, setBoard] = useState<PlayerSummary[]>([]);
   const [entryId, setEntryId] = useState("1234567");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
+  const [mode, setMode] = useState<Mode | null>(null);
+
+  // Null until health arrives, then gameweek 1 defaults to squad mode. Chosen
+  // rather than guessed, and overridable — a manager planning a wildcard wants
+  // squad mode in gameweek 20.
+  const resolvedMode: Mode =
+    mode ?? (health && health.next_gameweek === 1 ? "squad" : "transfer");
 
   const load = useCallback(async (id: string) => {
     setBusy(true);
@@ -55,9 +76,28 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (resolvedMode !== "squad" || build) return;
+    setBusy(true);
+    api
+      .buildSquadExplained()
+      .then(setBuild)
+      .catch((cause) =>
+        setError(cause instanceof Error ? cause.message : "Could not build a squad."),
+      )
+      .finally(() => setBusy(false));
+  }, [resolvedMode, build]);
+
   return (
     <main className="mx-auto max-w-6xl px-6 pb-28 sm:px-10">
-      <Masthead health={health} entryId={entryId} onEntryId={setEntryId} onSubmit={() => load(entryId)} />
+      <Masthead
+        health={health}
+        entryId={entryId}
+        onEntryId={setEntryId}
+        onSubmit={() => load(entryId)}
+        mode={resolvedMode}
+        onMode={setMode}
+      />
 
       {error && (
         <p
@@ -69,28 +109,36 @@ export default function Page() {
         </p>
       )}
 
-      <div className="mt-14 grid gap-16 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
-        <div>
-          {busy && !call ? <Skeleton /> : call && <TheCall recommendation={call} />}
-          {squad && <Ledger squad={squad} />}
+      {resolvedMode === "squad" ? (
+        <div className="mt-14">
+          {busy && !build ? <Skeleton /> : build && <SquadBuild build={build} />}
         </div>
+      ) : (
+        <>
+          <div className="mt-14 grid gap-16 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
+            <div>
+              {busy && !call ? <Skeleton /> : call && <TheCall recommendation={call} />}
+              {squad && <Ledger squad={squad} />}
+            </div>
 
-        {squad && (
-          <div className="rise" style={{ animationDelay: "0.2s" }}>
-            <div className="flex items-baseline justify-between">
-              <p className="eyebrow">The eleven</p>
-              <p className="eyebrow">{squad.formation}</p>
-            </div>
-            <div className="mt-5">
-              <Pitch players={squad.players} />
-            </div>
+            {squad && (
+              <div className="rise" style={{ animationDelay: "0.2s" }}>
+                <div className="flex items-baseline justify-between">
+                  <p className="eyebrow">The eleven</p>
+                  <p className="eyebrow">{squad.formation}</p>
+                </div>
+                <div className="mt-5">
+                  <Pitch players={squad.players} />
+                </div>
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      {call && <Alternatives options={call.alternatives} />}
+          {call && <Alternatives options={call.alternatives} />}
 
-      {call && <PlayerLedger players={call.players} />}
+          {call && <PlayerLedger players={call.players} />}
+        </>
+      )}
 
       {board.length > 0 && <Board players={board} />}
 
@@ -104,11 +152,15 @@ function Masthead({
   entryId,
   onEntryId,
   onSubmit,
+  mode,
+  onMode,
 }: {
   health: Health | null;
   entryId: string;
   onEntryId: (value: string) => void;
   onSubmit: () => void;
+  mode: Mode;
+  onMode: (mode: Mode) => void;
 }) {
   return (
     <header className="flex flex-wrap items-center justify-between gap-6 pt-10">
@@ -132,9 +184,23 @@ function Masthead({
       </div>
 
       <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
+      <div className="flex items-center gap-5" role="group" aria-label="Mode">
+        <ModeTab
+          label="Build a squad"
+          active={mode === "squad"}
+          onClick={() => onMode("squad")}
+        />
+        <ModeTab
+          label="Transfer"
+          active={mode === "transfer"}
+          onClick={() => onMode("transfer")}
+        />
+      </div>
+
       <Link href="/features" className="eyebrow transition-opacity hover:opacity-70">
         Feature lab →
       </Link>
+      {mode === "transfer" && (
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -161,8 +227,34 @@ function Masthead({
           Load
         </button>
       </form>
+      )}
       </div>
     </header>
+  );
+}
+
+function ModeTab({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className="border-b pb-0.5 text-[13px] transition-colors"
+      style={{
+        color: active ? "var(--color-chalk)" : "var(--color-dim)",
+        borderColor: active ? "var(--color-chalk)" : "transparent",
+      }}
+    >
+      {label}
+    </button>
   );
 }
 

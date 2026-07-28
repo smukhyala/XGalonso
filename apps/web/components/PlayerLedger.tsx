@@ -5,6 +5,7 @@ import {
   POSITION_COLOR,
   money,
   percentileText,
+  type Archetype as PlayerArchetype,
   type PlayerExplanation,
   type Reason,
   type TransferOption,
@@ -40,7 +41,13 @@ const COMPONENTS = [
   { key: "bonus", label: "Bonus", tone: "var(--color-chalk)" },
 ] as const;
 
-export function PlayerLedger({ players }: { players: PlayerExplanation[] }) {
+export function PlayerLedger({
+  players,
+  title = "The case for each player",
+}: {
+  players: PlayerExplanation[];
+  title?: string;
+}) {
   const [open, setOpen] = useState<number | null>(null);
   if (players.length === 0) return null;
 
@@ -52,7 +59,7 @@ export function PlayerLedger({ players }: { players: PlayerExplanation[] }) {
   return (
     <section className="rise mt-24" style={{ animationDelay: "0.35s" }}>
       <div className="flex flex-wrap items-baseline justify-between gap-3">
-        <p className="eyebrow">The case for each player</p>
+        <p className="eyebrow">{title}</p>
         <p className="eyebrow">Open a row for the evidence</p>
       </div>
       <div className="hairline mt-5" />
@@ -250,18 +257,22 @@ function Detail({ player }: { player: PlayerExplanation }) {
       <div>
         {player.evidence.length > 0 && (
           <>
-            <p className="eyebrow">What sets him apart</p>
+            <p className="eyebrow">How he rates as a {player.position}</p>
             <ul className="mt-4 space-y-3.5">
-              {player.evidence.slice(0, 5).map((value) => (
+              {player.evidence.slice(0, 8).map((value) => (
                 <Evidence key={value.name} value={value} />
               ))}
             </ul>
           </>
         )}
 
-        <p className="eyebrow mt-9">
-          {player.replacements.length > 0 ? "Who could replace him" : "Why nobody replaces him"}
-        </p>
+        {player.archetype && <ArchetypePanel archetype={player.archetype} />}
+
+        {(player.replacements.length > 0 || player.no_replacement_reasons.length > 0) && (
+          <p className="eyebrow mt-9">
+            {player.replacements.length > 0 ? "Who could replace him" : "Why nobody replaces him"}
+          </p>
+        )}
 
         {player.replacements.length > 0 ? (
           <ul className="mt-4 space-y-3">
@@ -332,6 +343,65 @@ function Evidence({ value }: { value: PlayerExplanation["evidence"][number] }) {
       )}
     </li>
   );
+}
+
+/**
+ * What kind of player this is, and who else is that kind.
+ *
+ * The rank inside the archetype is shown as a fact, never as the argument.
+ * Archetypes are clustered on style *and* output together, so a cluster is
+ * partly defined by how good its members are and "best in his cluster" would be
+ * close to circular. The caveat comes from the API rather than being written
+ * here, so the claim and its limit travel together.
+ */
+function ArchetypePanel({ archetype }: { archetype: PlayerArchetype }) {
+  return (
+    <div className="mt-9">
+      <p className="eyebrow">Type of player</p>
+      <p className="mt-3 text-[15px]" style={{ color: "var(--color-chalk)" }}>
+        {archetype.label}
+      </p>
+      <p className="eyebrow mt-1">
+        {archetype.rank_within > 0
+          ? `${ordinal(archetype.rank_within)} of ${archetype.size} by projection`
+          : `${archetype.size} players of this type`}
+      </p>
+
+      {archetype.comparables.length > 0 && (
+        <>
+          <p className="eyebrow mt-5">Most similar players</p>
+          <ul className="mt-3 space-y-2">
+            {archetype.comparables.map((comp) => (
+              <li key={comp.player_code} className="flex items-baseline justify-between gap-4">
+                <span className="text-[14px]" style={{ color: "var(--color-muted)" }}>
+                  {comp.name}
+                </span>
+                <span className="tnum text-[13px]">
+                  {comp.price !== null && (
+                    <span className="mr-3 text-dim">{money(comp.price)}</span>
+                  )}
+                  {comp.expected_points.toFixed(2)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      <p className="mt-4 max-w-sm text-[12px] leading-relaxed" style={{ color: "var(--color-dim)" }}>
+        {archetype.caveat}
+      </p>
+    </div>
+  );
+}
+
+function ordinal(value: number): string {
+  const remainder = value % 100;
+  if (remainder >= 11 && remainder <= 13) return `${value}th`;
+  if (value % 10 === 1) return `${value}st`;
+  if (value % 10 === 2) return `${value}nd`;
+  if (value % 10 === 3) return `${value}rd`;
+  return `${value}th`;
 }
 
 function Replacement({ option }: { option: TransferOption }) {

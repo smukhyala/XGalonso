@@ -100,6 +100,21 @@ export interface TransferOption {
   reasons: Reason[];
 }
 
+export interface Comparable {
+  player_code: number;
+  name: string;
+  expected_points: number;
+  price: number | null;
+}
+
+export interface Archetype {
+  label: string;
+  size: number;
+  rank_within: number;
+  comparables: Comparable[];
+  caveat: string;
+}
+
 export interface PlayerExplanation {
   player_code: number;
   name: string;
@@ -114,6 +129,19 @@ export interface PlayerExplanation {
   legal_replacements: number;
   replacements: TransferOption[];
   no_replacement_reasons: Reason[];
+  archetype: Archetype | null;
+}
+
+export interface SquadBuild {
+  gameweek: number;
+  formation: string;
+  squad_value: number;
+  bank: number;
+  projected_points: number;
+  players: SquadPlayer[];
+  explanations: PlayerExplanation[];
+  candidates_considered: number;
+  provenance: Provenance;
 }
 
 export interface Recommendation {
@@ -191,6 +219,7 @@ export const api = {
     get<Recommendation>(
       `/recommend/${entryId}${squadFile ? `?squad_file=${encodeURIComponent(squadFile)}` : ""}`,
     ),
+  buildSquadExplained: () => get<SquadBuild>("/build-squad/explained"),
   importance: (label?: string, limit = 60) =>
     get<ImportanceResponse>(
       `/features/importance?limit=${limit}${label ? `&label=${encodeURIComponent(label)}` : ""}`,

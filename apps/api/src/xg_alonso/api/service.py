@@ -17,6 +17,7 @@ recorded in every response's `Provenance`.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -86,6 +87,20 @@ if TYPE_CHECKING:
 __all__ = ["DecisionService", "ServiceConfig"]
 
 
+def _model_from_environment() -> Path | None:
+    """A model path from `XG_MODEL_PATH`, or `None`.
+
+    Opt-in through the environment rather than through a changed default. The
+    default stays the closed-form baseline for the reason recorded below, but
+    without *some* switch the richer path was unreachable from the web app: the
+    baseline builds eight features, so a defender's clean-sheet rate, expected
+    goals conceded and defensive actions all read "not measured" on screen —
+    honest, and useless.
+    """
+    raw = os.environ.get("XG_MODEL_PATH")
+    return Path(raw) if raw else None
+
+
 @dataclass(frozen=True)
 class ServiceConfig:
     """Where the service reads from. Local paths only, per D1."""
@@ -93,13 +108,13 @@ class ServiceConfig:
     data_root: Path = field(default_factory=lambda: Path(".data"))
     season: str = "2026-27"
 
-    model_path: Path | None = None
+    model_path: Path | None = field(default_factory=_model_from_environment)
     """A fitted model, or the closed-form baseline when `None`.
 
-    `None` deliberately matches `xg`'s default. Picking a model here silently
-    made the API disagree with the CLI about the same team, which is worse than
-    either choice on its own — a difference nobody asked for is a difference
-    nobody can explain.
+    Defaults to `None` unless `XG_MODEL_PATH` is set, which matches `xg`'s own
+    default. Picking a model here unconditionally silently made the API disagree
+    with the CLI about the same team, which is worse than either choice on its
+    own — a difference nobody asked for is a difference nobody can explain.
     """
 
 

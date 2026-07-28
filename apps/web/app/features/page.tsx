@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { api, labelName, type ImportanceResponse } from "@/lib/api";
+import { api, labelName, type FeatureImportance, type ImportanceResponse } from "@/lib/api";
+import { explainFamily, explainFeature } from "@/lib/glossary";
 
 /**
  * The Feature Lab: which of the catalogue's features actually earn their place.
@@ -224,6 +225,7 @@ function Chip({
 }
 
 function Ranking({ data, busy }: { data: ImportanceResponse; busy: boolean }) {
+  const [open, setOpen] = useState<string | null>(null);
   const ceiling = Math.max(...data.features.map((f) => f.importance), 1e-9);
 
   // Rank spread is in places out of the field measured; anything past a fifth of
@@ -256,39 +258,49 @@ function Ranking({ data, busy }: { data: ImportanceResponse; busy: boolean }) {
               ? 0.55
               : Math.max(0.18, 1 - Math.min(feature.rank_stability / worst, 1) * 0.82);
 
+          const isOpen = open === feature.feature_name;
           return (
             <li
               key={feature.feature_name}
-              className="grid grid-cols-[2.25rem_1fr_auto] items-center gap-x-5 gap-y-1 border-b py-3 sm:grid-cols-[2.25rem_15rem_1fr_7rem_4.75rem]"
+              className="border-b"
               style={{ borderColor: "var(--color-line)" }}
             >
-              <span className="tnum text-xs" style={{ color: "var(--color-dim)" }}>
-                {String(index + 1).padStart(2, "0")}
-              </span>
-
-              <span className="tnum text-[13px] break-all">{feature.feature_name}</span>
-
-              <span
-                className="hidden h-[3px] sm:block"
-                style={{ background: "var(--color-line)" }}
+              <button
+                type="button"
+                onClick={() => setOpen(isOpen ? null : feature.feature_name)}
+                aria-expanded={isOpen}
+                className="grid w-full grid-cols-[2.25rem_1fr_auto] items-center gap-x-5 gap-y-1 py-3 text-left transition-opacity hover:opacity-80 sm:grid-cols-[2.25rem_15rem_1fr_7rem_4.75rem]"
               >
+                <span className="tnum text-xs" style={{ color: "var(--color-dim)" }}>
+                  {String(index + 1).padStart(2, "0")}
+                </span>
+
+                <span className="tnum text-[13px] break-all">{feature.feature_name}</span>
+
                 <span
-                  className="block h-full"
-                  style={{
-                    width: `${width}%`,
-                    background: "var(--color-chalk)",
-                    opacity: solidity,
-                  }}
-                />
-              </span>
+                  className="hidden h-[3px] sm:block"
+                  style={{ background: "var(--color-line)" }}
+                >
+                  <span
+                    className="block h-full"
+                    style={{
+                      width: `${width}%`,
+                      background: "var(--color-chalk)",
+                      opacity: solidity,
+                    }}
+                  />
+                </span>
 
-              <span className="eyebrow hidden truncate sm:block" title={feature.family}>
-                {familyName(feature.family)}
-              </span>
+                <span className="eyebrow hidden truncate sm:block" title={feature.family}>
+                  {familyName(feature.family)}
+                </span>
 
-              <span className="tnum text-right text-[13px]">
-                {feature.importance.toExponential(1)}
-              </span>
+                <span className="tnum text-right text-[13px]">
+                  {feature.importance.toExponential(1)}
+                </span>
+              </button>
+
+              {isOpen && <FeatureDetail feature={feature} data={data} />}
             </li>
           );
         })}
@@ -309,7 +321,88 @@ function Ranking({ data, busy }: { data: ImportanceResponse; busy: boolean }) {
   );
 }
 
+/**
+ * What a feature means, and why it moves a score.
+ *
+ * The ranking on its own was accurate and unreadable: `bps_std_20` above
+ * `influence_per90_10` tells a reader nothing about either. The number says
+ * which mattered; this says what they are, which is the part that makes the
+ * ordering interpretable rather than trivia.
+ */
+function FeatureDetail({
+  feature,
+  data,
+}: {
+  feature: FeatureImportance;
+  data: ImportanceResponse;
+}) {
+  const metric = explainFeature(feature.feature_name);
+  const family = explainFamily(feature.family);
+  const perLabel = Object.entries(feature.per_label).sort((a, b) => b[1] - a[1]);
+  const ceiling = Math.max(...perLabel.map(([, v]) => Math.abs(v)), 1e-9);
+
+  return (
+    <div className="grid gap-8 pb-8 pt-1 lg:grid-cols-2">
+      <div className="max-w-prose space-y-4 text-[14px] leading-relaxed">
+        {metric ? (
+          <>
+            <p style={{ color: "var(--color-chalk)" }}>{metric.what}</p>
+            <p style={{ color: "var(--color-muted)" }}>{metric.why}</p>
+          </>
+        ) : (
+          <p style={{ color: "var(--color-muted)" }}>
+            No description recorded for this feature yet. It belongs to the{" "}
+            {familyName(feature.family)} family: {family.what.toLowerCase()}
+          </p>
+        )}
+
+        <div className="pt-1">
+          <p className="eyebrow">Family — {familyName(feature.family)}</p>
+          <p className="mt-2 text-[13px] leading-relaxed" style={{ color: "var(--color-muted)" }}>
+            {family.why}
+          </p>
+        </div>
+
+        <p className="text-[13px]" style={{ color: "var(--color-dim)" }}>
+          {feature.rank_stability === null
+            ? "Rank stability was not measured — that needs at least two folds with rows."
+            : `Its rank moved by about ${feature.rank_stability.toFixed(0)} places between folds, out of ${data.features_measured} features.`}
+        </p>
+      </div>
+
+      <div>
+        <p className="eyebrow">Where it helps</p>
+        <ul className="mt-4 space-y-2.5">
+          {perLabel.map(([label, value]) => (
+            <li key={label} className="grid grid-cols-[7.5rem_1fr_4rem] items-center gap-3">
+              <span className="text-[13px]" style={{ color: "var(--color-muted)" }}>
+                {labelName(label)}
+              </span>
+              <span className="h-[3px]" style={{ background: "var(--color-line)" }}>
+                <span
+                  className="block h-full"
+                  style={{
+                    width: `${(Math.abs(value) / ceiling) * 100}%`,
+                    background: value >= 0 ? "var(--color-chalk)" : "var(--color-loss)",
+                    opacity: 0.7,
+                  }}
+                />
+              </span>
+              <span className="tnum text-right text-[12px]">{value.toExponential(1)}</span>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-4 max-w-xs text-[12px] leading-relaxed" style={{ color: "var(--color-dim)" }}>
+          How much shuffling this feature hurt each component model. A red bar means the
+          model predicted that component <em>better</em> without it.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function Families({ data }: { data: ImportanceResponse }) {
+  const [openFamily, setOpenFamily] = useState<string | null>(null);
   const entries = Object.entries(data.families).sort((a, b) => b[1] - a[1]);
   if (entries.length === 0) return null;
   const ceiling = Math.max(...entries.map(([, value]) => value), 1e-9);
@@ -319,27 +412,47 @@ function Families({ data }: { data: ImportanceResponse }) {
     <section className="mt-24">
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <p className="eyebrow">By family</p>
-        <p className="eyebrow">Read this next to the ranking, not instead of it</p>
+        <p className="eyebrow">Open a row for what it means</p>
       </div>
       <div className="hairline mt-5" />
 
       <ul className="mt-2">
-        {entries.map(([family, value]) => (
-          <li
-            key={family}
-            className="grid grid-cols-[1fr_auto] items-center gap-4 border-b py-3.5 sm:grid-cols-[12rem_1fr_5.5rem]"
-            style={{ borderColor: "var(--color-line)" }}
-          >
-            <span className="text-[14px]">{familyName(family)}</span>
-            <span className="hidden h-[3px] sm:block" style={{ background: "var(--color-line)" }}>
-              <span
-                className="block h-full"
-                style={{ width: `${scale(value)}%`, background: "var(--color-chalk)", opacity: 0.7 }}
-              />
-            </span>
-            <span className="tnum text-right text-[13px]">{value.toExponential(1)}</span>
-          </li>
-        ))}
+        {entries.map(([family, value]) => {
+          const isOpen = openFamily === family;
+          const meaning = explainFamily(family);
+          return (
+            <li key={family} className="border-b" style={{ borderColor: "var(--color-line)" }}>
+              <button
+                type="button"
+                onClick={() => setOpenFamily(isOpen ? null : family)}
+                aria-expanded={isOpen}
+                className="grid w-full grid-cols-[1fr_auto] items-center gap-4 py-3.5 text-left transition-opacity hover:opacity-80 sm:grid-cols-[12rem_1fr_5.5rem]"
+              >
+                <span className="text-[14px]">{familyName(family)}</span>
+                <span
+                  className="hidden h-[3px] sm:block"
+                  style={{ background: "var(--color-line)" }}
+                >
+                  <span
+                    className="block h-full"
+                    style={{
+                      width: `${scale(value)}%`,
+                      background: "var(--color-chalk)",
+                      opacity: 0.7,
+                    }}
+                  />
+                </span>
+                <span className="tnum text-right text-[13px]">{value.toExponential(1)}</span>
+              </button>
+              {isOpen && (
+                <div className="max-w-prose space-y-3 pb-7 pt-1 text-[14px] leading-relaxed">
+                  <p style={{ color: "var(--color-chalk)" }}>{meaning.what}</p>
+                  <p style={{ color: "var(--color-muted)" }}>{meaning.why}</p>
+                </div>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </section>
   );
