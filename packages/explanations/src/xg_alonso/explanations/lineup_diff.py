@@ -27,9 +27,15 @@ from dataclasses import dataclass
 
 from xg_alonso.contracts.identifiers import PlayerCode
 from xg_alonso.contracts.prediction import PlayerPrediction, Position
+from xg_alonso.contracts.squad import SquadPick
 from xg_alonso.optimization.lineup import CAPTAIN_MULTIPLIER, XiSelection
 
-__all__ = ["LineupComparison", "PlayerSwap", "compare_lineups"]
+__all__ = [
+    "LineupComparison",
+    "PlayerSwap",
+    "compare_lineups",
+    "selection_from_starters",
+]
 
 
 @dataclass(frozen=True)
@@ -179,7 +185,7 @@ def compare_lineups(
 
 def selection_from_starters(
     starters: Sequence[PlayerCode],
-    picks: Sequence[object],
+    picks: Sequence[SquadPick],
     predictions: Mapping[PlayerCode, PlayerPrediction],
     captain: PlayerCode | None = None,
 ) -> XiSelection:
@@ -190,24 +196,25 @@ def selection_from_starters(
     them, matching how the optimizer picks one, so the comparison isolates the
     eleven rather than confounding it with a captaincy the manager never made.
     """
-    chosen = [pick for pick in picks if pick.player_code in set(starters)]  # type: ignore[attr-defined]
-    bench = [pick for pick in picks if pick.player_code not in set(starters)]  # type: ignore[attr-defined]
+    wanted = set(starters)
+    chosen = [pick for pick in picks if pick.player_code in wanted]
+    bench = [pick for pick in picks if pick.player_code not in wanted]
 
-    counts = dict.fromkeys(Position, 0)
+    counts: dict[Position, int] = dict.fromkeys(Position, 0)
     for pick in chosen:
-        counts[pick.position] += 1  # type: ignore[attr-defined]
+        counts[pick.position] += 1
 
-    ranked = sorted(chosen, key=lambda p: -_base_points(p.player_code, predictions))  # type: ignore[attr-defined]
-    leader = captain or (ranked[0].player_code if ranked else None)  # type: ignore[attr-defined]
+    ranked = sorted(chosen, key=lambda pick: -_base_points(pick.player_code, predictions))
+    leader = captain or (ranked[0].player_code if ranked else None)
 
-    base = sum(_base_points(p.player_code, predictions) for p in chosen)  # type: ignore[attr-defined]
+    base = sum(_base_points(pick.player_code, predictions) for pick in chosen)
     total = base + _base_points(leader, predictions) * (CAPTAIN_MULTIPLIER - 1)
 
     return XiSelection(
-        starters=tuple(chosen),  # type: ignore[arg-type]
-        bench=tuple(bench),  # type: ignore[arg-type]
+        starters=tuple(chosen),
+        bench=tuple(bench),
         captain=leader,
-        vice_captain=ranked[1].player_code if len(ranked) > 1 else None,  # type: ignore[attr-defined]
+        vice_captain=ranked[1].player_code if len(ranked) > 1 else None,
         formation=(
             counts[Position.GKP],
             counts[Position.DEF],

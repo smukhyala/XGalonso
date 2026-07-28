@@ -30,6 +30,7 @@ from xg_alonso.contracts.prediction import (
 )
 from xg_alonso.contracts.provenance import PredictionProvenance
 from xg_alonso.contracts.reason_codes import ReasonCode
+from xg_alonso.contracts.recommendation import TransferBoard
 from xg_alonso.contracts.squad import SquadPick, SquadState
 from xg_alonso.domain.rules import PositionRule, SquadRules
 from xg_alonso.explanations.reasons import PopulationStats
@@ -207,9 +208,9 @@ def _market(*, better_forward: bool = True) -> list[Candidate]:
     return candidates
 
 
-def _board(**kwargs):  # type: ignore[no-untyped-def]
+def _board(*, better_forward: bool = True) -> TransferBoard:
     predictions = _owned_predictions()
-    candidates = _market(**kwargs)
+    candidates = _market(better_forward=better_forward)
     for candidate in candidates:
         predictions[candidate.player_code] = candidate.prediction
     return build_transfer_board(

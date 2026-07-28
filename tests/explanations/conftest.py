@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from xg_alonso.contracts.identifiers import PlayerCode
+from xg_alonso.contracts.identifiers import GameweekId, PlayerCode
 from xg_alonso.contracts.prediction import (
     ComponentExpectations,
     MinutesPrediction,
@@ -82,7 +82,7 @@ def make_prediction(
     return PlayerPrediction(
         player_code=PlayerCode(code),
         position=position,
-        from_gameweek=1,
+        from_gameweek=GameweekId(1),
         horizon_gameweeks=1,
         components=components,
         breakdown=breakdown,

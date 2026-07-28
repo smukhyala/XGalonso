@@ -13,11 +13,11 @@ import pytest
 
 from tests.explanations.conftest import make_prediction
 from xg_alonso.contracts.identifiers import PlayerCode, TeamId, TenthsOfMillion
-from xg_alonso.contracts.prediction import Position
+from xg_alonso.contracts.prediction import PlayerPrediction, Position
 from xg_alonso.contracts.squad import SquadPick
 from xg_alonso.domain.rules import PositionRule, SquadRules
 from xg_alonso.explanations.lineup_diff import compare_lineups, selection_from_starters
-from xg_alonso.optimization.lineup import best_starting_xi
+from xg_alonso.optimization.lineup import XiSelection, best_starting_xi
 
 _LAYOUT = (
     [(Position.GKP, code) for code in (1, 2)]
@@ -48,7 +48,9 @@ def _rules() -> SquadRules:
     )
 
 
-def _swap_within_position(ours, position: Position):  # type: ignore[no-untyped-def]
+def _swap_within_position(
+    ours: XiSelection, position: Position
+) -> tuple[SquadPick | None, SquadPick | None]:
     """A legal one-for-one change: a starter out, a bench player of the same
     position in.
 
@@ -62,7 +64,7 @@ def _swap_within_position(ours, position: Position):  # type: ignore[no-untyped-
     return dropped, incoming
 
 
-def _position_with_a_bench_option(ours) -> Position:  # type: ignore[no-untyped-def]
+def _position_with_a_bench_option(ours: XiSelection) -> Position:
     """A position that has both a starter and a substitute, so a legal swap exists."""
     for position in Position:
         dropped, incoming = _swap_within_position(ours, position)
@@ -71,8 +73,9 @@ def _position_with_a_bench_option(ours) -> Position:  # type: ignore[no-untyped-
     raise AssertionError("fixture has no legal like-for-like swap")
 
 
-def _squad():  # type: ignore[no-untyped-def]
-    picks, predictions = [], {}
+def _squad() -> tuple[list[SquadPick], dict[PlayerCode, PlayerPrediction]]:
+    picks: list[SquadPick] = []
+    predictions: dict[PlayerCode, PlayerPrediction] = {}
     for index, (position, code) in enumerate(_LAYOUT):
         picks.append(
             SquadPick(
@@ -101,6 +104,8 @@ class TestDecomposition:
         # outfield alternative instead.
         position = _position_with_a_bench_option(ours)
         dropped, incoming = _swap_within_position(ours, position)
+        assert dropped is not None
+        assert incoming is not None
         yours_codes = [p.player_code for p in ours.starters]
         yours_codes[yours_codes.index(dropped.player_code)] = incoming.player_code
         yours = selection_from_starters(yours_codes, picks, predictions)
@@ -125,6 +130,8 @@ class TestDecomposition:
         ours = best_starting_xi(picks, predictions, _rules())
         position = _position_with_a_bench_option(ours)
         dropped, incoming = _swap_within_position(ours, position)
+        assert dropped is not None
+        assert incoming is not None
         yours_codes = [p.player_code for p in ours.starters]
         yours_codes[yours_codes.index(dropped.player_code)] = incoming.player_code
         yours = selection_from_starters(yours_codes, picks, predictions)
@@ -138,6 +145,8 @@ class TestSwaps:
         ours = best_starting_xi(picks, predictions, _rules())
         position = _position_with_a_bench_option(ours)
         dropped, incoming = _swap_within_position(ours, position)
+        assert dropped is not None
+        assert incoming is not None
         yours_codes = [p.player_code for p in ours.starters]
         yours_codes[yours_codes.index(dropped.player_code)] = incoming.player_code
         yours = selection_from_starters(yours_codes, picks, predictions)

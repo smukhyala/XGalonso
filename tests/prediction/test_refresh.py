@@ -16,7 +16,7 @@ from xg_alonso.contracts.form import (
     FormStrength,
     SignalSet,
 )
-from xg_alonso.contracts.identifiers import PlayerCode, TeamId, TenthsOfMillion
+from xg_alonso.contracts.identifiers import GameweekId, PlayerCode, TeamId, TenthsOfMillion
 from xg_alonso.contracts.prediction import (
     ComponentExpectations,
     MinutesPrediction,
@@ -47,7 +47,7 @@ def _prediction(code: int, points: float) -> PlayerPrediction:
     return PlayerPrediction(
         player_code=PlayerCode(code),
         position=Position.MID,
-        from_gameweek=1,
+        from_gameweek=GameweekId(1),
         horizon_gameweeks=1,
         components=ComponentExpectations(
             minutes=MinutesPrediction(
