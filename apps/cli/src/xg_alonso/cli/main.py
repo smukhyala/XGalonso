@@ -1694,3 +1694,92 @@ def importance(
         )
 
     typer.echo(f"\n  saved -> {destination}")
+
+
+@app.command(name="refresh-plan")
+def refresh_plan_command(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    entry_id: Annotated[
+        int | None, typer.Option("--entry", help="Weight your own players more heavily.")
+    ] = None,
+    squad_file: Annotated[
+        Path | None, typer.Option("--squad-file", help="Squad payload instead of the API.")
+    ] = None,
+    budget: Annotated[int, typer.Option("--budget", help="Maximum lookups.")] = 20,
+    model_path: Annotated[
+        Path | None, typer.Option("--model", help="Use a fitted model for relevance.")
+    ] = None,
+) -> None:
+    """Show which clubs are worth looking up for form, and which are not.
+
+    The naive alternative is one lookup per player per gameweek — about 600 a
+    week, most of them about players nobody will own. This asks per club
+    instead, because team news is published that way, and skips anyone whose
+    form cannot change a decision: too low-scoring to start, too expensive to
+    buy, or already covered by a signal that has not gone stale.
+
+    Prints the plan without fetching anything. What fetches the answers lives
+    outside this repository, which is what keeps the prediction path free of a
+    network dependency.
+    """
+    from xg_alonso.contracts.identifiers import TeamId
+    from xg_alonso.prediction.form import load_signals
+    from xg_alonso.prediction.refresh import plan_refresh
+
+    context = _load_context(data_root, parse_season(season))
+    gameweek = context.next_gameweek()
+    cutoff = context.deadline_for(gameweek)
+
+    models = None
+    if model_path is not None and model_path.exists():
+        from xg_alonso.prediction import load_models
+
+        models = load_models(model_path).models
+
+    predictions = _predict_all(context, gameweek, models)
+    rows = {int(r["player_code"]): r for r in context.players.iter_rows(named=True)}
+
+    teams = {PlayerCode(code): TeamId(int(row["team_id"])) for code, row in rows.items()}
+    prices = {
+        PlayerCode(code): TenthsOfMillion(int(row["current_price"])) for code, row in rows.items()
+    }
+    team_names = {int(r["team_id"]): str(r["name"]) for r in context.teams.iter_rows(named=True)}
+
+    owned: frozenset[PlayerCode] = frozenset()
+    affordable: TenthsOfMillion | None = None
+    if entry_id is not None or squad_file is not None:
+        state = _squad_state(context, entry_id or 0, squad_file)
+        owned = frozenset(pick.player_code for pick in state.picks)
+        affordable = TenthsOfMillion(
+            max(int(pick.selling_price) for pick in state.picks) + int(state.bank)
+        )
+
+    plan = plan_refresh(
+        predictions,
+        teams=teams,
+        prices=prices,
+        signals=load_signals(data_root / "signals" / "form_signals.json"),
+        at=cutoff,
+        owned=owned,
+        affordable_at=affordable,
+        budget=budget,
+    )
+
+    typer.echo(f"\n  {plan.describe()}\n")
+    if not plan.requests:
+        typer.echo("  Nothing worth looking up: every relevant player already has a")
+        typer.echo("  signal that has not gone stale.")
+        return
+
+    typer.echo(f"    {'club':<24}{'players':>9}   why")
+    for request in plan.requests:
+        club = team_names.get(int(request.team_id), f"team {int(request.team_id)}")
+        typer.echo(f"    {club:<24}{len(request.players):>9}   {request.reason}")
+
+    naive = plan.total_players
+    if naive > plan.lookups:
+        typer.echo(
+            f"\n  {plan.lookups} lookups instead of {naive} "
+            f"({naive / max(plan.lookups, 1):.0f}x fewer)."
+        )

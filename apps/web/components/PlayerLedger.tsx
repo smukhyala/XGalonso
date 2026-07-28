@@ -210,22 +210,66 @@ function Detail({ player }: { player: PlayerExplanation }) {
     <div className="grid gap-10 pb-9 pt-2 lg:grid-cols-2">
       <div>
         <p className="eyebrow">Where the {player.expected_points.toFixed(2)} comes from</p>
-        <dl className="mt-4 space-y-2">
-          {parts.map((part) => (
-            <div key={part.label} className="flex items-center gap-3">
-              <span
-                aria-hidden
-                className="h-2 w-2 shrink-0"
-                style={{ background: part.tone, opacity: 0.8 }}
-              />
-              <dt className="text-[13px]" style={{ color: "var(--color-muted)" }}>
-                {part.label}
-              </dt>
-              <span className="h-px flex-1" style={{ background: "var(--color-line)" }} />
-              <dd className="tnum text-[13px]">{part.value.toFixed(2)}</dd>
-            </div>
-          ))}
-        </dl>
+        {player.derivation.length > 0 ? (
+          <ul className="mt-4 space-y-4">
+            {player.derivation.map((line) => (
+              <li key={line.component}>
+                <div className="flex items-baseline gap-3">
+                  <span className="text-[13px]" style={{ color: "var(--color-chalk)" }}>
+                    {line.component}
+                  </span>
+                  <span className="h-px flex-1" style={{ background: "var(--color-line)" }} />
+                  <span
+                    className="tnum text-[13px]"
+                    style={{
+                      color:
+                        line.points >= 0 ? "var(--color-chalk)" : "var(--color-loss)",
+                    }}
+                  >
+                    {line.points >= 0 ? "+" : ""}
+                    {line.points.toFixed(2)}
+                  </span>
+                </div>
+                {/* The arithmetic, not just the answer: a reader can check this. */}
+                <p className="tnum mt-1 text-[12px]" style={{ color: "var(--color-muted)" }}>
+                  {formatExpectation(line.expectation)} {line.unit} × {line.rate >= 0 ? "+" : ""}
+                  {line.rate} pts
+                </p>
+                {line.note && (
+                  <p
+                    className="mt-1 max-w-md text-[12px] leading-relaxed"
+                    style={{ color: "var(--color-dim)" }}
+                  >
+                    {line.note}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <dl className="mt-4 space-y-2">
+            {parts.map((part) => (
+              <div key={part.label} className="flex items-center gap-3">
+                <span
+                  aria-hidden
+                  className="h-2 w-2 shrink-0"
+                  style={{ background: part.tone, opacity: 0.8 }}
+                />
+                <dt className="text-[13px]" style={{ color: "var(--color-muted)" }}>
+                  {part.label}
+                </dt>
+                <span className="h-px flex-1" style={{ background: "var(--color-line)" }} />
+                <dd className="tnum text-[13px]">{part.value.toFixed(2)}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+        {!player.derivation_reconciles && (
+          <p className="mt-3 text-[12px]" style={{ color: "var(--color-loss)" }}>
+            These lines do not sum to the total above. That should be impossible — treat
+            the projection as unverified.
+          </p>
+        )}
 
         <p className="eyebrow mt-9">
           {player.is_starter ? "Why he starts" : "Why he sits"}
@@ -393,6 +437,14 @@ function ArchetypePanel({ archetype }: { archetype: PlayerArchetype }) {
       </p>
     </div>
   );
+}
+
+/** Small expectations need decimals; large ones do not. */
+function formatExpectation(value: number): string {
+  const magnitude = Math.abs(value);
+  if (magnitude >= 10) return value.toFixed(0);
+  if (magnitude >= 1) return value.toFixed(2);
+  return value.toFixed(3);
 }
 
 function ordinal(value: number): string {

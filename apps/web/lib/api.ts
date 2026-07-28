@@ -115,6 +115,44 @@ export interface Archetype {
   caveat: string;
 }
 
+export interface DerivationLine {
+  component: string;
+  expectation: number;
+  unit: string;
+  rate: number;
+  points: number;
+  note: string;
+  sentence: string;
+}
+
+export interface Swap {
+  position: Position;
+  player_in: number | null;
+  player_in_name: string | null;
+  player_out: number | null;
+  player_out_name: string | null;
+  points_in: number;
+  points_out: number;
+  delta: number;
+  is_like_for_like: boolean;
+}
+
+export interface LineupComparison {
+  yours_points: number;
+  ours_points: number;
+  total_delta: number;
+  swap_delta: number;
+  captain_delta: number;
+  shape_delta: number;
+  yours_formation: string;
+  ours_formation: string;
+  yours_captain_name: string | null;
+  ours_captain_name: string | null;
+  swaps: Swap[];
+  is_identical: boolean;
+  yours_is_better: boolean;
+}
+
 export interface PlayerExplanation {
   player_code: number;
   name: string;
@@ -130,6 +168,8 @@ export interface PlayerExplanation {
   replacements: TransferOption[];
   no_replacement_reasons: Reason[];
   archetype: Archetype | null;
+  derivation: DerivationLine[];
+  derivation_reconciles: boolean;
 }
 
 export interface SquadBuild {
@@ -161,6 +201,7 @@ export interface Recommendation {
   players: PlayerExplanation[];
   candidates_considered: number;
   legal_moves: number;
+  lineup: LineupComparison | null;
   provenance: Provenance;
 }
 

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Alternatives } from "@/components/Alternatives";
+import { LineupDiff } from "@/components/LineupDiff";
 import { Pitch } from "@/components/Pitch";
 import { PlayerLedger } from "@/components/PlayerLedger";
 import { SquadBuild } from "@/components/SquadBuild";
@@ -133,6 +134,8 @@ export default function Page() {
               </div>
             )}
           </div>
+
+          {call?.lineup && <LineupDiff lineup={call.lineup} />}
 
           {call && <Alternatives options={call.alternatives} />}
 

@@ -200,6 +200,53 @@ class ArchetypeOut(BaseModel):
     )
 
 
+class DerivationLineOut(BaseModel):
+    """One scoring term, with the arithmetic that produced it."""
+
+    component: str
+    expectation: float
+    unit: str
+    rate: float
+    points: float
+    note: str = ""
+    sentence: str
+
+
+class SwapOut(BaseModel):
+    position: str
+    player_in: int | None
+    player_in_name: str | None
+    player_out: int | None
+    player_out_name: str | None
+    points_in: float
+    points_out: float
+    delta: float
+    is_like_for_like: bool
+
+
+class LineupComparisonOut(BaseModel):
+    """Why the proposed eleven beats the one currently set, term by term.
+
+    The three deltas sum to `total_delta` by construction, and `shape_delta` is
+    the named residual rather than a fudge — a decomposition whose last term is
+    defined as "everything else" proves nothing unless it is shown.
+    """
+
+    yours_points: float
+    ours_points: float
+    total_delta: float
+    swap_delta: float
+    captain_delta: float
+    shape_delta: float
+    yours_formation: str
+    ours_formation: str
+    yours_captain_name: str | None
+    ours_captain_name: str | None
+    swaps: list[SwapOut]
+    is_identical: bool
+    yours_is_better: bool
+
+
 class PlayerExplanationOut(BaseModel):
     """Everything the system can honestly say about one squad member."""
 
@@ -224,6 +271,19 @@ class PlayerExplanationOut(BaseModel):
     replacements: list[TransferOptionOut]
     no_replacement_reasons: list[ReasonOut]
     archetype: ArchetypeOut | None = None
+    derivation: list[DerivationLineOut] = Field(
+        default_factory=list,
+        description="How the projection was assembled, largest contribution first.",
+    )
+    derivation_reconciles: bool = Field(
+        default=True,
+        description=(
+            "Whether the lines sum to the total they explain. False should be "
+            "impossible; it is reported rather than asserted because an "
+            "explanation that silently disagrees with its number is worse than "
+            "one that admits it."
+        ),
+    )
 
 
 class RecommendationResponse(BaseModel):
@@ -247,6 +307,10 @@ class RecommendationResponse(BaseModel):
     )
     candidates_considered: int = 0
     legal_moves: int = 0
+    lineup: LineupComparisonOut | None = Field(
+        default=None,
+        description="The eleven you have set against the eleven we would field.",
+    )
     provenance: Provenance
 
 

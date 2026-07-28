@@ -51,6 +51,8 @@ from xg_alonso.contracts.reason_codes import Reason
 from xg_alonso.contracts.recommendation import TransferOption
 from xg_alonso.contracts.squad import SquadState
 from xg_alonso.evaluation.importance import load_importance
+from xg_alonso.explanations.derivation import derive_points
+from xg_alonso.explanations.lineup_diff import compare_lineups, selection_from_starters
 from xg_alonso.explanations.player import ArchetypeVerdict, Comparable, explain_squad
 from xg_alonso.explanations.reasons import PopulationStats
 from xg_alonso.features.archetypes import ArchetypeModel, build_archetypes
@@ -518,6 +520,81 @@ class DecisionService:
             reasons=self._reasons_out(option.reasons),
         )
 
+    def _derivation_out(self, prediction: PlayerPrediction) -> tuple[list[Any], bool]:
+        """The arithmetic behind one projection, biggest term first."""
+        from xg_alonso.api.main import DerivationLineOut
+
+        derivation = derive_points(prediction, self._context.scoring)
+        return (
+            [
+                DerivationLineOut(
+                    component=line.component,
+                    expectation=round(line.expectation, 4),
+                    unit=line.unit,
+                    rate=line.rate,
+                    points=round(line.points, 3),
+                    note=line.note,
+                    sentence=line.explain(),
+                )
+                for line in derivation.material()
+            ],
+            derivation.reconciles,
+        )
+
+    def _lineup_comparison(
+        self,
+        squad: SquadState,
+        by_code: dict[PlayerCode, PlayerPrediction],
+    ) -> Any:
+        """The eleven the manager has set, against the one we would field.
+
+        A manager's own starters come from the picks payload, where slots 1-11
+        are the XI. That is a *given*, so it is priced rather than optimised —
+        the comparison is only meaningful if one side is genuinely his.
+        """
+        from xg_alonso.api.main import LineupComparisonOut, SwapOut
+
+        names = self._names()
+        theirs = [pick.player_code for pick in squad.picks if pick.squad_slot <= 11]
+        if len(theirs) != 11:
+            return None
+
+        yours = selection_from_starters(theirs, squad.picks, by_code)
+        ours = best_starting_xi(squad.picks, by_code, self._context.squad_rules)
+        comparison = compare_lineups(yours, ours, by_code)
+
+        def named(code: PlayerCode | None) -> str | None:
+            return None if code is None else names.get(int(code), "unknown")
+
+        return LineupComparisonOut(
+            yours_points=round(comparison.yours_points, 2),
+            ours_points=round(comparison.ours_points, 2),
+            total_delta=round(comparison.total_delta, 2),
+            swap_delta=round(comparison.swap_delta, 2),
+            captain_delta=round(comparison.captain_delta, 2),
+            shape_delta=round(comparison.shape_delta, 2),
+            yours_formation=comparison.yours_formation,
+            ours_formation=comparison.ours_formation,
+            yours_captain_name=named(comparison.yours_captain),
+            ours_captain_name=named(comparison.ours_captain),
+            swaps=[
+                SwapOut(
+                    position=swap.position.value,
+                    player_in=None if swap.player_in is None else int(swap.player_in),
+                    player_in_name=named(swap.player_in),
+                    player_out=None if swap.player_out is None else int(swap.player_out),
+                    player_out_name=named(swap.player_out),
+                    points_in=round(swap.points_in, 2),
+                    points_out=round(swap.points_out, 2),
+                    delta=round(swap.delta, 2),
+                    is_like_for_like=swap.is_like_for_like,
+                )
+                for swap in comparison.swaps
+            ],
+            is_identical=comparison.is_identical,
+            yours_is_better=comparison.yours_is_better,
+        )
+
     def _breakdown_out(self, prediction: PlayerPrediction) -> BreakdownOut:
         from xg_alonso.api.main import BreakdownOut
 
@@ -593,6 +670,7 @@ class DecisionService:
         for explanation in explanations:
             code = int(explanation.player_code)
             entry = by_player.get(explanation.player_code)
+            derivation_lines, derivation_ok = self._derivation_out(by_code[explanation.player_code])
             out.append(
                 PlayerExplanationOut(
                     player_code=code,
@@ -621,6 +699,8 @@ class DecisionService:
                     replacements=[self._option_out(option) for option in explanation.replacements],
                     no_replacement_reasons=self._reasons_out(explanation.no_replacement_reasons),
                     archetype=self._archetype_out(explanation.archetype),
+                    derivation=derivation_lines,
+                    derivation_reconciles=derivation_ok,
                 )
             )
         return out
@@ -709,6 +789,7 @@ class DecisionService:
             players=self._explanations_out(recommendation, state, by_code),
             candidates_considered=0 if board is None else board.candidates_considered,
             legal_moves=0 if board is None else board.legal_moves,
+            lineup=self._lineup_comparison(state, by_code),
             provenance=self._provenance(next(iter(by_code.values()))),
         )
 
@@ -790,6 +871,7 @@ class DecisionService:
         shaped: list[PlayerExplanationOut] = []
         for explanation in explanations:
             code = int(explanation.player_code)
+            derivation_lines, derivation_ok = self._derivation_out(by_code[explanation.player_code])
             shaped.append(
                 PlayerExplanationOut(
                     player_code=code,
@@ -818,6 +900,8 @@ class DecisionService:
                     replacements=[],
                     no_replacement_reasons=[],
                     archetype=self._archetype_out(explanation.archetype),
+                    derivation=derivation_lines,
+                    derivation_reconciles=derivation_ok,
                 )
             )
 
