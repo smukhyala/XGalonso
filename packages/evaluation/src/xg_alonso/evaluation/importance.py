@@ -164,30 +164,51 @@ class ImportanceTable:
             totals[family] = totals.get(family, 0.0) + value
         return totals
 
+    def folds_measured(self) -> int:
+        """How many distinct folds contributed rows."""
+        return len({row.fold_index for row in self.rows})
+
     def stability(self) -> dict[str, float]:
         """Standard deviation of each feature's rank across folds.
 
         A feature that ranks third on one fold and hundredth on the next has not
-        been shown to matter; it has been shown to be noisy. This is the column
-        that distinguishes the two, and without it a single lucky fold reads
-        exactly like a real effect.
+        been shown to matter; it has been shown to be noisy.
+
+        **Returns an empty mapping when only one fold was measured.** Ranking is
+        done within a ``(fold, label)`` group and compared across folds for the
+        same label, so with a single fold there is nothing to compare and the
+        honest answer is "not measured". An earlier version pooled every label
+        into one ranking, which meant the number it reported was the spread of a
+        feature's rank *across components* — large for every feature, since a
+        minutes feature legitimately ranks first for minutes and last for saves.
+        It looked like an instability warning on the entire catalogue.
         """
-        by_fold: dict[int, list[tuple[str, float]]] = {}
+        if self.folds_measured() < 2:
+            return {}
+
+        grouped: dict[tuple[int, str], list[tuple[str, float]]] = {}
         for row in self.rows:
             if row.degenerate_label:
                 continue
-            by_fold.setdefault(row.fold_index, []).append(
+            grouped.setdefault((row.fold_index, row.label), []).append(
                 (row.feature_name, row.relative_delta)
             )
 
-        ranks: dict[str, list[int]] = {}
-        for entries in by_fold.values():
+        # rank[label][feature] = that feature's position on each fold
+        per_label: dict[str, dict[str, list[int]]] = {}
+        for (_, label), entries in grouped.items():
             entries.sort(key=lambda pair: -pair[1])
             for position, (name, _) in enumerate(entries):
-                ranks.setdefault(name, []).append(position)
+                per_label.setdefault(label, {}).setdefault(name, []).append(position)
+
+        spreads: dict[str, list[float]] = {}
+        for ranks_by_feature in per_label.values():
+            for name, positions in ranks_by_feature.items():
+                if len(positions) > 1:
+                    spreads.setdefault(name, []).append(float(np.std(positions)))
 
         return {
-            name: float(np.std(positions)) for name, positions in ranks.items() if positions
+            name: sum(values) / len(values) for name, values in spreads.items() if values
         }
 
     def degenerate_labels(self) -> tuple[str, ...]:

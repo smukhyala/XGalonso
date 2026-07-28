@@ -38,9 +38,10 @@ __all__ = [
     "FeatureValue",
     "PanelEntry",
     "panel_feature_names",
+    "panel_source_columns",
 ]
 
-EVIDENCE_PANEL_VERSION: Final[str] = "panel_v1"
+EVIDENCE_PANEL_VERSION: Final[str] = "panel_v2"
 
 
 class PanelEntry(BaseModel):
@@ -54,9 +55,23 @@ class PanelEntry(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    name: str = Field(description="Catalogue column name")
+    name: str = Field(description="Canonical identifier for this panel entry")
     label: str = Field(description="Human-readable name, used in prose")
     family: str = Field(description="Catalogue family, used for grouping")
+    sources: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Column names that supply this entry, in order of preference. "
+            "A panel entry names a *concept* — expected goals per 90 — and the "
+            "feature sets spell it differently: the catalogue calls it "
+            "`expected_goals_per90_5`, the closed-form baseline "
+            "`xg_per90_shrunk`. Listing both means an explanation over the "
+            "baseline can still cite xG instead of falling silent, which is the "
+            "difference between a justification naming a statistic and one "
+            "restating the projection in other words. Defaults to `name` alone."
+        ),
+    )
+
     higher_is_better: bool = Field(
         default=True,
         description=(
@@ -65,35 +80,62 @@ class PanelEntry(BaseModel):
         ),
     )
 
+    def columns(self) -> tuple[str, ...]:
+        """Source columns to try, in order of preference."""
+        return self.sources or (self.name,)
+
 
 #: The declared panel. Membership is deliberate, not generated: each entry earns
 #: its place by being something a manager would recognise as a reason.
 #:
-#: Windows are fixed at the shortest window that is not pure noise — five
-#: appearances for rates, three for minutes — because an explanation citing a
-#: twenty-match mean is describing a player's past rather than his form, and form
-#: is what a transfer decision turns on.
+#: Windows are fixed at five appearances — the shortest that is not pure noise —
+#: because an explanation citing a twenty-match mean describes a player's past
+#: rather than his form, and form is what a transfer decision turns on.
+#:
+#: Several entries carry `sources` so the same concept resolves on both feature
+#: sets. Without that, an explanation over the closed-form baseline could name no
+#: statistic at all, since the baseline spells expected goals `xg_per90_shrunk`
+#: while the catalogue spells it `expected_goals_per90_5`.
 EXPLANATORY_PANEL: Final[tuple[PanelEntry, ...]] = (
     PanelEntry(
         name="expected_goals_per90_5",
         label="expected goals per 90",
         family="player_rate",
+        sources=("expected_goals_per90_5", "xg_per90_shrunk"),
     ),
     PanelEntry(
         name="expected_assists_per90_5",
         label="expected assists per 90",
         family="player_rate",
+        sources=("expected_assists_per90_5", "xa_per90_shrunk"),
     ),
     PanelEntry(
         name="expected_goal_involvements_per90_10",
-        label="expected goal involvements per 90, ten-match",
+        label="expected goal involvements per 90",
         family="player_rate",
+        sources=("expected_goal_involvements_per90_10", "xgi_per90_shrunk"),
     ),
     PanelEntry(name="threat_per90_5", label="threat per 90", family="player_rate"),
     PanelEntry(name="creativity_per90_5", label="creativity per 90", family="player_rate"),
     PanelEntry(name="bps_per90_5", label="bonus points system per 90", family="player_rate"),
-    PanelEntry(name="minutes_mean_3", label="minutes, last three", family="player_performance"),
-    PanelEntry(name="starts_mean_5", label="start rate, last five", family="player_performance"),
+    PanelEntry(
+        name="total_points_per90_5",
+        label="points per 90",
+        family="player_rate",
+        sources=("total_points_per90_5", "points_per90_shrunk"),
+    ),
+    PanelEntry(
+        name="minutes_mean_5",
+        label="minutes, last five",
+        family="player_performance",
+        sources=("minutes_mean_5",),
+    ),
+    PanelEntry(
+        name="starts_mean_5",
+        label="start rate, last five",
+        family="player_performance",
+        sources=("starts_mean_5", "start_rate_5"),
+    ),
     PanelEntry(
         name="total_points_mean_5",
         label="points per match, last five",
@@ -122,8 +164,18 @@ EXPLANATORY_PANEL: Final[tuple[PanelEntry, ...]] = (
 
 
 def panel_feature_names() -> tuple[str, ...]:
-    """Every column the panel reads. Used to check the panel against a catalogue."""
+    """Canonical names, one per panel entry."""
     return tuple(entry.name for entry in EXPLANATORY_PANEL)
+
+
+def panel_source_columns() -> tuple[str, ...]:
+    """Every column any panel entry may read, across all feature sets."""
+    seen: list[str] = []
+    for entry in EXPLANATORY_PANEL:
+        for column in entry.columns():
+            if column not in seen:
+                seen.append(column)
+    return tuple(seen)
 
 
 class FeatureValue(BaseModel):

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,7 @@ from xg_alonso.cli.pipeline import (
 from xg_alonso.contracts.identifiers import (
     EntryId,
     GameweekId,
+    PlayerCode,
     Season,
     TeamId,
     TenthsOfMillion,
@@ -44,7 +46,12 @@ from xg_alonso.contracts.identifiers import (
 )
 from xg_alonso.contracts.prediction import PlayerPrediction
 from xg_alonso.contracts.provenance import utc_now
+from xg_alonso.contracts.reason_codes import Reason
+from xg_alonso.contracts.recommendation import TransferOption
 from xg_alonso.contracts.squad import SquadState
+from xg_alonso.evaluation.importance import load_importance
+from xg_alonso.explanations.player import explain_squad
+from xg_alonso.explanations.reasons import PopulationStats
 from xg_alonso.features.catalogue import CATALOGUE_VERSION, build_catalogue
 from xg_alonso.features.opponent import build_opponent_features, build_opponent_strength
 from xg_alonso.features.slice1 import (
@@ -61,12 +68,17 @@ from xg_alonso.storage import FileSystemBronzeStore
 
 if TYPE_CHECKING:
     from xg_alonso.api.main import (
+        BreakdownOut,
+        FeatureImportanceResponse,
         HealthResponse,
+        PlayerExplanationOut,
         PlayerSummary,
         Provenance,
+        ReasonOut,
         RecommendationResponse,
         SquadPlayer,
         SquadResponse,
+        TransferOptionOut,
     )
 
 __all__ = ["DecisionService", "ServiceConfig"]
@@ -334,8 +346,162 @@ class DecisionService:
         state = self._load_squad(entry_id, squad_file)
         return self._squad_response(state, prices_assumed=PRICES_WERE_ASSUMED.get(entry_id, False))
 
+    def _names(self) -> dict[int, str]:
+        return {code: str(row["web_name"]) for code, row in self._player_rows().items()}
+
+    def _reasons_out(self, reasons: Sequence[Reason]) -> list[ReasonOut]:
+        """Render reasons with their subject named, strongest first.
+
+        Naming the subject is the whole fix for the screen that showed
+        "minutes look secure" directly above "minutes are a concern" with no
+        indication that they were about different players.
+        """
+        from xg_alonso.api.main import ReasonOut
+
+        names = self._names()
+        return [
+            ReasonOut(
+                code=reason.code.value,
+                text=reason.render(),
+                subject=int(reason.subject),
+                subject_name=names.get(int(reason.subject), f"player {int(reason.subject)}"),
+                polarity=reason.polarity.value,
+                weight=round(reason.weight, 3),
+            )
+            for reason in sorted(reasons, key=lambda r: -r.weight)
+        ]
+
+    def _option_out(self, option: TransferOption) -> TransferOptionOut:
+        from xg_alonso.api.main import TransferOptionOut
+
+        names = self._names()
+        rows = self._player_rows()
+        out_row = rows.get(int(option.move.player_out), {})
+        return TransferOptionOut(
+            player_out=int(option.move.player_out),
+            player_out_name=names.get(int(option.move.player_out), "unknown"),
+            player_in=int(option.move.player_in),
+            player_in_name=names.get(int(option.move.player_in), "unknown"),
+            position=str(out_row.get("position", "")),
+            selling_price=int(option.move.selling_price),
+            purchase_price=int(option.move.purchase_price),
+            gross_gain=round(option.gross_gain, 2),
+            net_gain=round(option.net_gain, 2),
+            hit_cost=option.hit_cost,
+            risk_penalty=round(option.risk_penalty, 2),
+            bank_after=int(option.bank_after),
+            reasons=self._reasons_out(option.reasons),
+        )
+
+    def _breakdown_out(self, prediction: PlayerPrediction) -> BreakdownOut:
+        from xg_alonso.api.main import BreakdownOut
+
+        b = prediction.breakdown
+        return BreakdownOut(
+            appearance=round(b.appearance, 3),
+            goals=round(b.goals, 3),
+            assists=round(b.assists, 3),
+            clean_sheets=round(b.clean_sheets, 3),
+            goals_conceded=round(b.goals_conceded, 3),
+            saves=round(b.saves, 3),
+            cards=round(b.cards, 3),
+            defensive_contribution=round(b.defensive_contribution, 3),
+            bonus=round(b.bonus, 3),
+            total=round(b.total, 3),
+        )
+
+    def _explanations_out(
+        self,
+        recommendation: Any,
+        squad: SquadState,
+        by_code: dict[PlayerCode, PlayerPrediction],
+    ) -> list[PlayerExplanationOut]:
+        """Per-player justification for the whole squad.
+
+        Built from the board the optimizer already produced, so a player's row
+        and the headline recommendation are the same computation rather than two
+        that happen to agree today.
+        """
+        from xg_alonso.api.main import FeatureValueOut, PlayerExplanationOut
+
+        board = recommendation.board
+        if board is None:
+            return []
+
+        rows = self._player_rows()
+        names = self._names()
+        selection = best_starting_xi(squad.picks, by_code, self._context.squad_rules)
+        starters = frozenset(p.player_code for p in selection.starters)
+        by_player = {entry.player_out: entry for entry in board.by_player}
+        prices = {
+            pick.player_code: TenthsOfMillion(int(pick.selling_price)) for pick in squad.picks
+        }
+        chances = {
+            PlayerCode(code): float(row["chance_of_playing_next_round"]) / 100.0
+            for code, row in rows.items()
+            if row.get("chance_of_playing_next_round") is not None
+        }
+
+        explanations = explain_squad(
+            picks=squad.picks,
+            predictions=by_code,
+            rules=self._context.squad_rules,
+            starters=starters,
+            baseline_points=selection.expected_points,
+            board_by_player=by_player,
+            alternatives=board.top,
+            population=PopulationStats.from_predictions(
+                list(by_code.values()),
+                prices={
+                    PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
+                    for code, row in rows.items()
+                },
+            ),
+            prices=prices,
+            chances_of_playing=chances,
+        )
+
+        out: list[PlayerExplanationOut] = []
+        for explanation in explanations:
+            code = int(explanation.player_code)
+            entry = by_player.get(explanation.player_code)
+            out.append(
+                PlayerExplanationOut(
+                    player_code=code,
+                    name=names.get(code, "unknown"),
+                    position=str(rows[code]["position"]) if code in rows else "",
+                    expected_points=round(explanation.expected_points, 2),
+                    breakdown=self._breakdown_out(by_code[explanation.player_code]),
+                    evidence=[
+                        FeatureValueOut(
+                            name=value.name,
+                            label=value.label,
+                            family=value.family,
+                            value=None if value.value is None else round(value.value, 3),
+                            percentile=(
+                                None if value.percentile is None else round(value.percentile, 3)
+                            ),
+                            higher_is_better=value.higher_is_better,
+                        )
+                        for value in explanation.evidence
+                    ],
+                    reasons=self._reasons_out(explanation.reasons),
+                    is_starter=explanation.start_verdict.is_starter,
+                    start_margin=round(explanation.start_verdict.margin, 2),
+                    forced_by_quota=explanation.start_verdict.forced_by_quota,
+                    legal_replacements=0 if entry is None else entry.legal_replacements,
+                    replacements=[
+                        self._option_out(option) for option in explanation.replacements
+                    ],
+                    no_replacement_reasons=self._reasons_out(
+                        explanation.no_replacement_reasons
+                    ),
+                )
+            )
+        return out
+
     def recommend(self, entry_id: int, *, squad_file: Path | None = None) -> RecommendationResponse:
-        from xg_alonso.api.main import ReasonOut, RecommendationResponse
+        from xg_alonso.api.main import RecommendationResponse
 
         state = self._load_squad(entry_id, squad_file)
         run_id = f"api-{uuid.uuid4().hex[:12]}"
@@ -359,6 +525,26 @@ class DecisionService:
             if move.player_in in by_code:
                 in_summary = self._summary(by_code[move.player_in], rows[int(move.player_in)])
 
+        board = recommendation.board
+        chosen = None
+        if recommendation.package.moves:
+            chosen = recommendation.package.moves[0]
+
+        alternatives = []
+        if board is not None:
+            alternatives = [
+                self._option_out(option)
+                for option in board.top
+                # The headline move is already stated above; repeating it as its
+                # own runner-up would suggest the board contains one fewer real
+                # alternative than it does.
+                if chosen is None
+                or (
+                    option.move.player_in != chosen.player_in
+                    or option.move.player_out != chosen.player_out
+                )
+            ]
+
         return RecommendationResponse(
             entry_id=entry_id,
             gameweek=int(recommendation.gameweek),
@@ -371,17 +557,148 @@ class DecisionService:
             projected_after=round(recommendation.comparison.candidate_expected_points, 2),
             expected_gain=round(recommendation.expected_points_gain, 2),
             risk=round(recommendation.risk_score, 2),
-            reasons=[
-                ReasonOut(
-                    code=r.code.value,
-                    text=r.render(),
-                    subject=int(r.subject),
-                    weight=round(r.weight, 3),
-                )
-                for r in sorted(recommendation.reasons, key=lambda r: -r.weight)
-            ],
+            reasons=self._reasons_out(recommendation.reasons),
+            alternatives=alternatives,
+            players=self._explanations_out(recommendation, state, by_code),
+            candidates_considered=0 if board is None else board.candidates_considered,
+            legal_moves=0 if board is None else board.legal_moves,
             provenance=self._provenance(next(iter(by_code.values()))),
         )
+
+    def feature_importance(
+        self,
+        *,
+        label: str | None = None,
+        family: str | None = None,
+        limit: int = 60,
+    ) -> FeatureImportanceResponse:
+        """Serve the measured importance table.
+
+        Reads the parquet `xg importance` writes rather than computing on
+        demand: a permutation run is minutes of work over 184 features and nine
+        labels, and doing it inside a request would make the page look broken.
+        """
+        from xg_alonso.api.main import FeatureImportanceOut, FeatureImportanceResponse
+
+        path = self._config.data_root / "gold" / "feature_importance.parquet"
+        if not path.exists():
+            raise LookupError(
+                f"no importance table at {path}. Run `xg importance` to measure it."
+            )
+
+        frame = load_importance(path)
+        if frame.is_empty():
+            raise LookupError("the importance table is empty; re-run `xg importance`.")
+
+        labels = sorted(frame["label"].unique().to_list())
+        degenerate = sorted(
+            frame.filter(pl.col("degenerate_label"))["label"].unique().to_list()
+        )
+        weights = {
+            str(row["label"]): float(row["label_weight"])
+            for row in frame.select(["label", "label_weight"]).unique().iter_rows(named=True)
+        }
+
+        scoped = frame.filter(~pl.col("degenerate_label"))
+        if label is not None:
+            scoped = scoped.filter(pl.col("label") == label)
+        if family is not None:
+            scoped = scoped.filter(pl.col("family") == family)
+
+        if scoped.is_empty():
+            raise LookupError(
+                f"no importance rows for label={label!r} family={family!r}"
+            )
+
+        # A single label is already a like-for-like comparison, so weighting it
+        # would only rescale every row by the same constant and make the numbers
+        # harder to read against the CLI's output.
+        weighted = (
+            pl.col("relative_delta")
+            if label is not None
+            else pl.col("relative_delta") * pl.col("label_weight")
+        )
+        ranked = (
+            scoped.with_columns(weighted.alias("__weighted"))
+            .group_by(["feature_name", "family"])
+            .agg(pl.col("__weighted").mean().alias("importance"))
+            .sort("importance", descending=True)
+        )
+
+        per_label: dict[str, dict[str, float]] = {}
+        for row in (
+            scoped.group_by(["feature_name", "label"])
+            .agg(pl.col("relative_delta").mean().alias("value"))
+            .iter_rows(named=True)
+        ):
+            per_label.setdefault(str(row["feature_name"]), {})[str(row["label"])] = round(
+                float(row["value"]), 6
+            )
+
+        stability = self._rank_stability(scoped)
+        families = {
+            str(row["family"]): round(float(row["importance"]), 6)
+            for row in ranked.group_by("family")
+            .agg(pl.col("importance").sum().alias("importance"))
+            .iter_rows(named=True)
+        }
+
+        fingerprint = str(frame["model_fingerprint"][0])
+        return FeatureImportanceResponse(
+            features=[
+                FeatureImportanceOut(
+                    feature_name=str(row["feature_name"]),
+                    family=str(row["family"]),
+                    importance=round(float(row["importance"]), 6),
+                    rank_stability=stability.get(str(row["feature_name"])),
+                    per_label=per_label.get(str(row["feature_name"]), {}),
+                )
+                for row in ranked.head(limit).iter_rows(named=True)
+            ],
+            families=families,
+            degenerate_labels=degenerate,
+            labels=labels,
+            label_weights=weights,
+            folds_measured=int(frame["fold_index"].n_unique()),
+            features_measured=int(frame["feature_name"].n_unique()),
+            features_with_no_effect=int(
+                ranked.filter(pl.col("importance") <= 0.0).height
+            ),
+            catalogue_version=str(frame["catalogue_version"][0]),
+            model_fingerprint=fingerprint,
+            computed_at=frame["computed_at"][0],
+            stale=(
+                self._models is not None and self._models.fingerprint() != fingerprint
+            ),
+        )
+
+    @staticmethod
+    def _rank_stability(scoped: pl.DataFrame) -> dict[str, float]:
+        """Mean spread of a feature's rank across folds, within each label.
+
+        Returns nothing when only one fold was measured. A zero there would read
+        as "perfectly stable" when it actually means "never checked".
+        """
+        if scoped["fold_index"].n_unique() < 2:
+            return {}
+
+        ranked = scoped.with_columns(
+            pl.col("relative_delta")
+            .rank(method="ordinal", descending=True)
+            .over(["fold_index", "label"])
+            .alias("__rank")
+        )
+        spread = (
+            ranked.group_by(["feature_name", "label"])
+            .agg(pl.col("__rank").std().alias("__sd"))
+            .group_by("feature_name")
+            .agg(pl.col("__sd").mean().alias("stability"))
+        )
+        return {
+            str(row["feature_name"]): round(float(row["stability"]), 2)
+            for row in spread.iter_rows(named=True)
+            if row["stability"] is not None
+        }
 
     def build_squad(self) -> SquadResponse:
         gameweek = self._context.next_gameweek()

@@ -17,6 +17,7 @@ from xg_alonso.contracts.evidence import (
     FeatureValue,
     panel_feature_names,
 )
+from xg_alonso.features.slice1 import SLICE1_FEATURES
 from xg_alonso.contracts.identifiers import PlayerCode
 from xg_alonso.contracts.reason_codes import (
     REASON_TEMPLATES,
@@ -30,11 +31,35 @@ from xg_alonso.features.opponent import OPPONENT_FEATURES
 
 
 class TestPanel:
-    def test_every_panel_feature_exists_in_the_catalogue(self) -> None:
+    def test_every_panel_entry_resolves_against_some_feature_set(self) -> None:
         """A panel entry naming a column nobody builds is a reason that never fires."""
+        available = set(feature_names()) | set(OPPONENT_FEATURES) | set(SLICE1_FEATURES)
+        unresolvable = [
+            entry.name
+            for entry in EXPLANATORY_PANEL
+            if not any(column in available for column in entry.columns())
+        ]
+        assert not unresolvable, f"panel entries nothing supplies: {unresolvable}"
+
+    def test_the_catalogue_supplies_every_panel_entry(self) -> None:
+        """The trained path is the one that must explain itself in full."""
         available = set(feature_names()) | set(OPPONENT_FEATURES)
-        missing = [name for name in panel_feature_names() if name not in available]
-        assert not missing, f"panel names features the catalogue does not build: {missing}"
+        missing = [
+            entry.name
+            for entry in EXPLANATORY_PANEL
+            if not any(column in available for column in entry.columns())
+        ]
+        assert not missing, f"catalogue cannot supply: {missing}"
+
+    def test_the_baseline_can_still_name_expected_goals(self) -> None:
+        """The defect being fixed: an explanation that names no statistic at all.
+
+        The closed-form baseline spells xG differently from the catalogue, so
+        without source aliases every attacking reason silently fell away on the
+        surface that actually runs by default.
+        """
+        entry = next(e for e in EXPLANATORY_PANEL if e.name == "expected_goals_per90_5")
+        assert any(column in set(SLICE1_FEATURES) for column in entry.columns())
 
     def test_panel_names_are_unique(self) -> None:
         names = panel_feature_names()

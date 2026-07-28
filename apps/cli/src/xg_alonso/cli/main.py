@@ -1521,3 +1521,180 @@ def score(
             fg=typer.colors.RED,
             bold=True,
         )
+
+
+@app.command()
+def importance(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    model_path: Annotated[
+        Path | None, typer.Option("--model", help="Fitted model to measure.")
+    ] = None,
+    seasons: Annotated[
+        str, typer.Option("--seasons", help="Comma-separated seasons to measure on.")
+    ] = "2024-25",
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Where to write the importance table.")
+    ] = None,
+    repeats: Annotated[
+        int, typer.Option("--repeats", help="Shuffles per feature.")
+    ] = 5,
+    top: Annotated[int, typer.Option("--top", help="How many features to print.")] = 25,
+    min_gameweek: Annotated[
+        int, typer.Option("--min-gw", help="Skip opening gameweeks with empty windows.")
+    ] = 4,
+) -> None:
+    """Measure which features actually earn their place.
+
+    The catalogue declares 171 features and nothing measured whether any of them
+    helped. This shuffles each one in turn on rows the model was **not** fitted
+    on and records what happens to out-of-sample error — so a feature that only
+    ever helped by memorising shows nothing here, which is the point.
+
+    Read the family totals alongside the flat ranking. Correlated features
+    substitute for one another, so each scores low individually while the family
+    they belong to matters a great deal; a flat ranking alone would say the
+    opposite.
+    """
+    from xg_alonso.contracts.provenance import utc_now
+    from xg_alonso.evaluation.importance import (
+        ImportanceTable,
+        label_weights_from_predictions,
+        permutation_importance,
+        write_importance,
+    )
+    from xg_alonso.features.catalogue import CATALOGUE_VERSION, catalogue_specs
+    from xg_alonso.features.opponent import OPPONENT_FEATURES
+    from xg_alonso.prediction import build_training_frame, load_models
+
+    stats_path = data_root / "silver" / "player_gameweek_stats.parquet"
+    if not stats_path.exists():
+        raise typer.BadParameter("no backfill found. Run `xg backfill` first.")
+
+    resolved_model = model_path or (data_root / "models" / "component_models.pkl")
+    if not resolved_model.exists():
+        raise typer.BadParameter(f"no model at {resolved_model}. Run `xg train` first.")
+
+    saved = load_models(resolved_model)
+    models = saved.models
+
+    wanted = [s.strip() for s in seasons.split(",")]
+    typer.echo(f"  building measurement frame from {', '.join(wanted)} ...")
+    data = build_training_frame(
+        pl.read_parquet(stats_path), seasons=wanted, min_gameweek=min_gameweek
+    )
+    typer.echo(f"    {data.rows:,} rows x {len(data.feature_columns)} features")
+
+    # Measure on each walk-forward validation window in turn. Those are the only
+    # rows the model genuinely did not train on — the refit at the end of
+    # training saw everything, so measuring on the full frame would describe the
+    # fit and quietly call it evidence.
+    #
+    # Every fold rather than just the last, because a single fold cannot show
+    # whether a feature's importance holds up: rank stability across folds is
+    # what separates a real effect from one lucky window.
+    ordered = sorted(data.seasons)
+    offset = {season: index * 100 for index, season in enumerate(ordered)}
+    timeline = pl.col("label_season").replace_strict(offset, default=0) + pl.col(
+        "label_gameweek"
+    )
+
+    windows: list[tuple[int, pl.DataFrame]] = []
+    for fold in models.folds:
+        rows = data.frame.filter(timeline.is_between(fold.validate_start, fold.validate_end))
+        if not rows.is_empty():
+            windows.append((fold.fold_index, rows))
+
+    if not windows:
+        typer.secho(
+            "  WARNING: no validation window has rows for these seasons; falling back "
+            "to the full frame, which overlaps training and is not out-of-sample.",
+            fg=typer.colors.YELLOW,
+        )
+        windows = [(0, data.frame)]
+
+    typer.echo(
+        f"    measuring on {len(windows)} fold(s), "
+        f"{sum(rows.height for _, rows in windows):,} held-out rows"
+    )
+
+    # Opponent features come from a separate generator, so a catalogue-only map
+    # files them under "unknown" — which then reads as a family that does not
+    # matter, when in fact it is the only fixture information the model has.
+    families = {spec.name: spec.family for spec in catalogue_specs()}
+    for name in OPPONENT_FEATURES:
+        families[name] = "fixture" if name == "is_home" else "opponent"
+
+    # Weight each label by how much it actually moves a points total, measured
+    # from a predicted population rather than assumed from the scoring values.
+    context = _load_context(data_root, parse_season(DEFAULT_SEASON))
+    gameweek = context.next_gameweek()
+    predictions = _predict_all(context, gameweek, models)
+    weights = label_weights_from_predictions(predictions)
+
+    typer.echo(
+        f"  permuting {len(models.feature_columns)} features x "
+        f"{len(models.models)} labels x {repeats} repeats x {len(windows)} fold(s) ..."
+    )
+    computed_at = utc_now()
+    tables = [
+        permutation_importance(
+            models,
+            rows,
+            label_columns=data.label_columns,
+            families=families,
+            label_weights=weights,
+            catalogue_version=CATALOGUE_VERSION,
+            computed_at=computed_at,
+            n_repeats=repeats,
+            fold_index=fold_index,
+        )
+        for fold_index, rows in windows
+    ]
+    table = ImportanceTable(
+        rows=tuple(row for measured in tables for row in measured.rows),
+        catalogue_version=CATALOGUE_VERSION,
+        model_fingerprint=models.fingerprint(),
+        computed_at=computed_at,
+        label_weights=weights,
+    )
+
+    destination = out or (data_root / "gold" / "feature_importance.parquet")
+    write_importance(table, destination)
+
+    ranked = sorted(table.by_feature().items(), key=lambda kv: -kv[1])
+    stability = table.stability()
+
+    typer.echo(f"\n  Top {min(top, len(ranked))} features, weighted across components:")
+    if stability:
+        typer.echo(f"    {'feature':<38}{'importance':>12}{'rank sd':>10}")
+        for name, value in ranked[:top]:
+            typer.echo(f"    {name:<38}{value:>12.5f}{stability.get(name, 0.0):>10.1f}")
+    else:
+        # Only one fold had rows, so there is nothing to compare a rank against.
+        # Printing a zero here would read as "perfectly stable".
+        typer.echo(f"    {'feature':<38}{'importance':>12}")
+        for name, value in ranked[:top]:
+            typer.echo(f"    {name:<38}{value:>12.5f}")
+        typer.echo("    (rank stability needs at least two folds with rows)")
+
+    typer.echo("\n  By family (correlated features split, so read these too):")
+    for family, value in sorted(table.by_family().items(), key=lambda kv: -kv[1]):
+        typer.echo(f"    {family:<38}{value:>12.5f}")
+
+    dead = [name for name, value in ranked if value <= 0.0]
+    if dead:
+        typer.echo(
+            f"\n  {len(dead)} of {len(ranked)} features did not improve out-of-sample error."
+        )
+
+    degenerate = table.degenerate_labels()
+    if degenerate:
+        typer.secho(
+            f"\n  NOTE: {len(degenerate)} label(s) output a constant and are excluded "
+            f"from the ranking: {', '.join(degenerate)}.\n"
+            "  Ranking features by their effect on a constant would be arithmetic "
+            "without meaning.",
+            fg=typer.colors.YELLOW,
+        )
+
+    typer.echo(f"\n  saved -> {destination}")

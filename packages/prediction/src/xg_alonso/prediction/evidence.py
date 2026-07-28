@@ -68,17 +68,19 @@ def _percentiles(values: list[float | None]) -> list[float | None]:
     return ranks
 
 
-def _column_values(frame: pl.DataFrame, name: str) -> list[float | None]:
-    """A panel column as floats, or all-null when the frame does not carry it.
+def _column_values(frame: pl.DataFrame, entry: PanelEntry) -> list[float | None]:
+    """A panel entry's values, from the first source column the frame carries.
 
-    A missing column is not an error. The baseline path builds a much smaller
-    feature set than the catalogue, and a panel entry it cannot supply should
-    read as "not measured" rather than break prediction.
+    A missing column is not an error. The two feature sets spell the same
+    concept differently and the baseline is much smaller than the catalogue, so
+    an entry nothing supplies should read as "not measured" rather than break
+    prediction — and one the baseline spells its own way should still resolve.
     """
-    if name not in frame.columns:
-        return [None] * frame.height
-    series = frame[name].cast(pl.Float64, strict=False)
-    return [None if value is None else float(value) for value in series.to_list()]
+    for name in entry.columns():
+        if name in frame.columns:
+            series = frame[name].cast(pl.Float64, strict=False)
+            return [None if value is None else float(value) for value in series.to_list()]
+    return [None] * frame.height
 
 
 def build_feature_evidence(
@@ -107,7 +109,7 @@ def build_feature_evidence(
             "percentiles would be scoped to the wrong players"
         )
 
-    raw = {entry.name: _column_values(frame, entry.name) for entry in panel}
+    raw = {entry.name: _column_values(frame, entry) for entry in panel}
 
     # Rank inside each position separately, then scatter back into row order.
     by_position: dict[str, list[int]] = {}

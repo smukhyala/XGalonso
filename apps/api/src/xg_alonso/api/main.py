@@ -121,7 +121,82 @@ class ReasonOut(BaseModel):
     code: str
     text: str
     subject: int
+    subject_name: str = Field(
+        description=(
+            "Who the reason is about. Without it the screen rendered "
+            "'minutes look secure' and 'minutes are a concern' as an "
+            "unattributed list that read as self-contradictory."
+        )
+    )
+    polarity: str
     weight: float
+
+
+class FeatureValueOut(BaseModel):
+    """One panel feature, with the rank that makes the number mean something."""
+
+    name: str
+    label: str
+    family: str
+    value: float | None
+    percentile: float | None
+    higher_is_better: bool
+
+
+class BreakdownOut(BaseModel):
+    """How a projection was assembled. Sums to the total by construction."""
+
+    appearance: float
+    goals: float
+    assists: float
+    clean_sheets: float
+    goals_conceded: float
+    saves: float
+    cards: float
+    defensive_contribution: float
+    bonus: float
+    total: float
+
+
+class TransferOptionOut(BaseModel):
+    player_out: int
+    player_out_name: str
+    player_in: int
+    player_in_name: str
+    position: str
+    selling_price: int
+    purchase_price: int
+    gross_gain: float
+    net_gain: float
+    hit_cost: int
+    risk_penalty: float
+    bank_after: int
+    reasons: list[ReasonOut]
+
+
+class PlayerExplanationOut(BaseModel):
+    """Everything the system can honestly say about one squad member."""
+
+    player_code: int
+    name: str
+    position: str
+    expected_points: float
+    breakdown: BreakdownOut
+    evidence: list[FeatureValueOut]
+    reasons: list[ReasonOut]
+    is_starter: bool
+    start_margin: float = Field(
+        description=(
+            "Points at stake in the start-or-bench call, measured by "
+            "re-selecting the XI rather than by comparing raw projections."
+        )
+    )
+    forced_by_quota: bool = Field(
+        description="Whether a positional minimum, not his projection, put him in the XI."
+    )
+    legal_replacements: int
+    replacements: list[TransferOptionOut]
+    no_replacement_reasons: list[ReasonOut]
 
 
 class RecommendationResponse(BaseModel):
@@ -137,7 +212,51 @@ class RecommendationResponse(BaseModel):
     expected_gain: float
     risk: float
     reasons: list[ReasonOut]
+    alternatives: list[TransferOptionOut] = Field(
+        default_factory=list, description="Runners-up, best net gain first"
+    )
+    players: list[PlayerExplanationOut] = Field(
+        default_factory=list, description="Per-player justification, in squad order"
+    )
+    candidates_considered: int = 0
+    legal_moves: int = 0
     provenance: Provenance
+
+
+class FeatureImportanceOut(BaseModel):
+    feature_name: str
+    family: str
+    importance: float
+    rank_stability: float | None = Field(
+        default=None,
+        description=(
+            "Mean standard deviation of this feature's rank across folds. "
+            "Null when fewer than two folds were measured, because a zero "
+            "there would read as perfect stability rather than as no evidence."
+        )
+    )
+    per_label: dict[str, float] = Field(default_factory=dict)
+
+
+class FeatureImportanceResponse(BaseModel):
+    features: list[FeatureImportanceOut]
+    families: dict[str, float]
+    degenerate_labels: list[str]
+    labels: list[str]
+    label_weights: dict[str, float]
+    folds_measured: int
+    features_measured: int
+    features_with_no_effect: int
+    catalogue_version: str
+    model_fingerprint: str
+    computed_at: datetime
+    stale: bool = Field(
+        description=(
+            "True when the table was computed against a different model than "
+            "the one currently loaded. Serving old numbers silently is worse "
+            "than serving none."
+        )
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -197,6 +316,27 @@ def build_squad(service: ServiceDep) -> SquadResponse:
         return service.build_squad()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/features/importance", response_model=FeatureImportanceResponse)
+def feature_importance(
+    service: ServiceDep,
+    label: Annotated[
+        str | None, Query(description="Restrict to one component label.")
+    ] = None,
+    family: Annotated[str | None, Query(description="Restrict to one catalogue family.")] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 60,
+) -> FeatureImportanceResponse:
+    """Which features actually earn their place, measured out of sample.
+
+    Reads the table written by `xg importance`. Returns 404 rather than an empty
+    ranking when none has been computed, because an empty list is
+    indistinguishable from "no feature matters".
+    """
+    try:
+        return service.feature_importance(label=label, family=family, limit=limit)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def main() -> None:

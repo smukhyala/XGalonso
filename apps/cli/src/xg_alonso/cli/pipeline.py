@@ -46,6 +46,7 @@ from xg_alonso.features.slice1 import (
     build_slice1_features,
     build_team_gameweek_stats,
 )
+from xg_alonso.explanations.reasons import PopulationStats
 from xg_alonso.optimization.transfer import Candidate, best_single_transfer
 from xg_alonso.pipelines.ingestion.fpl_client import FplApiClient
 from xg_alonso.pipelines.normalization import (
@@ -388,6 +389,11 @@ def recommend(
         if int(prediction.player_code) in available
     ]
 
+    # League reference values, so a reason can say where a number sits rather
+    # than only what it is. Built from the whole predicted population, which is
+    # why it is assembled here rather than inside the optimizer.
+    population = PopulationStats.from_predictions(predictions, prices=price_by_code)
+
     recommendation = best_single_transfer(
         squad,
         candidates=candidates,
@@ -399,6 +405,7 @@ def recommend(
         run_id=run_id,
         optimizer_config_hash=SLICE1_FEATURE_SET_VERSION,
         horizon_gameweeks=horizon_gameweeks,
+        population=population,
     )
     return recommendation, by_code
 
