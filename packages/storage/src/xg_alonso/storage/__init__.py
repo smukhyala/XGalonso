@@ -12,8 +12,16 @@ transitively imported ``duckdb``, which would quietly defeat the
 that genuinely wants DuckDB reaches for it explicitly::
 
     from xg_alonso.storage.duckdb_store import DuckDBTableStore
+
+:class:`~xg_alonso.storage.parquet_store.ParquetTableStore` **is** re-exported,
+because it needs no driver. It exists so the composition root can persist at all:
+``xg_alonso.cli`` and ``xg_alonso.api`` are both forbidden from reaching
+``duckdb``, so without a driver-free implementation the ``TableStore`` protocol
+would be usable only from inside this package. D2 names DuckDB *and* Parquet;
+this is the Parquet half.
 """
 
 from xg_alonso.storage.bronze import FileSystemBronzeStore
+from xg_alonso.storage.parquet_store import ParquetTableStore
 
-__all__ = ["FileSystemBronzeStore"]
+__all__ = ["FileSystemBronzeStore", "ParquetTableStore"]

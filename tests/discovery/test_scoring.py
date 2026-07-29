@@ -311,8 +311,7 @@ class TestAcceptance:
 class TestComplementarityClassification:
     def test_a_broad_stable_gain_is_globally_complementary(self) -> None:
         assert (
-            classify_complementarity(_evaluation())
-            is ComplementarityClass.GLOBALLY_COMPLEMENTARY
+            classify_complementarity(_evaluation()) is ComplementarityClass.GLOBALLY_COMPLEMENTARY
         )
 
     def test_no_gain_anywhere_is_redundant(self) -> None:
@@ -353,14 +352,10 @@ class TestRegistry:
         base.update(overrides)
         return DiscoveredFeatureSpec(**base)  # type: ignore[arg-type]
 
-    def test_an_unvalidated_feature_cannot_be_registered(
-        self, registry: DiscoveryRegistry
-    ) -> None:
+    def test_an_unvalidated_feature_cannot_be_registered(self, registry: DiscoveryRegistry) -> None:
         """The gate. Static validation alone is not enough."""
         with pytest.raises(ValueError, match="leakage harness"):
-            registry.register_feature(
-                self._spec(validation_status=ValidationStatus.STATIC_PASSED)
-            )
+            registry.register_feature(self._spec(validation_status=ValidationStatus.STATIC_PASSED))
 
     def test_a_leakage_passed_feature_is_registered_with_its_lineage(
         self, registry: DiscoveryRegistry
@@ -377,9 +372,7 @@ class TestRegistry:
         assert len(stored) == 2
         assert sorted(e.utility for e in stored) == [0.1, 0.2]
 
-    def test_the_latest_verdict_wins_not_the_best_one(
-        self, registry: DiscoveryRegistry
-    ) -> None:
+    def test_the_latest_verdict_wins_not_the_best_one(self, registry: DiscoveryRegistry) -> None:
         """A feature accepted in March and rejected in May is rejected."""
         registry.register_feature(self._spec(version="c" * 16))
         registry.record_evaluation(
@@ -415,13 +408,9 @@ class TestRegistry:
         registry.record_lesson(
             Lesson(id="exp.family", hypothesis_family="family", result="nothing worked")
         )
-        assert [lesson.result for lesson in registry.lessons(family="family")] == [
-            "nothing worked"
-        ]
+        assert [lesson.result for lesson in registry.lessons(family="family")] == ["nothing worked"]
 
-    def test_the_acceptance_report_includes_rejections(
-        self, registry: DiscoveryRegistry
-    ) -> None:
+    def test_the_acceptance_report_includes_rejections(self, registry: DiscoveryRegistry) -> None:
         """A report showing only winners cannot be distinguished from one that
         never looked."""
         registry.register_feature(self._spec(version="d" * 16, name="good"))

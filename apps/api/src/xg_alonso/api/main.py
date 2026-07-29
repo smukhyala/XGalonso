@@ -525,6 +525,202 @@ def feature_importance(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+# ---------------------------------------------------------------------------
+# Objective-conditioned feature discovery
+#
+# Read surfaces plus one compile endpoint. Running an experiment is deliberately
+# NOT exposed over HTTP: a discovery run fits hundreds of models and takes
+# minutes, and there is no job queue in this repository (D1 keeps everything
+# local). A request that blocks for that long is not an API, it is a timeout.
+# `xg discover` runs them; these endpoints read what it produced.
+# ---------------------------------------------------------------------------
+
+
+class CompileRequest(BaseModel):
+    """A manager's request, in their own words."""
+
+    text: str = Field(min_length=1, description="What you want, in plain English")
+    preset: str = Field(default="expected_points", description="Objective to start from")
+
+
+class ParsedField(BaseModel):
+    field: str
+    confidence: float
+    source: str
+    evidence: str
+
+
+class CompiledIntentResponse(BaseModel):
+    """The parsed interpretation, for review and editing before anything runs."""
+
+    objective_id: str
+    primary_metric: str
+    risk_preference: str
+    planning_horizon: int
+    ownership_preference: str
+    signed_uncertainty_penalty: float
+    locked_players: list[int]
+    excluded_players: list[int]
+    locked_positions: list[str]
+    max_points_hit: int
+    minimum_bank: int
+    required_features: list[str]
+    complement_targets: list[str]
+    emphasis: list[str]
+    beliefs: list[dict[str, object]]
+    confidences: list[ParsedField]
+    unparsed: list[str]
+    overall_confidence: float
+
+
+@app.post("/objectives/compile", response_model=CompiledIntentResponse)
+def compile_objective(payload: CompileRequest, service: ServiceDep) -> CompiledIntentResponse:
+    """Parse a request into an objective, constraints and beliefs.
+
+    Deterministic — no language model. Returns everything the parser did *not*
+    understand alongside what it did, so a partial interpretation is visible
+    rather than silently narrowing the question.
+    """
+    try:
+        return CompiledIntentResponse(
+            **service.compile_objective(payload.text, preset=payload.preset)
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class ObjectivePreset(BaseModel):
+    id: str
+    name: str
+    primary_metric: str
+    risk_preference: str
+    planning_horizon: int
+    ownership_preference: str
+
+
+@app.get("/objectives", response_model=list[ObjectivePreset])
+def objectives(service: ServiceDep) -> list[ObjectivePreset]:
+    """The shipped objective presets."""
+    return [ObjectivePreset(**row) for row in service.objective_presets()]
+
+
+class DiscoveredFeature(BaseModel):
+    feature: str
+    version: str
+    hypothesis_id: str
+    status: str
+    complementarity: str
+    utility: float
+    incremental_value: float
+    folds: int
+    folds_improved: int
+    stability: float
+    missingness: float
+    leakage_passed: bool
+    reason: str
+
+
+@app.get("/features/discovered", response_model=list[DiscoveredFeature])
+def discovered_features(
+    service: ServiceDep,
+    objective_id: Annotated[str, Query(description="Which objective the verdicts are under.")],
+) -> list[DiscoveredFeature]:
+    """Every discovered feature's latest verdict, accepted and rejected alike.
+
+    Rejections are included. A report showing only winners cannot be
+    distinguished from one that never looked.
+    """
+    try:
+        return [DiscoveredFeature(**row) for row in service.discovered_features(objective_id)]
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class HypothesisResponse(BaseModel):
+    id: str
+    title: str
+    football_rationale: str
+    falsification_condition: str
+    expected_relationship: str
+    transformation_plan: str
+    required_raw_fields: list[str]
+    status: str
+    generation_source: str
+    leakage_risk: str
+
+
+@app.get("/hypotheses", response_model=list[HypothesisResponse])
+def hypotheses(service: ServiceDep) -> list[HypothesisResponse]:
+    """Every hypothesis tested, with the condition that would have refuted it."""
+    return [HypothesisResponse(**row) for row in service.hypotheses()]
+
+
+class ClusterResponse(BaseModel):
+    cluster_model_version: str
+    cluster_id: int
+    objective_id: str | None
+    size: int
+    label: str
+    dominant_features: list[list[object]]
+
+
+@app.get("/clusters", response_model=list[ClusterResponse])
+def clusters(
+    service: ServiceDep,
+    objective_id: Annotated[str | None, Query(description="Objective conditioning.")] = None,
+) -> list[ClusterResponse]:
+    """Player clusters, with the statistical basis behind each label."""
+    return [ClusterResponse(**row) for row in service.clusters(objective_id=objective_id)]
+
+
+class ClusterHistoryEntry(BaseModel):
+    season: str
+    gameweek: int
+    cluster_id: int
+    membership_probability: float
+    distance_to_centroid: float
+    objective_id: str | None
+
+
+@app.get("/players/{player_code}/cluster-history", response_model=list[ClusterHistoryEntry])
+def cluster_history(player_code: int, service: ServiceDep) -> list[ClusterHistoryEntry]:
+    """One player's cluster over time. A cluster is not an identity."""
+    return [ClusterHistoryEntry(**row) for row in service.cluster_history(player_code)]
+
+
+class ExperimentResponse(BaseModel):
+    experiment_id: str
+    stage: str
+    objective_id: str
+    objective_version: str
+    seasons: list[str]
+    hypotheses_proposed: int
+    features_compiled: int
+    features_accepted: int
+    features_rejected: int
+    reproducible: bool
+    code_version: str
+    git_dirty: bool
+    started_at: datetime
+    completed_at: datetime | None
+    metrics: list[list[object]]
+
+
+@app.get("/experiments", response_model=list[ExperimentResponse])
+def experiments(service: ServiceDep) -> list[ExperimentResponse]:
+    """Every recorded experiment, newest first."""
+    return [ExperimentResponse(**row) for row in service.experiments()]
+
+
+@app.get("/experiments/{experiment_id}", response_model=ExperimentResponse)
+def experiment(experiment_id: str, service: ServiceDep) -> ExperimentResponse:
+    """One experiment's manifest."""
+    found = service.experiment(experiment_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"no experiment {experiment_id!r}")
+    return ExperimentResponse(**found)
+
+
 def main() -> None:
     """Run the development server."""
     import uvicorn

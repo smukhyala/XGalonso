@@ -30,10 +30,6 @@ from xg_alonso.contracts.prediction import (
 )
 from xg_alonso.contracts.provenance import PredictionProvenance
 from xg_alonso.contracts.squad import SquadPick, SquadState
-from xg_alonso.domain.intent import compile_intent
-from xg_alonso.domain.objectives import OBJECTIVE_PRESETS, objective_preset
-from xg_alonso.domain.scoring import ScoringRules, assemble_points
-from xg_alonso.features.generators import stage_window
 from xg_alonso.discovery.clusters import fit_clusters, objective_weights, summarise
 from xg_alonso.discovery.embeddings import fit_embedding
 from xg_alonso.discovery.experiment import ExperimentConfig, run_discovery
@@ -41,6 +37,10 @@ from xg_alonso.discovery.harness import HarnessConfig, make_scorer
 from xg_alonso.discovery.hypotheses import SEEDED_HYPOTHESES, generate_from_residuals
 from xg_alonso.discovery.registry import DiscoveryRegistry
 from xg_alonso.discovery.search import greedy_forward
+from xg_alonso.domain.intent import compile_intent
+from xg_alonso.domain.objectives import OBJECTIVE_PRESETS, objective_preset
+from xg_alonso.domain.scoring import ScoringRules
+from xg_alonso.features.generators import stage_window
 from xg_alonso.optimization.objective import (
     ObjectiveContext,
     constraint_filter,
@@ -162,7 +162,9 @@ def scoring_rules() -> ScoringRules:
     import json
     from pathlib import Path
 
-    fixture = Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
+    fixture = (
+        Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
+    )
     return ScoringRules.from_bootstrap(
         json.loads(fixture.read_text()),
         version="2026-27",
@@ -184,9 +186,7 @@ class TestObjectiveChangesTheAnswer:
         chase = objective_preset("mini_league_chase")
         protect = objective_preset("rank_protection")
 
-        assert objective_value(volatile, objective=chase) > objective_value(
-            steady, objective=chase
-        )
+        assert objective_value(volatile, objective=chase) > objective_value(steady, objective=chase)
         assert objective_value(steady, objective=protect) > objective_value(
             volatile, objective=protect
         )
@@ -470,9 +470,7 @@ class TestBeliefsStaySeparableFromEvidence:
             proposition=BeliefProposition.WILL_RETURN,
             confidence=0.5,
         )
-        curve = belief_sensitivity(
-            prediction, belief, gameweek=GameweekId(5), rules=scoring_rules
-        )
+        curve = belief_sensitivity(prediction, belief, gameweek=GameweekId(5), rules=scoring_rules)
         points = [value for _, value in curve]
         assert points == sorted(points)
         assert points[0] < points[-1]
@@ -672,9 +670,7 @@ class TestEndToEnd:
         # so they are refused *statically* rather than computing nonsense.
         assert result.rejected_programs
 
-    def test_a_missing_required_feature_stops_the_run(
-        self, training_frame: pl.DataFrame
-    ) -> None:
+    def test_a_missing_required_feature_stops_the_run(self, training_frame: pl.DataFrame) -> None:
         """Never silently drop a required feature."""
         bundle = ObjectiveBundle(
             objective=objective_preset("expected_points"),

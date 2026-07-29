@@ -1245,3 +1245,204 @@ class DecisionService:
             predictions={p.player_code: p for p in predictions},
         )
         return self._squad_response(squad, prices_assumed=False)
+
+    # -- objective-conditioned feature discovery ---------------------------
+    #
+    # Read surfaces over what `xg discover` produced, plus the objective
+    # compiler. Running an experiment is not exposed: it fits hundreds of models
+    # and there is no job queue here, so a blocking request would time out
+    # rather than serve anybody.
+
+    def _discovery_registry(self) -> Any:
+        """The registry, or a LookupError naming what has not been run yet."""
+        from xg_alonso.discovery.registry import DiscoveryRegistry
+        from xg_alonso.storage import ParquetTableStore
+
+        root = self._config.data_root / "discovery"
+        if not root.exists():
+            raise LookupError(
+                f"no discovery registry under {root}. Run `xg discover` first — an "
+                "empty result here would be indistinguishable from 'nothing was found'."
+            )
+        return DiscoveryRegistry(ParquetTableStore(root))
+
+    def compile_objective(self, text: str, *, preset: str = "expected_points") -> Any:
+        """Parse a manager's request. Deterministic; no language model."""
+        from xg_alonso.domain.intent import build_name_index, compile_intent
+
+        names = build_name_index(
+            {
+                int(row["player_code"]): str(row["web_name"])
+                for row in self._context.players.iter_rows(named=True)
+            }
+        )
+        intent = compile_intent(text, players=names, base_preset=preset)
+        bundle = intent.bundle
+        objective = bundle.objective
+        constraints = bundle.constraints
+        return {
+            "objective_id": objective.id,
+            "primary_metric": objective.primary_metric.value,
+            "risk_preference": objective.risk_preference.value,
+            "planning_horizon": objective.planning_horizon,
+            "ownership_preference": objective.ownership_preference.value,
+            "signed_uncertainty_penalty": objective.signed_uncertainty_penalty,
+            "locked_players": [int(c) for c in constraints.locked_players],
+            "excluded_players": [int(c) for c in constraints.excluded_players],
+            "locked_positions": sorted(p.value for p in constraints.locked_position_set()),
+            "max_points_hit": constraints.max_points_hit,
+            "minimum_bank": int(constraints.minimum_bank),
+            "required_features": list(constraints.required_features),
+            "complement_targets": list(bundle.discovery.complement_targets),
+            "emphasis": list(bundle.discovery.emphasis),
+            "beliefs": [
+                {
+                    "entity_type": b.entity_type.value,
+                    "entity_id": b.entity_id,
+                    "proposition": b.proposition.value,
+                    "confidence": b.confidence,
+                    "rationale": b.rationale,
+                }
+                for b in bundle.beliefs
+            ],
+            "confidences": [
+                {
+                    "field": c.field,
+                    "confidence": c.confidence,
+                    "source": c.source.value,
+                    "evidence": c.evidence,
+                }
+                for c in intent.confidences
+            ],
+            "unparsed": list(intent.unparsed),
+            "overall_confidence": intent.overall_confidence,
+        }
+
+    def objective_presets(self) -> list[dict[str, Any]]:
+        from xg_alonso.domain.objectives import OBJECTIVE_PRESETS
+
+        return [
+            {
+                "id": preset.id,
+                "name": preset.name,
+                "primary_metric": preset.primary_metric.value,
+                "risk_preference": preset.risk_preference.value,
+                "planning_horizon": preset.planning_horizon,
+                "ownership_preference": preset.ownership_preference.value,
+            }
+            for preset in OBJECTIVE_PRESETS
+        ]
+
+    def discovered_features(self, objective_id: str) -> list[dict[str, Any]]:
+        report = self._discovery_registry().acceptance_report(objective_id)
+        return [
+            {
+                "feature": str(row["feature"]),
+                "version": str(row["version"]),
+                "hypothesis_id": str(row["hypothesis_id"]),
+                "status": str(row["status"]),
+                "complementarity": str(row["complementarity"]),
+                "utility": float(row["utility"]),
+                "incremental_value": float(row["incremental_value"]),
+                "folds": int(row["folds"]),
+                "folds_improved": int(row["folds_improved"]),
+                "stability": float(row["stability"]),
+                "missingness": float(row["missingness"]),
+                "leakage_passed": bool(row["leakage_passed"]),
+                "reason": str(row["reason"]),
+            }
+            for row in report.iter_rows(named=True)
+        ]
+
+    def hypotheses(self) -> list[dict[str, Any]]:
+        try:
+            registry = self._discovery_registry()
+        except LookupError:
+            return []
+        return [
+            {
+                "id": h.id,
+                "title": h.title,
+                "football_rationale": h.football_rationale,
+                "falsification_condition": h.falsification_condition,
+                "expected_relationship": h.expected_relationship,
+                "transformation_plan": h.transformation_plan,
+                "required_raw_fields": list(h.required_raw_fields),
+                "status": h.status.value,
+                "generation_source": h.generation_source.value,
+                "leakage_risk": h.leakage_risk.value,
+            }
+            for h in registry.hypotheses()
+        ]
+
+    def clusters(self, *, objective_id: str | None = None) -> list[dict[str, Any]]:
+        try:
+            registry = self._discovery_registry()
+        except LookupError:
+            return []
+        return [
+            {
+                "cluster_model_version": c.cluster_model_version,
+                "cluster_id": c.cluster_id,
+                "objective_id": c.objective_id,
+                "size": c.size,
+                "label": c.label,
+                "dominant_features": [[name, value] for name, value in c.dominant_features],
+            }
+            for c in registry.cluster_summaries(objective_id=objective_id)
+        ]
+
+    def cluster_history(self, player_code: int) -> list[dict[str, Any]]:
+        try:
+            registry = self._discovery_registry()
+        except LookupError:
+            return []
+        frame = registry.cluster_history(player_code)
+        if frame.is_empty():
+            return []
+        return [
+            {
+                "season": str(row.get("season", "")),
+                "gameweek": int(row.get("gameweek", 0) or 0),
+                "cluster_id": int(row["cluster_id"]),
+                "membership_probability": float(row["membership_probability"]),
+                "distance_to_centroid": float(row["distance_to_centroid"]),
+                "objective_id": row.get("objective_id"),
+            }
+            for row in frame.iter_rows(named=True)
+        ]
+
+    def _experiment_payload(self, manifest: Any) -> dict[str, Any]:
+        return {
+            "experiment_id": manifest.experiment_id,
+            "stage": manifest.stage.value,
+            "objective_id": manifest.objective_id,
+            "objective_version": manifest.objective_version,
+            "seasons": list(manifest.seasons),
+            "hypotheses_proposed": manifest.hypotheses_proposed,
+            "features_compiled": manifest.features_compiled,
+            "features_accepted": manifest.features_accepted,
+            "features_rejected": manifest.features_rejected,
+            "reproducible": manifest.reproducible,
+            "code_version": manifest.code_version,
+            "git_dirty": manifest.git_dirty,
+            "started_at": manifest.started_at,
+            "completed_at": manifest.completed_at,
+            "metrics": [[name, value] for name, value in manifest.metrics],
+        }
+
+    def experiments(self) -> list[dict[str, Any]]:
+        try:
+            registry = self._discovery_registry()
+        except LookupError:
+            return []
+        found = sorted(registry.experiments(), key=lambda m: m.started_at, reverse=True)
+        return [self._experiment_payload(m) for m in found]
+
+    def experiment(self, experiment_id: str) -> dict[str, Any] | None:
+        try:
+            registry = self._discovery_registry()
+        except LookupError:
+            return None
+        found = registry.experiment(experiment_id)
+        return None if found is None else self._experiment_payload(found)

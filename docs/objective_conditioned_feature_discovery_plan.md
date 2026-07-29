@@ -206,8 +206,15 @@ Artifacts on disk today: `.data/bronze/`, `.data/silver/*.parquet`, `.data/gold/
 Feature importance already persists to Parquet with a schema version
 (`evaluation/importance.py::write_importance`, `IMPORTANCE_SCHEMA_VERSION`).
 
-**Decision: registries use DuckDB through `TableStore`.** Introducing SQLite would
+**Decision: registries go through the `TableStore` protocol.** Introducing SQLite would
 contradict D2 and add a second persistence story for no benefit.
+
+**Changed during implementation:** the concrete store is Parquet, not DuckDB.
+`.importlinter` forbids `xg_alonso.cli` and `xg_alonso.api` from reaching `duckdb`
+transitively, so the composition root cannot construct a `DuckDBTableStore` — a
+constraint the plan missed and the boundary check caught. D2 names DuckDB *and*
+Parquet; `storage/parquet_store.py` is the Parquet half, driver-free and driven
+through the same protocol. DuckDB remains available to anything wanting SQL.
 
 ### 1.9 Recommendation and optimization logic
 
@@ -310,7 +317,7 @@ xg_alonso.contracts
 | Objective / constraint / belief / hypothesis / evaluation schemas | `contracts` (NEW modules) | contracts *is* the shared vocabulary; every other package must speak it |
 | Objective compiler, constraint validation | `domain` (NEW module) | pure text→struct + rule checking, no I/O — exactly domain's remit |
 | Belief-adjusted predictions | `prediction` (NEW module) | it owns prediction shaping; cf. existing `prediction/form.py`, which already adjusts predictions from outside signals |
-| Player embeddings, dynamic + objective-conditioned clusters | `features` (NEW modules) | sits beside `archetypes.py`, reuses `stage_window` for point-in-time safety |
+| Player embeddings, dynamic + objective-conditioned clusters | `discovery` (NEW modules) | **changed during implementation.** Planned for `features`, but objective-conditioned clustering needs PCA and silhouette from scikit-learn, and `feature_factory` deliberately keeps a numpy-only dependency chain — its hand-written k-means exists to preserve that. Pushing sklearn down a layer to avoid moving two modules would have made it load-bearing for all feature generation. |
 | Objective-aware squad scoring | `optimization` (NEW module) | plugs into `transfer.py`'s scoring seam |
 | DSL, utility scoring, acceptance, registries, search, experiment runner | `discovery` (NEW package) | needs every layer below; nothing below may depend on it |
 
@@ -363,16 +370,15 @@ packages/domain/src/xg_alonso/domain/
 packages/prediction/src/xg_alonso/prediction/
   beliefs.py       NEW  apply_beliefs(): returns BOTH raw and adjusted predictions
 
-packages/feature_factory/src/xg_alonso/features/
-  embeddings.py    NEW  PlayerEmbedding (static + per-gameweek), fit/apply split
-  clusters.py      NEW  ClusterModel: fit on train rows, apply to validation rows;
-                        soft membership; rolling by gameweek; objective-weighted
 
 packages/optimization/src/xg_alonso/optimization/
   objective.py     NEW  ObjectiveScorer: turns ManagerObjective + predictions into the
                         scalar the transfer search maximises; constraint filtering
 
 packages/discovery/src/xg_alonso/discovery/       NEW PACKAGE
+  embeddings.py    fit/apply-split player representations (moved here from features)
+  clusters.py      ClusterModel; soft membership; rolling; objective-conditioned
+  harness.py       walk-forward incremental evaluation, controls, subgroup metrics
   dsl.py           feature program AST, primitives, serialization, static validation
   compile.py       AST -> polars expression plan, executed against staged windows
   utility.py       FeatureUtility, metric protocols, objective-specific metrics
@@ -459,6 +465,7 @@ objective never edits the search engine:
 ```python
 class ObjectiveMetric(Protocol):
     name: str
+
     def score(self, ctx: EvaluationContext) -> float: ...
 ```
 

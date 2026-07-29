@@ -55,7 +55,7 @@ from xg_alonso.pipelines.normalization import (
     normalize_element_summary,
     normalize_history_past,
 )
-from xg_alonso.storage import FileSystemBronzeStore
+from xg_alonso.storage import FileSystemBronzeStore, ParquetTableStore
 
 app = typer.Typer(
     name="xg",
@@ -1848,7 +1848,6 @@ def discover_command(
     from xg_alonso.discovery.registry import DiscoveryRegistry
     from xg_alonso.domain.intent import build_name_index, compile_intent
     from xg_alonso.features.generators import stage_window
-    from xg_alonso.storage.duckdb_store import DuckDBTableStore
 
     frame_file = frame_path or (data_root / "gold" / "discovery_training.parquet")
     if not frame_file.exists():
@@ -1909,7 +1908,10 @@ def discover_command(
         typer.echo("\n(dry run — nothing was executed)")
         return
 
-    store = DuckDBTableStore(data_root / "discovery.duckdb")
+    # Parquet rather than DuckDB: the composition root may not import a database
+    # driver (`.importlinter`), and the registry reads whole tables and filters
+    # in Polars, so nothing here wants SQL.
+    store = ParquetTableStore(data_root / "discovery")
     registry = DiscoveryRegistry(store)
 
     def on_stage(stage: ExperimentStage, detail: str) -> None:
@@ -2008,7 +2010,6 @@ def discover_command(
             "unknown, so the recorded code version does not describe what ran.",
             fg=typer.colors.YELLOW,
         )
-    store.close()
 
 
 @app.command(name="build-discovery-frame")

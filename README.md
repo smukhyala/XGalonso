@@ -191,14 +191,64 @@ a CLI.
 
 Target: useful by **GW1 of the 2026/27 season, 2026-08-21**, then refined in-season.
 
+**Objective-conditioned feature discovery has since landed** — the Feature Scientist,
+interaction discovery, player embeddings and dynamic clustering, all conditioned on what the
+manager is actually trying to achieve. See
+[Objective-Conditioned Feature Discovery](docs/objective_conditioned_feature_discovery.md).
+
 Deliberately out of the first release:
 
 - Price model — no current-season price data exists at GW1
 - Chip logic — chip state is modelled, chip decisions are not built
 - Wildcard planner — the wildcard is unavailable in GW1 (windows are GW2-19 and GW20-38)
-- Automated Feature Scientist, embeddings, and clustering
 - Web frontend — CLI first, then API, then Next.js
 - Docker, cloud, and hosting — the first slice runs locally against DuckDB and Parquet
+
+---
+
+## Objective-conditioned feature discovery
+
+Traditional automated feature engineering asks which features maximise predictive accuracy. That
+question has one answer. This system asks a different one:
+
+> Given this manager's objective, constraints, beliefs and required features — which representation
+> of the player pool produces the best *decisions*?
+
+A manager forty points behind in a mini-league and a manager protecting a rank are not looking for
+the same player, and a feature that sharpens the mean while flattening the tail helps the second
+and harms the first.
+
+```bash
+# Build the point-in-time training frame (the expensive step, run once).
+uv run xg build-discovery-frame --seasons 2023-24,2024-25
+
+# See how a request parses, without running anything.
+uv run xg discover "I am 40 points behind in my mini-league. Keep Haaland and my current
+  defense. I want an aggressive three-gameweek strategy. Recent xG must remain in the model.
+  Find signals that complement xG." --dry-run
+
+# Run the loop. 2025-26 is held out of every fold.
+uv run xg discover "<same request>"
+```
+
+The request compiles — deterministically, with no language model — into an objective
+(`expected_rank_gain`, aggressive, three gameweeks, differential), constraints (Haaland locked,
+defence frozen, no hits) and a discovery request anchored on xG. Anything the parser did not
+understand is printed rather than dropped.
+
+What the loop then does: measures where the required-feature model is weakest, proposes hypotheses
+with falsification conditions, compiles each to a **safe expression tree** (never Python source,
+never `eval`), proves it point-in-time safe with the shipped leakage harness, backtests
+walk-forward against noise and shuffled controls, scores utility under the objective, accepts or
+rejects against criteria fixed in advance, and writes a reproducible manifest.
+
+Further reading:
+
+- [Objective-Conditioned Feature Discovery](docs/objective_conditioned_feature_discovery.md) — the loop, and what is and is not automated
+- [The Feature DSL](docs/feature_dsl.md) — the grammar, and what it deliberately cannot express
+- [Player Embeddings and Clusters](docs/player_embeddings_and_clusters.md)
+- [Backtesting and Leakage](docs/backtesting_and_leakage.md)
+- [Experiment Reproducibility](docs/experiment_reproducibility.md)
 
 ---
 
