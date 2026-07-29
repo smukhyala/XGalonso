@@ -185,7 +185,7 @@ Support:
 - Official FPL
 - Historical FPL — backfilled from 2022/23, the earliest season with xG in the API (D7)
 - Underlying football statistics — sourced from the FPL API's own `expected_goals`, `expected_assists`, `expected_goal_involvements`, and `expected_goals_conceded` fields, published per player per gameweek from 2022/23 onward
-- Odds — **out of scope** under D6 (official FPL API only, zero budget, no scraping, no paid providers)
+- Odds — **out of scope** under D6. The 2026-07-29 relaxation permits free public match data from origins that allow automated access; it does not add odds, which remain a separate decision
 - Injury information — from FPL availability fields only
 - Press conference metadata — **out of scope** under D6; no external source is permitted
 - Fixture data
@@ -309,7 +309,7 @@ Explicitly deferred, so the cut is visible rather than silent:
 | Wildcard recommender | D5, and the wildcard is unavailable in GW1 |
 | Chip logic (Free Hit, Bench Boost, Triple Captain) | D5 — chip *state* is modelled, chip *logic* is not built |
 | Recommendation dashboard and any web frontend | D4 — CLI first, then FastAPI, then Next.js |
-| Odds and press conference ingestion | D6 — no scraping, no paid providers |
+| Odds and press conference ingestion | D6 — no paid providers; the 2026-07-29 relaxation covers match event data only |
 | Docker, cloud, hosting | D1 — local-only first |
 
 Future versions add richer embeddings, continual learning, and automated experimentation.

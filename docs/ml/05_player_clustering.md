@@ -33,7 +33,7 @@ similarity search.
 - Age
 - Position
 
-All inputs derive from the official FPL API only (D6). Where a profile above has no FPL-API
+All inputs derive from the official FPL API (D6). The team-match event counts added under the 2026-07-29 D6 relaxation are ingested but not yet joined into the feature frame, so no cluster reads them today. Where a profile above has no FPL-API
 source, it is approximated from published per-gameweek element stats rather than imported from an
 external provider.
 

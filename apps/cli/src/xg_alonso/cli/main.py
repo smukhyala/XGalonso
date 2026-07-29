@@ -629,6 +629,110 @@ def backfill(
         typer.echo(f"  {players_history.height:,} player-seasons -> {players_dest}")
 
 
+@app.command(name="ingest-match-events")
+def ingest_match_events_command(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    seasons: Annotated[
+        str | None,
+        typer.Option("--seasons", help="Comma-separated seasons. Defaults to the D7 range."),
+    ] = None,
+    division: Annotated[
+        str,
+        typer.Option("--division", help="E0 = Premier League, E1 = Championship."),
+    ] = "E0",
+) -> None:
+    """Ingest team-match event counts the official API does not publish.
+
+    Shots, shots on target, corners, fouls and cards, per team per match, from
+    football-data.co.uk — the free source whose robots.txt permits automated
+    access. The richer alternatives do not: Understat disallows every path and
+    FBref sits behind a bot challenge, so this is the resolution available
+    rather than the resolution wanted (see docs/match_event_data.md).
+    """
+    import io
+
+    from xg_alonso.pipelines.ingestion import (
+        BACKFILL_SEASONS,
+        REQUIRED_COLUMNS,
+        SOURCE_ARCHIVE_TEAMS,
+        SOURCE_MATCH_EVENTS,
+        fetch_archive_teams,
+        fetch_match_events_season,
+    )
+    from xg_alonso.pipelines.normalization import build_teams_history, normalize_match_events
+
+    wanted = [s.strip() for s in seasons.split(",")] if seasons else list(BACKFILL_SEASONS)
+    run_id = f"match-events-{uuid.uuid4().hex[:12]}"
+    bronze = _bronze(data_root)
+
+    # The club vocabulary is unioned across every requested season before any
+    # matching happens. A season-by-season map would fail on a club that was
+    # relegated mid-window, and failing there would look like a spelling bug.
+    club_frames: list[pl.DataFrame] = []
+    for season_name in wanted:
+        fetch_archive_teams(season_name, bronze=bronze, run_id=run_id)
+        ref = bronze.latest(f"{SOURCE_ARCHIVE_TEAMS}.{season_name}")
+        if ref is None:
+            continue
+        raw = pl.read_csv(
+            io.BytesIO(bronze.read(ref)), infer_schema_length=None, ignore_errors=True
+        )
+        club_frames.append(build_teams_history(raw, season=parse_season(season_name)))
+
+    if not club_frames:
+        typer.secho("no club list available; cannot resolve team names", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    clubs = pl.concat(club_frames, how="vertical").unique(subset=["team_code", "name"])
+    typer.echo(f"  {clubs.height} club-seasons, {clubs['team_code'].n_unique()} distinct clubs")
+
+    # E1 is Championship: most of its clubs are genuinely absent from FPL rather
+    # than mis-spelled, so an unresolved name there is expected and reported
+    # instead of fatal.
+    strict = division == "E0"
+
+    frames: list[pl.DataFrame] = []
+    for season_name in wanted:
+        typer.echo(f"  {season_name} {division} ...", nl=False)
+        try:
+            fetch_match_events_season(season_name, bronze=bronze, run_id=run_id, division=division)
+        except Exception as exc:
+            typer.secho(f" {type(exc).__name__}: {exc}", fg=typer.colors.RED)
+            continue
+
+        ref = bronze.latest(f"{SOURCE_MATCH_EVENTS}.{division}.{season_name}")
+        if ref is None:
+            typer.secho(" missing after fetch", fg=typer.colors.RED)
+            continue
+
+        report = normalize_match_events(
+            bronze.read(ref),
+            season=season_name,
+            division=division,
+            teams=clubs,
+            required_columns=REQUIRED_COLUMNS,
+            strict=strict,
+        )
+        frames.append(report.frame)
+        note = (
+            ""
+            if report.complete
+            else (f"  unmatched: {list(report.unmatched_teams)}, skipped: {report.skipped_rows}")
+        )
+        typer.echo(f" {report.matches:>4} matches -> {report.frame.height:>5,} rows{note}")
+
+    if not frames:
+        typer.secho("no seasons ingested", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    events = pl.concat(frames, how="vertical")
+    out_dir = data_root / "silver"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    destination = out_dir / "team_match_events.parquet"
+    events.write_parquet(destination)
+    typer.echo(f"\n  {events.height:,} team-match rows -> {destination}")
+
+
 @app.command()
 def backtest(
     season: Annotated[

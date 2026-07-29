@@ -29,6 +29,7 @@ __all__ = [
     "FplResponse",
     "OfflineError",
     "derive_available_time",
+    "guard_offline",
 ]
 
 FPL_BASE_URL: Final[str] = "https://fantasy.premierleague.com/api"
@@ -39,6 +40,24 @@ OFFLINE_ENV_VAR: Final[str] = "XG_ALONSO_OFFLINE"
 
 class OfflineError(RuntimeError):
     """Raised when a network call is attempted while offline mode is set."""
+
+
+def guard_offline(target: str) -> None:
+    """Refuse a network call when offline mode is set.
+
+    Shared by every adapter so that adding a source cannot accidentally add a
+    hole in the offline guarantee — the check is one function, not a line each
+    adapter is trusted to remember.
+
+    Raises:
+        OfflineError: when ``XG_ALONSO_OFFLINE`` is set.
+    """
+    if os.environ.get(OFFLINE_ENV_VAR):
+        message = (
+            f"refusing to fetch {target!r}: {OFFLINE_ENV_VAR} is set. "
+            "Feature builds must be reproducible from stored snapshots."
+        )
+        raise OfflineError(message)
 
 
 class FplResponse:
@@ -140,11 +159,7 @@ class FplApiClient:
             OfflineError: when ``XG_ALONSO_OFFLINE`` is set.
             httpx.HTTPStatusError: on a non-2xx response.
         """
-        if os.environ.get(OFFLINE_ENV_VAR):
-            raise OfflineError(
-                f"refusing to fetch {path!r}: {OFFLINE_ENV_VAR} is set. "
-                "Feature builds must be reproducible from stored snapshots."
-            )
+        guard_offline(path)
 
         url = f"{self._base_url}/{path.lstrip('/')}"
         observed_at = utc_now()

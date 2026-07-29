@@ -1,7 +1,9 @@
 """External form signals — information the FPL API does not carry.
 
-**This deliberately crosses decision D6** ("Official FPL API only, zero budget.
-No scraping, no paid providers"), at the project owner's explicit request. The
+**This deliberately crosses decision D6** ("zero budget, no paid providers"), at
+the project owner's explicit request. It is a separate crossing from the
+2026-07-29 relaxation, which permits *fetching* free public data from origins
+that allow it; this module fetches nothing at all. The
 motivating case is real and the API genuinely cannot see it: a player can arrive
 at a season off a poor international tournament, having lost his place and his
 rhythm, while every statistic the API publishes still describes the player he

@@ -31,6 +31,7 @@ __all__ = [
     "MANAGER_POSITION",
     "ArchiveNormalizationResult",
     "build_players_history",
+    "build_teams_history",
     "normalize_archive_season",
 ]
 
@@ -206,4 +207,38 @@ def build_players_history(
         .with_columns(pl.lit(str(season)).alias("season"))
         .select("player_code", "season", "web_name", "position", "team_name", "opening_price")
         .sort("player_code")
+    )
+
+
+def build_teams_history(teams_raw: pl.DataFrame, *, season: Season) -> pl.DataFrame:
+    """The clubs that played in one season, keyed on their stable code.
+
+    ``code`` is stable across seasons and ``id`` is not, which is the same
+    distinction that governs players. Unioning several seasons of this frame
+    gives the full club vocabulary a cross-source name match needs — including
+    clubs that have since been relegated and dropped out of the live bootstrap.
+    """
+    schema = {
+        "team_code": pl.Int64(),
+        "team_id": pl.Int64(),
+        "season": pl.Utf8(),
+        "name": pl.Utf8(),
+        "short_name": pl.Utf8(),
+    }
+    if teams_raw.is_empty():
+        return pl.DataFrame(schema=schema)
+
+    missing = [
+        column for column in ("code", "id", "name", "short_name") if column not in teams_raw.columns
+    ]
+    if missing:
+        message = f"archive teams.csv for {season} is missing {missing}"
+        raise ValueError(message)
+
+    return teams_raw.select(
+        pl.col("code").cast(pl.Int64).alias("team_code"),
+        pl.col("id").cast(pl.Int64).alias("team_id"),
+        pl.lit(str(season)).alias("season"),
+        pl.col("name").cast(pl.Utf8).alias("name"),
+        pl.col("short_name").cast(pl.Utf8).alias("short_name"),
     )
