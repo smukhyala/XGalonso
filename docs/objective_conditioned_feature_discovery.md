@@ -34,11 +34,32 @@ Stated first, because it is the claim most easily overstated.
 | Embeddings, clustering, k selection | **Deterministic**, seeded (`20260727` / `20260728`) |
 | Objective compilation from text | **Deterministic** — regex patterns with fixed meanings |
 | Hypothesis generation | **Automated, not intelligent** — searches a declared space of mechanisms, aimed at measured residual weakness |
-| Language model | **None.** No client library, no key, no code path |
+| Language model | **Optional, off by default.** `--llm` enables an adapter; without a key the deterministic generator runs alone |
 
-`GenerationSource.LLM` exists in the schema so that a proposal, if one is ever
-supplied through the adapter interface, stays permanently distinguishable from a
-measured one. There is no adapter implementation, and nothing depends on one.
+### The language-model proposer
+
+`discovery/llm.py` lets a model propose hypotheses. What makes it safe is not the
+model's good behaviour — it is that **the model can only emit data**:
+
+- Its output is a JSON expression tree, parsed by `parse_program`. Nothing is
+  ever `eval`'d or `exec`'d, and no Python is generated.
+- It cannot express a computation the DSL cannot express. A hallucinated column,
+  a level mismatch, a malformed window and a read of the target column are all
+  refused before anything is computed.
+- A proposal is **never repaired**. Fixing one would file our hypothesis under
+  the model's name.
+- Every proposal is recorded with `GenerationSource.LLM` permanently, so an
+  LLM-suggested feature stays distinguishable from a measured one forever.
+- The model **gets no vote on acceptance**. Its rationale is stored beside the
+  fold-level evidence, never in place of it; the same walk-forward measurement
+  and the same noise and shuffled controls decide.
+- It is **additive and never fatal**. The deterministic generator runs either
+  way, and a missing key, missing SDK or failed call degrades to "no extra
+  proposals" rather than breaking the run.
+
+Enable with `xg discover ... --llm` and an `ANTHROPIC_API_KEY` in the
+environment or in a `.env` at the repo root. Install the optional extra with
+`uv sync --extra llm`.
 
 **Every relationship reported is a predictive association.** No causal claim is
 made anywhere in the output vocabulary. A hypothesis's `football_rationale` is a

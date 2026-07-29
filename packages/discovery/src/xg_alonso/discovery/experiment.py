@@ -130,6 +130,18 @@ class ExperimentConfig:
     fit_clusters_for_objective: bool = True
     experiment_id: str = ""
 
+    use_llm: bool = False
+    """Ask a language model for additional hypotheses.
+
+    Off by default and purely additive: the deterministic generator runs either
+    way, and an LLM proposal passes exactly the same parse, static-validation and
+    leakage gates. When no key is configured the request is skipped and the run
+    continues rather than failing — an optional proposer should not be able to
+    break the loop.
+    """
+
+    llm_proposals: int = 4
+
 
 @dataclass
 class DiscoveryResult:
@@ -320,6 +332,20 @@ def run_discovery(
             limit=max(1, settings.max_hypotheses // 2),
         )
     )
+    if settings.use_llm:
+        proposals.extend(
+            _llm_proposals(
+                bundle=bundle,
+                training=working,
+                player_stats=player_stats,
+                weak=weak,
+                existing=[p.program.name for p in proposals],
+                registry=registry,
+                settings=settings,
+                announce=announce,
+            )
+        )
+
     proposals = proposals[: settings.max_hypotheses]
 
     # --- compile, validate, compute ---------------------------------------
@@ -750,3 +776,61 @@ def _lessons(
             )
         )
     return out
+
+
+def _llm_proposals(
+    *,
+    bundle: ObjectiveBundle,
+    training: pl.DataFrame,
+    player_stats: pl.DataFrame,
+    weak: Sequence[tuple[str, str, float]],
+    existing: Sequence[str],
+    registry: DiscoveryRegistry | None,
+    settings: ExperimentConfig,
+    announce: Callable[[ExperimentStage, str], None],
+) -> list[SeededHypothesis]:
+    """Ask a language model for hypotheses. Never fatal.
+
+    An optional proposer must not be able to break the loop: a missing key, a
+    missing SDK, or a failed call degrades to "no extra proposals" and the
+    deterministic generator's output stands on its own.
+    """
+    from xg_alonso.discovery.llm import LlmUnavailableError, generate_with_llm
+
+    lessons = (
+        [f"{lesson.hypothesis_family}: {lesson.result}" for lesson in registry.lessons()]
+        if registry is not None
+        else []
+    )
+    objective = bundle.objective
+    description = (
+        f"{objective.primary_metric.value}, {objective.risk_preference.value}, "
+        f"{objective.planning_horizon}-gameweek horizon, "
+        f"{objective.ownership_preference.value} ownership"
+    )
+
+    try:
+        proposals = generate_with_llm(
+            available_columns=[
+                c for c in player_stats.columns if c not in {"season", "available_time"}
+            ],
+            entity_columns=[c for c in training.columns if not c.startswith("label_")][:40],
+            required_features=bundle.constraints.required_features,
+            weak_segments=weak,
+            already_tried=existing,
+            lessons=lessons[:8],
+            objective=description,
+            emphasis=bundle.discovery.emphasis,
+            count=settings.llm_proposals,
+        )
+    except LlmUnavailableError as exc:
+        announce(ExperimentStage.VALIDATING, f"language model not used: {exc}")
+        return []
+    except Exception as exc:
+        announce(ExperimentStage.VALIDATING, f"language model call failed: {str(exc)[:120]}")
+        return []
+
+    announce(
+        ExperimentStage.VALIDATING, f"language model proposed {len(proposals)} usable programs"
+    )
+    return proposals

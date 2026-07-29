@@ -1831,6 +1831,17 @@ def discover_command(
         bool,
         typer.Option("--no-controls", help="Skip the noise and shuffled controls (much faster)."),
     ] = False,
+    use_llm: Annotated[
+        bool,
+        typer.Option(
+            "--llm",
+            help=(
+                "Also ask a language model for hypotheses. Needs ANTHROPIC_API_KEY in the "
+                "environment or in .env. Its proposals pass exactly the same parse, "
+                "validation and leakage gates as every other."
+            ),
+        ),
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show the parsed intent and stop.")
     ] = False,
@@ -1933,6 +1944,7 @@ def discover_command(
                 max_hypotheses=max_hypotheses,
                 cluster_k=clusters,
                 run_controls=not no_controls,
+                use_llm=use_llm,
             ),
             on_stage=on_stage,
         )

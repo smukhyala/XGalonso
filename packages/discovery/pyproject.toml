@@ -21,6 +21,14 @@ dependencies = [
     "xg-alonso-evaluation",
 ]
 
+[project.optional-dependencies]
+# The language-model proposer is optional and off by default. The deterministic
+# generator runs without it, so the core install stays free of an LLM client and
+# of any credential requirement.
+llm = [
+    "anthropic>=0.69",
+]
+
 [tool.uv.sources]
 xg-alonso-contracts = { workspace = true }
 xg-alonso-domain = { workspace = true }
