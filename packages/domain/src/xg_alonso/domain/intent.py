@@ -255,9 +255,13 @@ def compile_intent(
         note("objective.primary_metric", 0.8, ParseSource.INFERRED, evidence)
 
     # --- risk --------------------------------------------------------------
-    aggressive = re.search(r"\b(aggressive|risky|high[- ]risk|punt|gamble|bold)\b", lowered)
+    # Adverbs count. "Chase differentials aggressively" states a risk appetite
+    # exactly as "be aggressive" does, and `\baggressive\b` matches neither
+    # "aggressively" nor "boldly" because the word boundary falls after the
+    # suffix.
+    aggressive = re.search(r"\b(aggressive|risky|high[- ]risk|punt|gamble|bold)(?:ly)?\b", lowered)
     conservative = re.search(
-        r"\b(conservative|safe|low[- ]risk|cautious|steady|reliable)\b", lowered
+        r"\b(conservative|safe|low[- ]risk|cautious|steady|reliable)(?:ly)?\b", lowered
     )
     if aggressive is not None:
         updates["risk_preference"] = RiskPreference.AGGRESSIVE

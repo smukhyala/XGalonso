@@ -1192,9 +1192,256 @@ def _opening_squad(players: pl.DataFrame, squad_rules, season, gameweek):  # typ
     )
 
 
+def _objective_feature_columns(
+    data_root: Path,
+    objective_id: str,
+    frame: pl.DataFrame,
+    player_stats: pl.DataFrame,
+) -> tuple[pl.DataFrame, list[str]]:
+    """Append an objective's accepted discovered features to a frame.
+
+    **This is the wire that makes discovery matter.** Without it the registry
+    records which features serve which objective and nothing downstream reads
+    it, so every objective is scored by the same fixed catalogue and a squad
+    built to chase a mini-league is identical to one built to protect a rank.
+
+    It lives in the CLI rather than in `prediction` because the import lattice
+    puts discovery *above* prediction: the prediction layer must not know that
+    feature discovery exists. Composing the two is an application concern, and
+    this is the application.
+
+    Returns the frame with the extra columns and the names that were added.
+    A feature whose program fails to compile against this frame is skipped with
+    a warning rather than aborting the run — one bad program in a registry of
+    many should not cost a manager their squad — but the skip is announced,
+    because a silently thinner feature set is a silently different model.
+    """
+    from xg_alonso.discovery.compile import CompileContext, compile_program
+    from xg_alonso.discovery.dsl import ProgramError, parse_program
+    from xg_alonso.discovery.registry import DiscoveryRegistry
+    from xg_alonso.features.generators import stage_window
+    from xg_alonso.storage.parquet_store import ParquetTableStore
+
+    directory = data_root / "discovery"
+    if not directory.exists():
+        return frame, []
+
+    registry = DiscoveryRegistry(ParquetTableStore(directory))
+    specs = registry.accepted_features(objective_id)
+    if not specs:
+        return frame, []
+
+    context = CompileContext(player_stats=player_stats, stage=stage_window)
+    added: list[str] = []
+    for spec in specs:
+        if spec.name in frame.columns:
+            continue
+        try:
+            program = parse_program(spec.name, spec.program)
+            frame = compile_program(program, frame, context)
+        except (ProgramError, ValueError, KeyError) as exc:
+            typer.secho(f"    skipped {spec.name}: {exc}", fg=typer.colors.YELLOW)
+            continue
+        added.append(spec.name)
+
+    return frame, added
+
+
+@app.command(name="plan")
+def plan_command(
+    request: Annotated[str, typer.Argument(help="What you want, in plain English.")],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: Annotated[
+        str, typer.Option("--season", help="Season in YYYY-YY form.")
+    ] = DEFAULT_SEASON,
+    model: Annotated[Path | None, typer.Option("--model", help="Trained models to use.")] = None,
+    preset: Annotated[
+        str, typer.Option("--preset", help="Objective to start from before your words modify it.")
+    ] = "expected_points",
+    show_unconstrained: Annotated[
+        bool,
+        typer.Option(
+            "--show-free", help="Also print the squad you would get with no requirements."
+        ),
+    ] = False,
+) -> None:
+    """Build a squad around requirements you type in plain English.
+
+    "I want Haaland starting, keep Saliba, play 3-5-2 and leave 0.5 in the bank"
+
+    Everything you ask for becomes a hard constraint on the solver, never a
+    penalty — so a requirement is either honoured exactly or reported as
+    impossible. When a set cannot all hold, the lowest-priority requirements are
+    dropped until one can and every dropped one is named, because "no legal
+    squad exists" is not something a manager can act on.
+
+    The parsed interpretation is printed **before** anything is built. Natural
+    language is ambiguous, and a system that acts on its own guess without
+    showing it will eventually act on a wrong one silently.
+    """
+    from xg_alonso.contracts.identifiers import EntryId, TeamId
+    from xg_alonso.domain.intent import build_name_index, compile_intent
+    from xg_alonso.optimization.squad_builder import SquadCandidate, build_constrained_squad
+
+    parsed = parse_season(season)
+    context = _load_context(data_root, parsed)
+    gameweek = context.next_gameweek()
+
+    names = context.player_names()
+    name_index = build_name_index({int(code): name for code, name in names.items()})
+    team_index: dict[str, int] = {}
+    for row in context.teams.iter_rows(named=True):
+        team_index[str(row["name"])] = int(row["team_id"])
+        if row.get("short_name"):
+            team_index[str(row["short_name"])] = int(row["team_id"])
+
+    intent = compile_intent(
+        request,
+        players=name_index,
+        teams=team_index,
+        base_preset=preset,
+        next_gameweek=int(gameweek),
+    )
+
+    typer.echo("Parsed request")
+    typer.echo(f"  objective        {intent.bundle.objective.id}")
+    if intent.requirements.requirements:
+        for requirement in intent.requirements.requirements:
+            typer.echo(f"  {requirement.kind.value:<14} {requirement.label}")
+    else:
+        typer.echo("  (no structural requirements — building the free optimum)")
+    if intent.unparsed:
+        typer.secho(f"  not understood   {list(intent.unparsed)}", fg=typer.colors.YELLOW)
+    typer.echo(f"  confidence       {intent.overall_confidence:.0%}")
+
+    # An objective-trained model is preferred when one exists, because it was
+    # fitted on the features discovery found to serve *this* goal. Falling back
+    # to the general model is correct rather than an error — it just means the
+    # squad is chosen by the catalogue alone, and the run says so.
+    from xg_alonso.prediction import load_models
+
+    objective_model_path = (
+        data_root / "models" / f"component_models.{intent.bundle.objective.id}.pkl"
+    )
+    models = None
+    model_note = "general model"
+    chosen_model = model
+    if chosen_model is None:
+        objective_model = (
+            data_root / "models" / f"component_models.{intent.bundle.objective.id}.pkl"
+        )
+        general = data_root / "models" / "component_models.pkl"
+        if objective_model.exists():
+            chosen_model = objective_model
+            model_note = f"model trained for {intent.bundle.objective.id}"
+        elif general.exists():
+            chosen_model = general
+    if chosen_model is not None:
+        models = load_models(chosen_model).models
+    else:
+        model_note = "closed-form baseline (no trained model found)"
+
+    predictions = _predict_all(
+        context,
+        gameweek,
+        models,
+        data_root=data_root,
+        objective_id=intent.bundle.objective.id if chosen_model == objective_model_path else "",
+    )
+
+    # The objective chooses the feature set. This is what makes the same
+    # requirements produce a different squad under a different goal.
+    frame_note = f"  scoring with the {model_note}"
+
+    available = {
+        int(r["player_code"]): r
+        for r in context.players.iter_rows(named=True)
+        if r.get("status") in (None, "a", "d")
+    }
+    candidates = [
+        SquadCandidate(
+            player_code=p.player_code,
+            position=p.position,
+            team_id=TeamId(int(available[int(p.player_code)]["team_id"])),
+            price=TenthsOfMillion(int(available[int(p.player_code)]["current_price"])),
+            prediction=p,
+        )
+        for p in predictions
+        if int(p.player_code) in available
+    ]
+
+    typer.echo(f"\nChoosing from {len(candidates):,} available players for GW{int(gameweek)}")
+    if frame_note:
+        typer.echo(frame_note)
+
+    built = build_constrained_squad(
+        candidates,
+        rules=context.squad_rules,
+        entry_id=EntryId(0),
+        gameweek=gameweek,
+        requirements=intent.requirements,
+    )
+
+    typer.echo(
+        f"\nSquad  {built.expected_points:.2f} pts"
+        f"  ({built.selection.formation_label}, {int(built.squad.bank) / 10:.1f}m banked)"
+    )
+    if built.total_cost > 0:
+        typer.echo(
+            f"  Your requirements cost {built.total_cost:.2f} points against the "
+            f"free optimum of {built.unconstrained_points:.2f}."
+        )
+
+    starters = ", ".join(
+        names.get(p.player_code, str(p.player_code))
+        + ("(C)" if p.is_captain else "(V)" if p.is_vice_captain else "")
+        for p in built.selection.starters
+    )
+    bench = ", ".join(names.get(p.player_code, str(p.player_code)) for p in built.selection.bench)
+    typer.echo(f"  XI     {starters}")
+    typer.echo(f"  Bench  {bench}")
+
+    if built.outcomes:
+        typer.echo("\nWhat you asked for")
+        for outcome in built.outcomes:
+            colour = typer.colors.RED if not outcome.honoured else None
+            typer.secho(f"  {outcome.summary}", fg=colour)
+
+    if not built.feasible_as_asked:
+        typer.secho(
+            "\n  Not everything could hold at once. The requirements above marked "
+            "unhonoured are the ones that had to give.",
+            fg=typer.colors.YELLOW,
+        )
+
+    if show_unconstrained:
+        free = build_constrained_squad(
+            candidates,
+            rules=context.squad_rules,
+            entry_id=EntryId(0),
+            gameweek=gameweek,
+            price_requirements=False,
+        )
+        free_xi = ", ".join(
+            names.get(p.player_code, str(p.player_code)) for p in free.selection.starters
+        )
+        typer.echo(f"\nWithout your requirements  {free.expected_points:.2f} pts")
+        typer.echo(f"  XI     {free_xi}")
+
+
 @app.command()
 def train(
     data_root: DataRoot = DEFAULT_DATA_ROOT,
+    objective: Annotated[
+        str,
+        typer.Option(
+            "--objective",
+            help=(
+                "Train on this objective's accepted discovered features as well as "
+                "the catalogue. Saves alongside the objective id so `xg plan` can find it."
+            ),
+        ),
+    ] = "",
     seasons: Annotated[
         str, typer.Option("--seasons", help="Comma-separated training seasons.")
     ] = "2024-25",
@@ -1231,10 +1478,31 @@ def train(
     data = build_training_frame(stats, seasons=wanted, min_gameweek=min_gameweek)
     typer.echo(f"    {data.rows:,} rows x {len(data.feature_columns)} features")
 
+    # Objective-conditioned training. Discovery decides which features serve
+    # which goal; this is where that decision reaches the model. Without it the
+    # registry is a filing cabinet — every objective would be scored by the same
+    # fixed catalogue and "chase a mini-league" would return the same squad as
+    # "protect my rank".
+    frame = data.frame
+    feature_columns = list(data.feature_columns)
+    if objective:
+        frame, discovered = _objective_feature_columns(data_root, objective, frame, stats)
+        if discovered:
+            feature_columns.extend(discovered)
+            typer.echo(
+                f"    + {len(discovered)} discovered for {objective}: {', '.join(discovered)}"
+            )
+        else:
+            typer.secho(
+                f"    no accepted features for {objective}; "
+                "run `xg discover` first or this is just the catalogue",
+                fg=typer.colors.YELLOW,
+            )
+
     typer.echo("  fitting component models ...")
     models = train_component_models(
-        data.frame,
-        feature_columns=data.feature_columns,
+        frame,
+        feature_columns=tuple(feature_columns),
         label_columns=data.label_columns,
     )
 
@@ -1244,7 +1512,8 @@ def train(
         trained_gameweeks=data.gameweeks,
         saved_at=utc_now(),
     )
-    destination = out or (data_root / "models" / "component_models.pkl")
+    default_name = f"component_models.{objective}.pkl" if objective else "component_models.pkl"
+    destination = out or (data_root / "models" / default_name)
     save_models(saved, destination)
 
     summary = model_summary(saved)
@@ -1391,8 +1660,23 @@ def build_squad_command(
         typer.echo(f"  saved -> {out}")
 
 
-def _predict_all(context: SliceContext, gameweek: GameweekId, models: object | None):  # type: ignore[no-untyped-def]
-    """Predict every player, via the trained models when supplied."""
+def _predict_all(  # type: ignore[no-untyped-def]
+    context: SliceContext,
+    gameweek: GameweekId,
+    models: object | None,
+    *,
+    data_root: Path | None = None,
+    objective_id: str = "",
+):
+    """Predict every player, via the trained models when supplied.
+
+    ``objective_id`` materialises that objective's accepted discovered features
+    onto the prediction frame. A model trained with them expects them, and a
+    prediction frame built from the catalogue alone would be missing columns —
+    so this is the other half of the wire that `xg train --objective` opens.
+    Both halves read the same registry through the same helper, which is what
+    keeps training and inference describing the same feature set.
+    """
     from xg_alonso.cli.pipeline import build_entities
     from xg_alonso.features.assemble import build_model_features
     from xg_alonso.features.catalogue import CATALOGUE_VERSION
@@ -1405,6 +1689,10 @@ def _predict_all(context: SliceContext, gameweek: GameweekId, models: object | N
 
     if models is not None:
         features = build_model_features(entities, player_stats=context.player_stats)
+        if objective_id and data_root is not None:
+            features, _ = _objective_feature_columns(
+                data_root, objective_id, features, context.player_stats
+            )
         return predict_with_models(
             features,
             models=models,  # type: ignore[arg-type]
