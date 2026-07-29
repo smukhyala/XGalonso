@@ -54,8 +54,11 @@ __all__ = [
     "OwnershipPreference",
     "ParseSource",
     "PrimaryMetric",
+    "Requirement",
+    "RequirementKind",
     "RiskPreference",
     "SquadArea",
+    "SquadRequirements",
     "TeamQuota",
     "UtilityWeights",
 ]
@@ -317,6 +320,115 @@ class TeamQuota(_Frozen):
     count: int = Field(ge=0, le=15)
 
 
+class RequirementKind(StrEnum):
+    """What a single squad requirement asks for.
+
+    Named separately from the constraint fields they compile into, because the
+    infeasibility report has to say *which requirement* had to give, in the
+    words the manager used. A bare "no legal squad exists" is the failure mode
+    this vocabulary exists to prevent.
+    """
+
+    MUST_START = "must_start"
+    """In the starting eleven, not merely in the fifteen."""
+
+    MUST_INCLUDE = "must_include"
+    """In the fifteen. The bench is an acceptable answer."""
+
+    MUST_EXCLUDE = "must_exclude"
+    MUST_CAPTAIN = "must_captain"
+    CLUB_FLOOR = "club_floor"
+    CLUB_CEILING = "club_ceiling"
+    FORMATION = "formation"
+    BANK_FLOOR = "bank_floor"
+
+
+class Requirement(_Frozen):
+    """One thing the manager asked for, in their words and in solver terms.
+
+    **Start and include are different requirements and the difference matters.**
+    "I want Haaland" is satisfied by Haaland on the bench, which is not what
+    anybody means. "I want Haaland starting" is a constraint on the eleven. The
+    optimizer has separate variables for both, so conflating them here would
+    throw away a distinction the solver can already express.
+
+    ``priority`` orders *relaxation*, not importance to the solve. Every
+    requirement is hard when a legal squad exists; priority only decides what
+    gives first when none does, so a manager is told "your three-Arsenal floor
+    is what broke this" rather than "infeasible".
+    """
+
+    kind: RequirementKind
+    label: str = Field(description="What the manager asked for, in their words")
+
+    players: tuple[PlayerCode, ...] = ()
+    team_id: TeamId | None = None
+    count: int | None = Field(default=None, ge=0, le=15)
+    formation: str | None = Field(
+        default=None, description="Starting shape as DEF-MID-FWD, e.g. '3-5-2'"
+    )
+    amount: TenthsOfMillion | None = None
+
+    priority: int = Field(
+        default=0,
+        description=(
+            "Higher survives longer when the set is infeasible. Ties break on "
+            "declaration order, so an unranked set relaxes back-to-front — the "
+            "most recently added requirement is the first to give."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _payload_matches_kind(self) -> Requirement:
+        """Reject a requirement whose payload cannot express its kind.
+
+        A `CLUB_FLOOR` with no team, or a `MUST_START` with no players, compiles
+        to a constraint row that silently binds nothing. That is worse than an
+        error: the squad comes back looking like it honoured the request.
+        """
+        player_kinds = {
+            RequirementKind.MUST_START,
+            RequirementKind.MUST_INCLUDE,
+            RequirementKind.MUST_EXCLUDE,
+            RequirementKind.MUST_CAPTAIN,
+        }
+        club_kinds = {RequirementKind.CLUB_FLOOR, RequirementKind.CLUB_CEILING}
+
+        if self.kind in player_kinds and not self.players:
+            raise ValueError(f"{self.kind.value} requires at least one player")
+        if self.kind is RequirementKind.MUST_CAPTAIN and len(self.players) != 1:
+            raise ValueError("a squad has exactly one captain")
+        if self.kind in club_kinds and (self.team_id is None or self.count is None):
+            raise ValueError(f"{self.kind.value} requires a team_id and a count")
+        if self.kind is RequirementKind.FORMATION and not self.formation:
+            raise ValueError("formation requires a shape like '3-5-2'")
+        if self.kind is RequirementKind.BANK_FLOOR and self.amount is None:
+            raise ValueError("bank_floor requires an amount")
+        return self
+
+    def formation_counts(self) -> tuple[int, int, int]:
+        """Parse ``'3-5-2'`` into defender, midfielder and forward counts.
+
+        Raises:
+            ValueError: on a shape that is not three numbers, or one that does
+                not field ten outfielders alongside the compulsory keeper.
+        """
+        if not self.formation:
+            raise ValueError("no formation on this requirement")
+        parts = self.formation.split("-")
+        expected = 3
+        if len(parts) != expected or not all(part.strip().isdigit() for part in parts):
+            raise ValueError(f"expected a shape like '3-5-2', got {self.formation!r}")
+        counts = tuple(int(part) for part in parts)
+        outfield = 10
+        if sum(counts) != outfield:
+            raise ValueError(
+                f"formation {self.formation!r} fields {sum(counts)} outfielders; "
+                "eleven players means one keeper and ten outfield"
+            )
+        return counts[0], counts[1], counts[2]
+
+
 class ChipIntent(_Frozen):
     """A declared plan for one chip.
 
@@ -416,6 +528,37 @@ class ManagerConstraints(_Frozen):
 
 
 # --- beliefs -----------------------------------------------------------------
+
+
+class SquadRequirements(_Frozen):
+    """Everything a manager asked of a squad built from scratch.
+
+    Composed from :class:`ManagerConstraints` rather than restating it. The two
+    read differently and the difference is deliberate: on the *transfer* path a
+    locked player is one that may not be **sold**, while on the *from scratch*
+    path there is nothing to sell, so the same field means the player must be
+    **bought**. Both compile to "he is in the fifteen"; only the story differs.
+
+    The eleven-level requirements have no transfer-path equivalent at all, which
+    is why they live here instead of being pushed down into the shared contract.
+    """
+
+    constraints: ManagerConstraints = ManagerConstraints()
+    requirements: tuple[Requirement, ...] = ()
+
+    def of_kind(self, kind: RequirementKind) -> tuple[Requirement, ...]:
+        return tuple(r for r in self.requirements if r.kind is kind)
+
+    def relaxation_order(self) -> tuple[Requirement, ...]:
+        """Requirements ordered by what should give first when none can hold.
+
+        Lowest priority first, and within a priority the most recently declared
+        first — a manager who adds a requirement and immediately sees the set
+        break should have that one named, not one they set five minutes ago.
+        """
+        indexed = list(enumerate(self.requirements))
+        indexed.sort(key=lambda pair: (pair[1].priority, -pair[0]))
+        return tuple(requirement for _, requirement in indexed)
 
 
 class BeliefEntity(StrEnum):

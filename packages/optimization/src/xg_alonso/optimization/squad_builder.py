@@ -66,12 +66,19 @@ from xg_alonso.contracts.identifiers import (
     TeamId,
     TenthsOfMillion,
 )
+from xg_alonso.contracts.objective import Requirement, SquadRequirements
 from xg_alonso.contracts.prediction import PlayerPrediction, Position
 from xg_alonso.contracts.squad import SquadPick, SquadState
 from xg_alonso.domain.rules import SquadRules
 from xg_alonso.optimization.lineup import CAPTAIN_MULTIPLIER, XiSelection, best_starting_xi
+from xg_alonso.optimization.requirements import (
+    ConstraintRow,
+    RequirementOutcome,
+    as_requirements,
+    compile_requirements,
+)
 
-__all__ = ["SquadCandidate", "build_squad"]
+__all__ = ["ConstrainedBuild", "SquadCandidate", "build_constrained_squad", "build_squad"]
 
 #: Weight on the bench tie-break, used only to choose between squads whose
 #: *elevens* score identically.
@@ -162,11 +169,23 @@ def _as_pick(candidate: SquadCandidate, slot: int) -> SquadPick:
     )
 
 
+@dataclass(frozen=True)
+class _Solution:
+    """What the MILP chose: the fifteen, the eleven, and the armband."""
+
+    squad: list[SquadCandidate]
+    starters: frozenset[PlayerCode]
+    captain: PlayerCode | None
+
+
 def _solve(
     candidates: Sequence[SquadCandidate],
     rules: SquadRules,
     points: Mapping[PlayerCode, float],
-) -> list[SquadCandidate]:
+    extra: Sequence[ConstraintRow] = (),
+    *,
+    strict: bool = True,
+) -> _Solution | None:
     """Choose the fifteen whose best legal eleven scores highest.
 
     Three binary variables per candidate, laid out contiguously so the column
@@ -181,9 +200,17 @@ def _solve(
     bench player contributes nothing — the same asymmetry the rest of the
     system is built on.
 
+    Args:
+        extra: Requirement rows over the same variables. Hard bounds, never
+            penalties — see :mod:`.requirements`.
+        strict: Raise when no legal squad exists. Set ``False`` by the
+            relaxation search, which needs "infeasible" as an answer rather
+            than an exception so it can drop a requirement and try again.
+
     Raises:
-        ValueError: when no legal squad exists, which is a data problem worth
-            surfacing rather than returning something half-built.
+        ValueError: when no legal squad exists and ``strict``. Without
+            requirements that is a data problem worth surfacing rather than
+            returning something half-built.
     """
     n = len(candidates)
     if n == 0:
@@ -263,6 +290,11 @@ def _solve(
         float(int(rules.total_budget)),
     )
 
+    # Requirement rows last, so a manager's constraints sit on top of the
+    # league's rather than competing with them.
+    for extra_row in extra:
+        add_row(list(extra_row.entries), extra_row.lower, extra_row.upper)
+
     matrix = coo_array((vals, (rows, cols)), shape=(row, 3 * n))
     result = milp(
         c=objective,
@@ -272,14 +304,28 @@ def _solve(
     )
 
     if not result.success or result.x is None:
+        if not strict:
+            return None
         counts = {p.value: sum(1 for c in candidates if c.position is p) for p in _POSITIONS}
         raise ValueError(
             f"no legal squad exists for these candidates ({result.message.strip()}). "
             f"Available by position: {counts}; budget {int(rules.total_budget)}"
         )
 
-    selected = np.flatnonzero(np.asarray(result.x[x0 : x0 + n]) > 0.5)
-    return [candidates[int(i)] for i in selected]
+    values = np.asarray(result.x)
+    selected = np.flatnonzero(values[x0 : x0 + n] > 0.5)
+    starting = np.flatnonzero(values[y0 : y0 + n] > 0.5)
+    wearing = np.flatnonzero(values[c0 : c0 + n] > 0.5)
+
+    # The solver's own eleven is returned, not just its fifteen. Re-deriving the
+    # XI afterwards with `best_starting_xi` silently discards every requirement
+    # that binds `y` or `c`, which turns "must start" into "must be in the
+    # squad" and drops a required captaincy entirely.
+    return _Solution(
+        squad=[candidates[int(i)] for i in selected],
+        starters=frozenset(candidates[int(i)].player_code for i in starting),
+        captain=candidates[int(wearing[0])].player_code if wearing.size else None,
+    )
 
 
 def build_squad(
@@ -326,11 +372,36 @@ def build_squad(
         for candidate in ordered
     }
 
-    chosen = _solve(ordered, rules, points)
-    spend = sum(int(c.price) for c in chosen)
+    solution = _solve(ordered, rules, points)
+    assert solution is not None
+    return _assemble(
+        solution.squad, lookup, rules, entry_id=entry_id, gameweek=gameweek, solution=solution
+    )
 
+
+def _assemble(
+    chosen: Sequence[SquadCandidate],
+    lookup: Mapping[PlayerCode, PlayerPrediction],
+    rules: SquadRules,
+    *,
+    entry_id: EntryId,
+    gameweek: GameweekId,
+    solution: _Solution | None = None,
+) -> tuple[SquadState, XiSelection]:
+    """Turn a chosen fifteen into a squad with its slots and armbands set.
+
+    ``solution`` pins the eleven and the captain the solver chose. Without it
+    the eleven is re-derived, which is right for an unconstrained build — the
+    two agree, and `test_solver_objective_equals_repo_scorer` asserts it — but
+    wrong the moment a requirement binds the XI.
+    """
+    spend = sum(int(c.price) for c in chosen)
     picks = [_as_pick(candidate, i + 1) for i, candidate in enumerate(chosen)]
-    selection = best_starting_xi(picks, lookup, rules)
+    selection = (
+        _selection_from(picks, lookup, rules, solution)
+        if solution is not None
+        else best_starting_xi(picks, lookup, rules)
+    )
 
     ordered_picks: list[SquadPick] = []
     for slot, pick in enumerate(selection.starters + selection.bench, start=1):
@@ -351,4 +422,235 @@ def build_squad(
         bank=TenthsOfMillion(int(rules.total_budget) - spend),
         free_transfers=1,
     )
-    return state, best_starting_xi(state.picks, lookup, rules)
+    final = (
+        _selection_from(list(state.picks), lookup, rules, solution)
+        if solution is not None
+        else best_starting_xi(state.picks, lookup, rules)
+    )
+    return state, final
+
+
+def _selection_from(
+    picks: Sequence[SquadPick],
+    lookup: Mapping[PlayerCode, PlayerPrediction],
+    rules: SquadRules,
+    solution: _Solution,
+) -> XiSelection:
+    """Build the selection the solver chose, bench ordered by expected points.
+
+    The vice-captain is the best starter who is not the captain: FPL's rule, and
+    the same one `best_starting_xi` applies. Only the *choice* of eleven and
+    captain comes from the solver; everything derived from that choice is still
+    computed here so the two paths cannot describe the same squad differently.
+    """
+    starters = [p for p in picks if p.player_code in solution.starters]
+    bench = [p for p in picks if p.player_code not in solution.starters]
+
+    def points_of(pick: SquadPick) -> float:
+        prediction = lookup.get(pick.player_code)
+        return float(prediction.expected_points) if prediction else 0.0
+
+    bench.sort(key=lambda p: (p.position is Position.GKP, -points_of(p)))
+
+    captain = solution.captain
+    ranked = sorted(starters, key=lambda p: -points_of(p))
+    vice = next((p.player_code for p in ranked if p.player_code != captain), None)
+
+    shape = tuple(sum(1 for p in starters if p.position is position) for position in _POSITIONS)
+    total = sum(points_of(p) for p in starters)
+    if captain is not None:
+        total += points_of(next(p for p in starters if p.player_code == captain)) * (
+            CAPTAIN_MULTIPLIER - 1
+        )
+
+    return XiSelection(
+        starters=tuple(starters),
+        bench=tuple(bench),
+        captain=captain,
+        vice_captain=vice,
+        formation=(shape[0], shape[1], shape[2], shape[3]),
+        expected_points=total,
+    )
+
+
+@dataclass(frozen=True)
+class ConstrainedBuild:
+    """A squad built to a manager's requirements, and what they cost.
+
+    ``relaxed`` is the part worth reading first. It is empty when everything
+    the manager asked for held; when it is not, those requirements are the ones
+    that had to give for a legal squad to exist at all.
+    """
+
+    squad: SquadState
+    selection: XiSelection
+    outcomes: tuple[RequirementOutcome, ...]
+    expected_points: float
+    unconstrained_points: float
+
+    @property
+    def relaxed(self) -> tuple[Requirement, ...]:
+        return tuple(o.requirement for o in self.outcomes if not o.honoured)
+
+    @property
+    def feasible_as_asked(self) -> bool:
+        return not self.relaxed
+
+    @property
+    def total_cost(self) -> float:
+        """Points given up against the unconstrained optimum."""
+        return round(self.unconstrained_points - self.expected_points, 4)
+
+
+def _xi_points(
+    solution: _Solution,
+    lookup: Mapping[PlayerCode, PlayerPrediction],
+    rules: SquadRules,
+) -> float:
+    """What a solution scores through the eleven it actually chose.
+
+    Scored from the solver's own XI rather than a re-derived best eleven,
+    because under a requirement those differ — and pricing a constrained squad
+    against an unconstrained scoring of it would report the cost of a lineup
+    nobody is fielding.
+    """
+    picks = [_as_pick(candidate, i + 1) for i, candidate in enumerate(solution.squad)]
+    return float(_selection_from(picks, lookup, rules, solution).expected_points)
+
+
+def build_constrained_squad(
+    candidates: Sequence[SquadCandidate],
+    *,
+    rules: SquadRules,
+    entry_id: EntryId,
+    gameweek: GameweekId,
+    requirements: SquadRequirements | None = None,
+    predictions: Mapping[PlayerCode, PlayerPrediction] | None = None,
+    price_requirements: bool = True,
+) -> ConstrainedBuild:
+    """Build the best legal squad that honours what the manager asked for.
+
+    Requirements are hard bounds on the same variables the solver already uses,
+    so a request is either honoured exactly or reported as impossible — never
+    approximated. When the full set has no solution, requirements are dropped in
+    :meth:`SquadRequirements.relaxation_order` until one does, and every dropped
+    requirement is named.
+
+    Args:
+        price_requirements: Also measure what each honoured requirement cost, by
+            re-solving without it. One extra solve per requirement — cheap at
+            0.04s each, and it is the number that answers "is keeping him worth
+            it". Turn off for a hot path that only needs the squad.
+
+    Raises:
+        ValueError: if no legal squad exists even with every requirement
+            dropped. That is a data problem, not a requirements problem.
+    """
+    bundle = requirements or SquadRequirements()
+
+    lookup: dict[PlayerCode, PlayerPrediction] = dict(predictions or {})
+    for candidate in candidates:
+        lookup.setdefault(candidate.player_code, candidate.prediction)
+
+    unique: dict[PlayerCode, SquadCandidate] = {}
+    for candidate in candidates:
+        unique.setdefault(candidate.player_code, candidate)
+    ordered = sorted(unique.values(), key=lambda c: int(c.player_code))
+
+    points = {
+        candidate.player_code: lookup[candidate.player_code].expected_points
+        if candidate.player_code in lookup
+        else candidate.expected_points
+        for candidate in ordered
+    }
+
+    codes = [c.player_code for c in ordered]
+    positions = [c.position for c in ordered]
+    teams = [int(c.team_id) for c in ordered]
+    prices = [int(c.price) for c in ordered]
+
+    def rows_for(wanted: Sequence[Requirement]) -> list[ConstraintRow]:
+        compiled, _ = compile_requirements(
+            wanted,
+            codes=codes,
+            positions=positions,
+            teams=teams,
+            prices=prices,
+            total_budget=int(rules.total_budget),
+        )
+        return compiled
+
+    asked = as_requirements(bundle)
+    _, unmet = compile_requirements(
+        asked,
+        codes=codes,
+        positions=positions,
+        teams=teams,
+        prices=prices,
+        total_budget=int(rules.total_budget),
+    )
+    inexpressible = {id(requirement): note for requirement, note in unmet}
+
+    # The free optimum, for pricing the whole requirement set against.
+    free = _solve(ordered, rules, points)
+    assert free is not None
+    unconstrained = _xi_points(free, lookup, rules)
+
+    # Relax in the manager's declared order until a legal squad exists. Exact
+    # rather than inferred: every drop is a re-solve, and at 0.04s a handful of
+    # them is cheaper than explaining a wrong answer.
+    expressible = [r for r in asked if id(r) not in inexpressible]
+    order = [r for r in bundle.relaxation_order() if r in expressible]
+    order.extend(r for r in expressible if r not in order)
+
+    kept = list(expressible)
+    dropped: list[Requirement] = []
+    chosen = _solve(ordered, rules, points, rows_for(kept), strict=not kept)
+
+    for candidate_to_drop in order:
+        if chosen is not None:
+            break
+        kept.remove(candidate_to_drop)
+        dropped.append(candidate_to_drop)
+        chosen = _solve(ordered, rules, points, rows_for(kept), strict=not kept)
+
+    if chosen is None:  # pragma: no cover - the empty set is the base solve
+        message = "no legal squad exists even with every requirement dropped"
+        raise ValueError(message)
+
+    achieved = _xi_points(chosen, lookup, rules)
+
+    outcomes: list[RequirementOutcome] = []
+    for requirement in asked:
+        note = inexpressible.get(id(requirement))
+        if note is not None:
+            outcomes.append(RequirementOutcome(requirement=requirement, honoured=False, note=note))
+            continue
+        if requirement in dropped:
+            outcomes.append(
+                RequirementOutcome(
+                    requirement=requirement,
+                    honoured=False,
+                    note="dropped so that a legal squad could exist",
+                )
+            )
+            continue
+
+        cost: float | None = None
+        if price_requirements:
+            others = [r for r in kept if r is not requirement]
+            without = _solve(ordered, rules, points, rows_for(others), strict=False)
+            if without is not None:
+                cost = round(_xi_points(without, lookup, rules) - achieved, 4)
+        outcomes.append(RequirementOutcome(requirement=requirement, honoured=True, cost=cost))
+
+    squad, selection = _assemble(
+        chosen.squad, lookup, rules, entry_id=entry_id, gameweek=gameweek, solution=chosen
+    )
+    return ConstrainedBuild(
+        squad=squad,
+        selection=selection,
+        outcomes=tuple(outcomes),
+        expected_points=round(achieved, 4),
+        unconstrained_points=round(unconstrained, 4),
+    )
