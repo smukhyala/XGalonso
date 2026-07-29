@@ -18,6 +18,7 @@ dependencies = [
     "xg-alonso-optimization",
     "xg-alonso-evaluation",
     "xg-alonso-explanations",
+    "xg-alonso-discovery",
     "xg-alonso-ingestion",
     "xg-alonso-normalization",
     "xg-alonso-cli",
@@ -44,6 +45,7 @@ xg-alonso-prediction = { workspace = true }
 xg-alonso-optimization = { workspace = true }
 xg-alonso-evaluation = { workspace = true }
 xg-alonso-explanations = { workspace = true }
+xg-alonso-discovery = { workspace = true }
 xg-alonso-ingestion = { workspace = true }
 xg-alonso-normalization = { workspace = true }
 xg-alonso-cli = { workspace = true }
@@ -84,6 +86,7 @@ src = [
     "packages/optimization/src",
     "packages/evaluation/src",
     "packages/explanations/src",
+    "packages/discovery/src",
     "pipelines/ingestion/src",
     "pipelines/normalization/src",
     "apps/cli/src",
@@ -147,6 +150,7 @@ mypy_path = [
     "packages/optimization/src",
     "packages/evaluation/src",
     "packages/explanations/src",
+    "packages/discovery/src",
     "pipelines/ingestion/src",
     "pipelines/normalization/src",
     "apps/cli/src",

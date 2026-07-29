@@ -14,6 +14,7 @@ type = layers
 layers =
     xg_alonso.api
     xg_alonso.cli : xg_alonso.pipelines
+    xg_alonso.discovery
     xg_alonso.evaluation
     xg_alonso.optimization : xg_alonso.explanations
     xg_alonso.prediction
@@ -40,6 +41,7 @@ source_modules =
     xg_alonso.cli
     xg_alonso.api
     xg_alonso.pipelines
+    xg_alonso.discovery
 forbidden_modules =
     duckdb
 
@@ -84,6 +86,7 @@ forbidden_modules =
     xg_alonso.explanations
     xg_alonso.pipelines
     xg_alonso.cli
+    xg_alonso.discovery
     duckdb
     httpx
 
@@ -105,3 +108,30 @@ source_modules =
     xg_alonso.explanations
 forbidden_modules =
     httpx
+
+# ---------------------------------------------------------------------------
+# The discovery *core* is a generic feature-search engine that happens to be
+# used for football. Keeping it that way is a claim, so it is checked rather
+# than asserted in a docstring: these modules may speak the shared contracts
+# vocabulary and nothing else about this domain.
+#
+# The FPL bindings live in xg_alonso.discovery.fpl and .experiment, which are
+# deliberately absent from the source list below and may import anything.
+# ---------------------------------------------------------------------------
+
+[importlinter:contract:discovery-core-is-generic]
+name = the discovery core knows nothing about football
+type = forbidden
+source_modules =
+    xg_alonso.discovery.dsl
+    xg_alonso.discovery.compile
+    xg_alonso.discovery.utility
+    xg_alonso.discovery.acceptance
+    xg_alonso.discovery.search
+    xg_alonso.discovery.registry
+forbidden_modules =
+    xg_alonso.domain
+    xg_alonso.features
+    xg_alonso.prediction
+    xg_alonso.optimization
+    xg_alonso.evaluation

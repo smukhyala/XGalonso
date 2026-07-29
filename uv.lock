@@ -12,6 +12,7 @@ members = [
     "xg-alonso-api",
     "xg-alonso-cli",
     "xg-alonso-contracts",
+    "xg-alonso-discovery",
     "xg-alonso-domain",
     "xg-alonso-evaluation",
     "xg-alonso-explanations",
@@ -1483,6 +1484,7 @@ dependencies = [
     { name = "xg-alonso-api" },
     { name = "xg-alonso-cli" },
     { name = "xg-alonso-contracts" },
+    { name = "xg-alonso-discovery" },
     { name = "xg-alonso-domain" },
     { name = "xg-alonso-evaluation" },
     { name = "xg-alonso-explanations" },
@@ -1511,6 +1513,7 @@ requires-dist = [
     { name = "xg-alonso-api", editable = "apps/api" },
     { name = "xg-alonso-cli", editable = "apps/cli" },
     { name = "xg-alonso-contracts", editable = "packages/data_contracts" },
+    { name = "xg-alonso-discovery", editable = "packages/discovery" },
     { name = "xg-alonso-domain", editable = "packages/domain" },
     { name = "xg-alonso-evaluation", editable = "packages/evaluation" },
     { name = "xg-alonso-explanations", editable = "packages/explanations" },
@@ -1621,6 +1624,35 @@ dependencies = [
 requires-dist = [
     { name = "polars", specifier = ">=1.20,<2" },
     { name = "pydantic", specifier = ">=2.10,<3" },
+]
+
+[[package]]
+name = "xg-alonso-discovery"
+version = "0.1.0"
+source = { editable = "packages/discovery" }
+dependencies = [
+    { name = "numpy" },
+    { name = "polars" },
+    { name = "scikit-learn" },
+    { name = "xg-alonso-contracts" },
+    { name = "xg-alonso-domain" },
+    { name = "xg-alonso-evaluation" },
+    { name = "xg-alonso-features" },
+    { name = "xg-alonso-optimization" },
+    { name = "xg-alonso-prediction" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=1.26,<3" },
+    { name = "polars", specifier = ">=1.20,<2" },
+    { name = "scikit-learn", specifier = ">=1.6" },
+    { name = "xg-alonso-contracts", editable = "packages/data_contracts" },
+    { name = "xg-alonso-domain", editable = "packages/domain" },
+    { name = "xg-alonso-evaluation", editable = "packages/evaluation" },
+    { name = "xg-alonso-features", editable = "packages/feature_factory" },
+    { name = "xg-alonso-optimization", editable = "packages/optimization" },
+    { name = "xg-alonso-prediction", editable = "packages/prediction" },
 ]
 
 [[package]]
