@@ -268,7 +268,33 @@ def compile_intent(
         updates["captaincy_weight"] = max(1.4, float(objective.captaincy_weight))
         note("objective.captaincy_weight", 0.7, ParseSource.INFERRED, claim(captain_match))
 
-    objective = objective.model_copy(update=updates) if updates else objective
+    if updates:
+        # **The id must change when the objective does.** An earlier version kept
+        # the preset's id after rewriting its primary metric, so an experiment
+        # that optimised expected_rank_gain was recorded, versioned and later
+        # looked up as "expected_points". Every artifact keyed by objective —
+        # registry rows, cluster model versions, acceptance history — was
+        # therefore filed under a question it had not answered.
+        #
+        # The id is derived from what the objective actually became, so two
+        # differently-parsed requests that resolve to the same objective share a
+        # key and two that do not, do not.
+        objective = objective.model_copy(update=updates)
+        derived = "_".join(
+            [
+                objective.primary_metric.value,
+                objective.risk_preference.value,
+                f"h{objective.planning_horizon}",
+                objective.ownership_preference.value,
+            ]
+        )
+        objective = objective.model_copy(
+            update={
+                "id": derived,
+                "name": f"{objective.name} (adapted from {base_preset})",
+            }
+        )
+        note("objective.id", 1.0, ParseSource.INFERRED, derived)
 
     # --- constraints -------------------------------------------------------
     constraint_updates: dict[str, object] = {}

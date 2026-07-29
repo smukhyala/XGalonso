@@ -40,8 +40,8 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from itertools import pairwise
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Final
 
 import numpy as np
