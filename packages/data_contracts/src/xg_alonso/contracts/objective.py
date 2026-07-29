@@ -289,10 +289,21 @@ class SquadArea(StrEnum):
     BENCH = "bench"
 
     def positions(self) -> tuple[Position, ...]:
-        """Positions this area covers. Empty for slot-based areas."""
+        """Positions this area covers. Empty for slot-based areas.
+
+        ``DEFENCE`` is defenders only, **not** defenders plus the goalkeeper.
+        In football commentary "the defence" usually includes the keeper, and
+        clean sheets are certainly a joint property of both — but this mapping
+        is used to decide which players a manager may not transfer, and someone
+        who says "don't change my defence" is talking about their back line. A
+        constraint that silently also froze the goalkeeper would block a
+        legitimate transfer for a reason the user never gave, and over-locking
+        is invisible in a way under-locking is not: the move simply never
+        appears. A manager who means both selects both.
+        """
         mapping: dict[str, tuple[Position, ...]] = {
             "goalkeeper": (Position.GKP,),
-            "defence": (Position.GKP, Position.DEF),
+            "defence": (Position.DEF,),
             "midfield": (Position.MID,),
             "attack": (Position.FWD,),
         }
