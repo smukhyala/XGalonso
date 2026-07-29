@@ -67,4 +67,6 @@ coverage.xml
 # Web front end (apps/web)
 node_modules/
 .next/
+# Incremental TypeScript build cache. Machine-local, regenerated on every build.
+*.tsbuildinfo
 next-env.d.ts

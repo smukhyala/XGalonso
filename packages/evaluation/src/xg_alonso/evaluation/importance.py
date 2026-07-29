@@ -100,6 +100,16 @@ class FeatureImportance:
     """Which players this measurement describes. Defaults to the pooled slice so
     a v1 table and every existing call site keep their original meaning."""
 
+    label_weight: float = 0.0
+    """How much this label contributed to a points total, *for this slice*.
+
+    Carried on the row rather than looked up from the table, because a table
+    holds several slices and each has its own weighting — a clean sheet is four
+    points to a defender and zero to a forward. A single table-level mapping
+    would overwrite every slice's weighting with whichever was assigned last,
+    which silently turns a positional ranking back into the pooled one.
+    """
+
     rows_measured: int = 0
     """How many validation rows the slice had.
 
@@ -179,7 +189,7 @@ class ImportanceTable:
         for row in self.rows:
             if row.degenerate_label or row.position != position:
                 continue
-            weight = self.label_weights.get(row.label, 0.0)
+            weight = row.label_weight or self.label_weights.get(row.label, 0.0)
             totals[row.feature_name] = (
                 totals.get(row.feature_name, 0.0) + row.relative_delta * weight
             )
@@ -299,7 +309,9 @@ class ImportanceTable:
                 "relative_delta": [r.relative_delta for r in self.rows],
                 "repeats": [r.repeats for r in self.rows],
                 "degenerate_label": [r.degenerate_label for r in self.rows],
-                "label_weight": [self.label_weights.get(r.label, 0.0) for r in self.rows],
+                "label_weight": [
+                    r.label_weight or self.label_weights.get(r.label, 0.0) for r in self.rows
+                ],
                 "catalogue_version": [self.catalogue_version] * len(self.rows),
                 "model_fingerprint": [self.model_fingerprint] * len(self.rows),
                 "schema_version": [IMPORTANCE_SCHEMA_VERSION] * len(self.rows),
@@ -329,7 +341,9 @@ LABEL_TO_BREAKDOWN: Final[dict[str, str]] = {
 }
 
 
-def label_weights_from_predictions(predictions: Any) -> dict[str, float]:
+def label_weights_from_predictions(
+    predictions: Any, *, position: str | None = None
+) -> dict[str, float]:
     """How much each label contributes to a points total, measured not assumed.
 
     Taken as the mean absolute contribution of the corresponding breakdown term
@@ -340,10 +354,22 @@ def label_weights_from_predictions(predictions: Any) -> dict[str, float]:
 
     Normalised to sum to one, so the aggregate ranking is a share rather than a
     quantity in unstated units.
+
+    Args:
+        predictions: A predicted population to measure against.
+        position: Restrict to players of one position. **This is what makes a
+            positional ranking mean anything.** A clean sheet is four points to
+            a defender and zero to a forward, so a single global weighting
+            flattens every position's ranking toward whatever dominates the
+            pooled population — which is appearance, for everyone. Slicing the
+            rows without also slicing the weights measures the right players
+            against the wrong definition of what their points are made of.
     """
     totals: dict[str, float] = {}
     count = 0
     for prediction in predictions:
+        if position is not None and str(getattr(prediction.position, "value", "")) != position:
+            continue
         breakdown = prediction.breakdown
         count += 1
         for label, term in LABEL_TO_BREAKDOWN.items():
@@ -466,6 +492,7 @@ def permutation_importance(
                     degenerate_label=label in degenerate,
                     position=position,
                     rows_measured=validation.height,
+                    label_weight=label_weights.get(label, 0.0),
                 )
             )
 

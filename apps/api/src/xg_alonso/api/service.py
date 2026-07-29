@@ -1202,10 +1202,17 @@ class DecisionService:
 
         labels = sorted(frame["label"].unique().to_list())
         degenerate = sorted(frame.filter(pl.col("degenerate_label"))["label"].unique().to_list())
-        weights = {
-            str(row["label"]): float(row["label_weight"])
-            for row in frame.select(["label", "label_weight"]).unique().iter_rows(named=True)
-        }
+
+        # Weights are read from the *selected slice*, not the whole frame. Each
+        # slice carries its own weighting now — a keeper's points are mostly
+        # saves and clean sheets, a forward's are mostly goals — so a frame-wide
+        # `unique()` yields one row per (label, slice) and the dict below would
+        # silently keep whichever happened to come last.
+        def _weights(rows: pl.DataFrame) -> dict[str, float]:
+            return {
+                str(row["label"]): float(row["label_weight"])
+                for row in rows.select(["label", "label_weight"]).unique().iter_rows(named=True)
+            }
 
         positions = sorted(frame["position"].unique().drop_nulls().to_list())
         wanted_position = position or ALL_POSITIONS
@@ -1225,6 +1232,8 @@ class DecisionService:
                 f"no importance rows for position={wanted_position!r} "
                 f"label={label!r} family={family!r}"
             )
+
+        weights = _weights(frame.filter(pl.col("position") == wanted_position))
 
         # A single label is already a like-for-like comparison, so weighting it
         # would only rescale every row by the same constant and make the numbers

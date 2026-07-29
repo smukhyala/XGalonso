@@ -1630,6 +1630,50 @@ def score(
         )
 
 
+def _positions_by_season(data_root: Path) -> pl.DataFrame:
+    """Each player's position in each season, for slicing a measurement.
+
+    A player can change position between seasons — FPL reclassifies wingers and
+    wing-backs regularly — so this is keyed on season as well as player. Falling
+    back to a season-agnostic map would file a 2024-25 midfielder's rows under
+    whatever he is listed as today.
+    """
+    from xg_alonso.contracts.prediction import Position
+
+    path = data_root / "silver" / "players_history.parquet"
+    if not path.exists():
+        return pl.DataFrame(
+            schema={"player_code": pl.Int64, "season": pl.Utf8, "position": pl.Utf8}
+        )
+    frame = pl.read_parquet(path)
+    if not {"player_code", "season", "position"}.issubset(frame.columns):
+        return pl.DataFrame(
+            schema={"player_code": pl.Int64, "season": pl.Utf8, "position": pl.Utf8}
+        )
+    # The archive spells goalkeeper `GK`; the contracts' `Position` enum — and
+    # therefore every prediction — spells it `GKP`. Normalised here so the two
+    # sides of the join agree. Without this the goalkeeper slice silently fails
+    # to match any prediction, its label weights fall back to the pooled ones,
+    # and the ranking it produces is cosmetic rather than positional.
+    return frame.select(
+        pl.col("player_code").cast(pl.Int64),
+        pl.col("season").cast(pl.Utf8),
+        pl.col("position").cast(pl.Utf8).replace({"GK": Position.GKP.value}).alias("position"),
+    ).unique(subset=["player_code", "season"])
+
+
+def _attach_position(rows: pl.DataFrame, positions: pl.DataFrame) -> pl.DataFrame | None:
+    """Join a position onto measurement rows, by season where one is available."""
+    if "label_season" in rows.columns:
+        return rows.join(
+            positions.rename({"season": "label_season"}),
+            on=["player_code", "label_season"],
+            how="left",
+        )
+    latest = positions.sort("season").unique(subset=["player_code"], keep="last").drop("season")
+    return rows.join(latest, on="player_code", how="left")
+
+
 @app.command()
 def importance(
     data_root: DataRoot = DEFAULT_DATA_ROOT,
@@ -1757,14 +1801,28 @@ def importance(
     slices: list[tuple[str, int, pl.DataFrame]] = [
         (ALL_POSITIONS, fold_index, rows) for fold_index, rows in windows
     ]
-    if "position" in data.frame.columns:
-        for fold_index, rows in windows:
-            if "position" not in rows.columns:
-                continue
-            for position in sorted(rows["position"].unique().drop_nulls().to_list()):
-                subset = rows.filter(pl.col("position") == position)
-                if subset.height >= min_rows_for_a_slice:
-                    slices.append((str(position), fold_index, subset))
+
+    # The training frame is keyed on `player_code` and carries no position — it
+    # is a feature matrix, and position is an attribute of the player, not of
+    # the row. Joined in here rather than added to the frame, so the model still
+    # never sees it as an input.
+    #
+    # Read from `players_history`, not from the live bootstrap. The bootstrap
+    # lists only this season's squads, so joining it against measurement rows
+    # from an earlier season silently drops every player who has since left —
+    # which showed up as two positions being measured instead of four.
+    positions = _positions_by_season(data_root)
+
+    for fold_index, rows in windows:
+        if "player_code" not in rows.columns or positions.is_empty():
+            continue
+        labelled = _attach_position(rows, positions)
+        if labelled is None:
+            continue
+        for position in sorted(labelled["position"].unique().drop_nulls().to_list()):
+            subset = labelled.filter(pl.col("position") == position).drop("position")
+            if subset.height >= min_rows_for_a_slice:
+                slices.append((str(position), fold_index, subset))
 
     measured_positions = sorted({name for name, _, _ in slices if name != ALL_POSITIONS})
     if measured_positions:
@@ -1772,13 +1830,23 @@ def importance(
     else:
         typer.echo("  no positional slice had enough rows; measuring pooled only")
 
+    # Weights are sliced with the rows. Measuring defenders against the pooled
+    # definition of what points are made of would flatten their ranking toward
+    # appearance exactly as the global weighting does — the slice would be
+    # cosmetic. A clean sheet is four points to a defender and zero to a forward,
+    # and the ranking has to know that.
+    weights_for: dict[str, dict[str, float]] = {ALL_POSITIONS: weights}
+    for position in measured_positions:
+        sliced = label_weights_from_predictions(predictions, position=position)
+        weights_for[position] = sliced or weights
+
     tables = [
         permutation_importance(
             models,
             rows,
             label_columns=data.label_columns,
             families=families,
-            label_weights=weights,
+            label_weights=weights_for.get(position, weights),
             catalogue_version=CATALOGUE_VERSION,
             computed_at=computed_at,
             n_repeats=repeats,

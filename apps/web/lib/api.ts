@@ -40,6 +40,46 @@ export interface GameweekProjection {
   weight: number;
 }
 
+export interface SeasonLine {
+  season: string;
+  appearances: number;
+  minutes: number;
+  goals: number;
+  assists: number;
+  clean_sheets: number;
+  points: number;
+  expected_goals: number | null;
+  expected_assists: number | null;
+  /** Null means the sample cannot support a rate — not that the rate is zero. */
+  per_90: number | null;
+  points_per_appearance: number | null;
+  sentence: string;
+}
+
+export interface ScheduledFixture {
+  gameweek: number;
+  opponent: string;
+  is_home: boolean;
+  /** FPL's published 1-5 rating. Null preseason, when it is unset. */
+  difficulty: number | null;
+  label: string;
+}
+
+export interface FixtureRun {
+  fixtures: ScheduledFixture[];
+  mean_difficulty: number | null;
+  home_count: number;
+  blanks: number[];
+  doubles: number[];
+  sentence: string;
+}
+
+/** Retrieved, never modelled — this is what makes it checkable. */
+export interface PlayerContext {
+  seasons: SeasonLine[];
+  run: FixtureRun | null;
+}
+
 export interface PlayerSummary {
   player_code: number;
   name: string;
@@ -55,6 +95,7 @@ export interface PlayerSummary {
   derivation: DerivationLine[];
   horizon: GameweekProjection[];
   horizon_total: number | null;
+  context: PlayerContext | null;
 }
 
 export interface SquadPlayer extends PlayerSummary {
@@ -234,6 +275,69 @@ export interface FeatureImportance {
   per_label: Record<string, number>;
 }
 
+
+// --- Objective-conditioned discovery -------------------------------------
+
+export interface ObjectivePreset {
+  id: string;
+  name: string;
+  primary_metric: string;
+  risk_preference: string;
+  planning_horizon: number;
+  ownership_preference: string;
+}
+
+export interface DiscoveredFeature {
+  feature: string;
+  version: string;
+  hypothesis_id: string;
+  status: string;
+  complementarity: string;
+  utility: number;
+  incremental_value: number;
+  folds: number;
+  folds_improved: number;
+  stability: number;
+  missingness: number;
+  leakage_passed: boolean;
+  reason: string;
+}
+
+export interface Hypothesis {
+  id: string;
+  title: string;
+  football_rationale: string;
+  falsification_condition: string;
+  expected_relationship: string;
+  generation_source: string;
+  leakage_risk: string;
+  status: string;
+  required_raw_fields: string[];
+}
+
+export interface Cluster {
+  cluster_model_version: string;
+  cluster_id: number;
+  objective_id: string;
+  size: number;
+  label: string;
+  dominant_features: [string, number][];
+}
+
+export interface Experiment {
+  experiment_id: string;
+  objective_id: string | null;
+  stage: string | null;
+  hypotheses_proposed: number;
+  features_compiled: number;
+  features_accepted: number;
+  features_rejected: number;
+  code_version: string | null;
+  git_dirty: boolean;
+  completed_at: string | null;
+  metrics: [string, number][];
+}
+
 export interface ImportanceResponse {
   features: FeatureImportance[];
   families: Record<string, number>;
@@ -242,6 +346,12 @@ export interface ImportanceResponse {
   label_weights: Record<string, number>;
   folds_measured: number;
   features_measured: number;
+  /** Which slice these numbers describe. `ALL` is the pooled measurement. */
+  position: string;
+  /** Slices present in the table. A pre-v2 table offers `ALL` only. */
+  positions: string[];
+  /** Validation rows behind this slice. A positional slice is much smaller. */
+  rows_measured: number;
   features_with_no_effect: number;
   catalogue_version: string;
   model_fingerprint: string;
@@ -282,9 +392,27 @@ export const api = {
       `/recommend/${entryId}${squadFile ? `?squad_file=${encodeURIComponent(squadFile)}` : ""}`,
     ),
   buildSquadExplained: () => get<SquadBuild>("/build-squad/explained"),
-  importance: (label?: string, limit = 60) =>
+  objectives: () => get<ObjectivePreset[]>("/objectives"),
+
+  experiments: () => get<Experiment[]>("/experiments"),
+
+  discoveredFeatures: (objectiveId: string) =>
+    get<DiscoveredFeature[]>(
+      `/features/discovered?objective_id=${encodeURIComponent(objectiveId)}`,
+    ),
+
+  hypotheses: () => get<Hypothesis[]>("/hypotheses"),
+
+  clusters: (objectiveId?: string) =>
+    get<Cluster[]>(
+      `/clusters${objectiveId ? `?objective_id=${encodeURIComponent(objectiveId)}` : ""}`,
+    ),
+
+  importance: (label?: string, limit = 60, position?: string) =>
     get<ImportanceResponse>(
-      `/features/importance?limit=${limit}${label ? `&label=${encodeURIComponent(label)}` : ""}`,
+      `/features/importance?limit=${limit}` +
+        `${label ? `&label=${encodeURIComponent(label)}` : ""}` +
+        `${position ? `&position=${encodeURIComponent(position)}` : ""}`,
     ),
 };
 
