@@ -749,6 +749,16 @@ class CompiledIntent(_Frozen):
     """
 
     bundle: ObjectiveBundle
+    requirements: SquadRequirements = SquadRequirements()
+    """Structural demands on a squad built from scratch.
+
+    Separate from ``bundle.constraints`` because they answer a different
+    question: the bundle says what the optimizer may not *do*, while these say
+    what the resulting squad must *contain*. A manager asking for Haaland in the
+    starting eleven has not restricted a transfer — there is no squad to
+    transfer from yet.
+    """
+
     confidences: tuple[FieldConfidence, ...] = ()
     unparsed: tuple[str, ...] = ()
     """Phrases the compiler did not understand. Surfaced rather than dropped: a

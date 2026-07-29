@@ -49,6 +49,7 @@ from xg_alonso.contracts.objective import (
 )
 from xg_alonso.contracts.prediction import Position
 from xg_alonso.domain.objectives import objective_preset
+from xg_alonso.domain.squad_requests import parse_squad_requirements
 
 __all__ = [
     "FEATURE_ALIASES",
@@ -180,6 +181,8 @@ def compile_intent(
     text: str,
     *,
     players: Mapping[str, int] | None = None,
+    teams: Mapping[str, int] | None = None,
+    ambiguous_names: Sequence[str] = (),
     base_preset: str = "expected_points",
     current_squad: Sequence[int] = (),
     next_gameweek: int | None = None,
@@ -192,6 +195,9 @@ def compile_intent(
             Matching is case-insensitive on whole words, so "Sonny" will not
             silently match "Son" — a wrong player lock is worse than an unmatched
             one, because it is invisible.
+        teams: Club name to team id, for "at least three from Arsenal".
+        ambiguous_names: Names matching more than one player. Left unresolved
+            rather than guessed, and reported for the caller to disambiguate.
         base_preset: Objective to start from before the text modifies it.
         current_squad: Player codes the manager owns. Needed to turn "don't
             change my defence" into concrete locks rather than a position rule
@@ -558,8 +564,24 @@ def compile_intent(
         discovery=discovery,
     )
 
+    # Structural squad requirements are parsed separately and merged in. They
+    # answer a different question from the objective — what the squad must
+    # contain, rather than what it is trying to achieve — and keeping the two
+    # parsers apart means a change to one cannot quietly alter the other.
+    squad_parse = parse_squad_requirements(
+        text, players=players, teams=teams, ambiguous_names=ambiguous_names
+    )
+    for parsed_field, confidence, source, evidence in squad_parse.evidence:
+        confidences.append(
+            FieldConfidence(
+                field=parsed_field, confidence=confidence, source=source, evidence=evidence
+            )
+        )
+    matched_spans.extend(squad_parse.matched_spans)
+
     return CompiledIntent(
         bundle=bundle,
+        requirements=squad_parse.bundle(),
         confidences=tuple(confidences),
         unparsed=_unparsed(text, matched_spans),
         raw_text=text,
