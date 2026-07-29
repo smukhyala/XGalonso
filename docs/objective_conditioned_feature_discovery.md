@@ -281,6 +281,57 @@ the recorded commit does not describe the code that ran.
 
 ---
 
+## The recommendation layer
+
+`xg advise` answers a different question from `xg recommend`. That command asks
+which transfer gains the most expected points; this one asks which transfer best
+serves *what the manager is trying to do*, and shows what their own instructions
+cost separately from what the model thinks.
+
+The three inputs enter at three different points, deliberately:
+
+**Constraints filter the search before anything is scored.**
+`rank_single_transfers` takes a `sellable` set; a held player is simply not in
+it. Expressing "keep Haaland" as a large negative score still lets a good enough
+alternative buy him out — silently, since the recommendation would look like any
+other. He still appears on the transfer board carrying a `CONSTRAINT_HELD`
+reason, because "why not him?" must have an answer for every squad member, and
+"you told me not to" is a better answer than silence.
+
+**The objective re-prices the predictions.** `objective_valued` is one
+substitution point that every scoring path already reads. Threading an objective
+through `starting_xi_points`, captaincy and the bench separately would leave some
+paths using it and others not — and the ones that did not would be exactly the
+subtle cases, a captain chosen on raw points while the squad around him was
+chosen on rank gain. This is the same argument `horizon_valued` already makes.
+
+**Beliefs produce a second recommendation, never a replacement.** Both are
+returned, and the output says explicitly whether the belief changed the answer.
+
+Worked example against the sample squad:
+
+```
+What your instructions changed
+  1 player(s) held by your instruction and never offered for sale
+  no transfers considered in: DEF
+
+What holding them cost
+  keeping Haaland gave up 3.59 projected points (best alternative: Osula)
+  keeping van Ewijk gave up 2.21 projected points (best alternative: O'Shea)
+
+With your beliefs applied
+  Haaland: belief raised the projection from 2.78 to 3.26 (+0.48)
+  Your beliefs did not change the recommendation — they were weighed and the
+  move stands either way.
+```
+
+`selected_by_percent` was added to the player normalisation for this. It is
+published on every element and was previously dropped, which would have left the
+ownership term — the thing that *defines* a differential or template objective —
+silently scoring every player identically.
+
+---
+
 ## Service layer
 
 Read surfaces over what `xg discover` produced, plus the compiler:

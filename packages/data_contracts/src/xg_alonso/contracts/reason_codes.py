@@ -84,6 +84,14 @@ class ReasonCode(StrEnum):
     FORM_SIGNAL_NEGATIVE = "FORM_SIGNAL_NEGATIVE"
 
     # --- why the choice set was what it was ---
+    CONSTRAINT_HELD = "CONSTRAINT_HELD"
+    """The manager instructed that this player be kept.
+
+    Distinct from every other code here, and the distinction matters: the rest
+    say why the *model* did not want a move. This says the model was never asked.
+    Collapsing the two would let a constraint read as a judgement, and a user
+    would have no way to tell which of their own instructions was costing them.
+    """
     POSITION_LOCKED = "POSITION_LOCKED"
     BUDGET_LOCKED = "BUDGET_LOCKED"
     NO_UPGRADE_AVAILABLE = "NO_UPGRADE_AVAILABLE"
@@ -172,6 +180,10 @@ REASON_TEMPLATES: Final[dict[ReasonCode, str]] = {
     ),
     ReasonCode.FORM_SIGNAL_NEGATIVE: (
         "Recent form outside the data: {summary} Projection cut {shift:.0%}. Source: {source}"
+    ),
+    ReasonCode.CONSTRAINT_HELD: (
+        "Held at your instruction, so no move was considered for him. "
+        "The opportunity cost of keeping him is reported separately."
     ),
     ReasonCode.POSITION_LOCKED: (
         "A transfer is like-for-like, so only {candidate_count:.0f} {position}s were "

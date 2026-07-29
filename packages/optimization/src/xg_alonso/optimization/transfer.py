@@ -32,7 +32,7 @@ from xg_alonso.contracts.identifiers import (
     TenthsOfMillion,
 )
 from xg_alonso.contracts.prediction import PlayerPrediction, Position
-from xg_alonso.contracts.reason_codes import Reason
+from xg_alonso.contracts.reason_codes import Reason, ReasonCode, ReasonPolarity
 from xg_alonso.contracts.recommendation import (
     BaselineComparison,
     PlayerBestMove,
@@ -223,6 +223,7 @@ def rank_single_transfers(
     candidates: Sequence[Candidate],
     predictions: dict[PlayerCode, PlayerPrediction],
     rules: SquadRules,
+    sellable: frozenset[PlayerCode] | None = None,
 ) -> list[TransferCandidate]:
     """Every legal single transfer, best net gain first.
 
@@ -230,6 +231,18 @@ def rank_single_transfers(
     ranking. Checks applied: position match, affordability against the selling
     price plus bank, the three-per-club limit, and no buying a player already
     owned.
+
+    Args:
+        sellable: Squad members the manager is willing to sell. ``None`` means
+            all of them, which is the unconstrained behaviour every existing
+            caller gets.
+
+            **A lock is a filter, not a penalty.** Expressing "keep Haaland" as
+            a large negative score still lets a good enough alternative buy him
+            out, which is precisely what the manager said not to do — and it
+            would do so silently, since the recommendation would look like any
+            other. Removing him from the search makes the constraint
+            unbreakable rather than merely expensive.
     """
     owned = {pick.player_code for pick in squad.picks}
     counts = _club_counts(squad.picks)
@@ -241,6 +254,8 @@ def rank_single_transfers(
     evaluated: list[TransferCandidate] = []
 
     for pick in squad.picks:
+        if sellable is not None and pick.player_code not in sellable:
+            continue
         out_prediction = predictions.get(pick.player_code)
         if out_prediction is None:
             continue
@@ -355,6 +370,7 @@ def build_transfer_board(
     rules: SquadRules,
     population: PopulationStats | None = None,
     size: int = DEFAULT_BOARD_SIZE,
+    sellable: frozenset[PlayerCode] | None = None,
 ) -> TransferBoard:
     """Every move worth showing, plus the best move for each squad member.
 
@@ -368,7 +384,7 @@ def build_transfer_board(
     and how far short it fell.
     """
     ranked = rank_single_transfers(
-        squad, candidates=candidates, predictions=predictions, rules=rules
+        squad, candidates=candidates, predictions=predictions, rules=rules, sellable=sellable
     )
 
     # How many players could legally have taken each slot. Counted per position
@@ -394,6 +410,31 @@ def build_transfer_board(
         code = pick.player_code
         legal = legal_by_player.get(code, 0)
         best = best_by_player.get(code)
+
+        if sellable is not None and code not in sellable:
+            # Held by the manager's own instruction. He still appears on the
+            # board — "why not him?" must have an answer for every squad member,
+            # and "you told me not to" is a better answer than silence.
+            entries.append(
+                PlayerBestMove(
+                    player_out=code,
+                    position=pick.position,
+                    legal_replacements=0,
+                    reasons=(
+                        Reason(
+                            code=ReasonCode.CONSTRAINT_HELD,
+                            polarity=ReasonPolarity.CONTEXT,
+                            subject=code,
+                            # No evidence: the template renders no placeholders,
+                            # and the contract refuses a Reason carrying values
+                            # nobody reads.
+                            evidence={},
+                            weight=0.0,
+                        ),
+                    ),
+                )
+            )
+            continue
 
         if best is not None and best.net_gain >= _MIN_NET_GAIN:
             entries.append(
@@ -487,6 +528,7 @@ def best_single_transfer(
     horizon_gameweeks: int = 1,
     population: PopulationStats | None = None,
     with_board: bool = True,
+    sellable: frozenset[PlayerCode] | None = None,
 ) -> TransferRecommendation:
     """The best single transfer, or an explicit hold when none clears the bar.
 
@@ -504,7 +546,7 @@ def best_single_transfer(
     """
     baseline = hold_expected_points(squad, predictions, rules)
     ranked = rank_single_transfers(
-        squad, candidates=candidates, predictions=predictions, rules=rules
+        squad, candidates=candidates, predictions=predictions, rules=rules, sellable=sellable
     )
 
     board = (
@@ -514,6 +556,7 @@ def best_single_transfer(
             predictions=predictions,
             rules=rules,
             population=population,
+            sellable=sellable,
         )
         if with_board
         else None

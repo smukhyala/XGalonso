@@ -55,6 +55,21 @@ def build_element_to_code_map(payload: dict[str, Any]) -> dict[int, int]:
     return {int(e["id"]): int(e["code"]) for e in payload.get("elements", [])}
 
 
+def _as_float(value: object) -> float | None:
+    """Parse a numeric field FPL publishes as a string.
+
+    Returns ``None`` rather than zero when it cannot be parsed. Zero would assert
+    that nobody owns the player, which is a claim about the market rather than an
+    admission that the value is missing.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize_players(
     payload: dict[str, Any], *, season: Season, available_time: datetime
 ) -> pl.DataFrame:
@@ -77,6 +92,8 @@ def normalize_players(
                 "current_price": e.get("now_cost"),
                 "status": e.get("status"),
                 "chance_of_playing_next_round": e.get("chance_of_playing_next_round"),
+                # Published as a string ("29.8"), so cast rather than trusted.
+                "selected_by_percent": _as_float(e.get("selected_by_percent")),
             }
             for e in elements
         ],

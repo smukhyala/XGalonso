@@ -46,6 +46,7 @@ __all__ = [
     "ObjectiveContext",
     "constraint_filter",
     "objective_value",
+    "objective_valued",
     "opportunity_cost",
     "validate_constraints",
 ]
@@ -314,3 +315,63 @@ def opportunity_cost(
             best, best_value = code, value
 
     return best, round(max(0.0, best_value - held_value), 6)
+
+
+def objective_valued(
+    predictions: Mapping[PlayerCode, PlayerPrediction],
+    *,
+    objective: ManagerObjective,
+    context: ObjectiveContext | None = None,
+) -> dict[PlayerCode, PlayerPrediction]:
+    """Re-price every prediction under the objective, for the search to consume.
+
+    **Why substitute the predictions rather than thread a scorer through the
+    search.** This is the same argument :func:`~xg_alonso.optimization.transfer.
+    horizon_valued` already makes, and it applies with more force here. A
+    transfer is chosen by scoring the eleven a squad would field, and that
+    scoring runs through ``starting_xi_points``, captaincy and the bench in
+    several places. Threading an objective through each of them would leave some
+    paths using it and others not — and the ones that did not would be exactly
+    the subtle cases, a captain chosen on raw points while the squad around him
+    was chosen on rank gain.
+
+    Swapping the number every one of those paths already reads is a single
+    substitution point that **cannot be partially applied**.
+
+    The breakdown is scaled with the total so the two still agree, which the
+    prediction contract enforces. ``expected_points_sd`` is left alone: the
+    objective changes how variance is *priced*, not how much of it there is, and
+    shrinking it here would double-count the risk preference.
+    """
+    ctx = context or ObjectiveContext()
+    out: dict[PlayerCode, PlayerPrediction] = {}
+
+    for code, prediction in predictions.items():
+        value = objective_value(prediction, objective=objective, context=ctx)
+        base = prediction.expected_points
+        factor = (value / base) if abs(base) > 1e-9 else 0.0
+        breakdown = prediction.breakdown
+        out[code] = prediction.model_copy(
+            update={
+                "breakdown": breakdown.model_copy(
+                    update={
+                        field_name: getattr(breakdown, field_name) * factor
+                        for field_name in (
+                            "appearance",
+                            "goals",
+                            "assists",
+                            "clean_sheets",
+                            "goals_conceded",
+                            "saves",
+                            "cards",
+                            "own_goals",
+                            "penalties",
+                            "defensive_contribution",
+                            "bonus",
+                        )
+                    }
+                ),
+                "expected_points": value,
+            }
+        )
+    return out

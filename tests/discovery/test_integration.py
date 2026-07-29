@@ -8,6 +8,7 @@ never traded away, and that a belief and the evidence stay separable.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -729,3 +730,134 @@ class TestPresets:
         # A label is decoration; the dominant features are the evidence.
         assert any(summary.dominant_features for summary in summaries)
         assert sum(summary.size for summary in summaries) == frame.height
+
+
+class TestObjectiveSubstitution:
+    """`objective_valued` is the single point the objective enters the search."""
+
+    def test_the_breakdown_still_sums_to_the_total(self) -> None:
+        """The prediction contract enforces this; a scaled total would be rejected."""
+        from xg_alonso.optimization.objective import objective_valued
+
+        predictions = {PlayerCode(1): _prediction(1, points=6.0, sd=2.0)}
+        priced = objective_valued(predictions, objective=objective_preset("mini_league_chase"))
+        result = priced[PlayerCode(1)]
+        assert result.breakdown.total == pytest.approx(result.expected_points)
+
+    def test_an_aggressive_objective_raises_a_volatile_player(self) -> None:
+        from xg_alonso.optimization.objective import objective_valued
+
+        volatile = {PlayerCode(1): _prediction(1, points=6.0, sd=4.0)}
+        chase = objective_valued(volatile, objective=objective_preset("mini_league_chase"))
+        protect = objective_valued(volatile, objective=objective_preset("rank_protection"))
+        assert chase[PlayerCode(1)].expected_points > 6.0
+        assert protect[PlayerCode(1)].expected_points < 6.0
+
+    def test_uncertainty_is_not_rescaled(self) -> None:
+        """The objective changes how variance is priced, not how much there is."""
+        from xg_alonso.optimization.objective import objective_valued
+
+        predictions = {PlayerCode(1): _prediction(1, points=6.0, sd=2.0)}
+        priced = objective_valued(predictions, objective=objective_preset("rank_protection"))
+        assert priced[PlayerCode(1)].expected_points_sd == 2.0
+
+
+class TestLocksAreUnbreakable:
+    """A lock is a filter, not a penalty a good enough alternative overcomes."""
+
+    def _rules(self) -> Any:
+        import json
+        from pathlib import Path
+
+        from xg_alonso.domain.rules import SquadRules
+
+        fixture = (
+            Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
+        )
+        return SquadRules.from_bootstrap(
+            json.loads(fixture.read_text()), version="2026-27", source_sha256="a" * 64
+        )
+
+    def test_a_held_player_is_never_ranked_however_good_the_alternative(self) -> None:
+        from xg_alonso.optimization.transfer import Candidate, rank_single_transfers
+
+        squad = _squad()
+        rules = self._rules()
+        held = squad.picks[0]
+
+        predictions = {
+            p.player_code: _prediction(int(p.player_code), points=1.0, sd=1.0, position=p.position)
+            for p in squad.picks
+        }
+        # A vastly better replacement in the same position, affordable.
+        replacement = _prediction(999, points=50.0, sd=1.0, position=held.position)
+        predictions[PlayerCode(999)] = replacement
+        candidates = [
+            Candidate(
+                player_code=PlayerCode(999),
+                position=held.position,
+                team_id=TeamId(19),
+                price=TenthsOfMillion(40),
+                prediction=replacement,
+            )
+        ]
+
+        unconstrained = rank_single_transfers(
+            squad, candidates=candidates, predictions=predictions, rules=rules
+        )
+        assert any(c.out_pick.player_code == held.player_code for c in unconstrained), (
+            "without the lock, selling him should be on the table"
+        )
+
+        sellable = frozenset(
+            p.player_code for p in squad.picks if p.player_code != held.player_code
+        )
+        constrained = rank_single_transfers(
+            squad,
+            candidates=candidates,
+            predictions=predictions,
+            rules=rules,
+            sellable=sellable,
+        )
+        assert not any(c.out_pick.player_code == held.player_code for c in constrained)
+
+    def test_a_held_player_still_appears_on_the_board_with_a_reason(self) -> None:
+        """ "Why not him?" must have an answer for every squad member."""
+        from xg_alonso.contracts.reason_codes import ReasonCode
+        from xg_alonso.optimization.transfer import build_transfer_board
+
+        squad = _squad()
+        rules = self._rules()
+        held = squad.picks[0]
+        predictions = {
+            p.player_code: _prediction(int(p.player_code), points=3.0, sd=1.0, position=p.position)
+            for p in squad.picks
+        }
+        sellable = frozenset(
+            p.player_code for p in squad.picks if p.player_code != held.player_code
+        )
+        board = build_transfer_board(
+            squad, candidates=[], predictions=predictions, rules=rules, sellable=sellable
+        )
+        entry = next(e for e in board.by_player if e.player_out == held.player_code)
+        assert entry.option is None
+        assert any(r.code is ReasonCode.CONSTRAINT_HELD for r in entry.reasons)
+        assert "your instruction" in entry.reasons[0].render()
+
+    def test_every_squad_member_still_appears(self) -> None:
+        from xg_alonso.optimization.transfer import build_transfer_board
+
+        squad = _squad()
+        rules = self._rules()
+        predictions = {
+            p.player_code: _prediction(int(p.player_code), points=3.0, sd=1.0, position=p.position)
+            for p in squad.picks
+        }
+        board = build_transfer_board(
+            squad,
+            candidates=[],
+            predictions=predictions,
+            rules=rules,
+            sellable=frozenset({squad.picks[0].player_code}),
+        )
+        assert len(board.by_player) == 15

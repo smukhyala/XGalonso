@@ -41,6 +41,17 @@ PLAYERS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "current_price": pl.Int64(),  # tenths of a million
     "status": pl.Utf8(),  # a=available, i=injured, s=suspended, u=unavailable, d=doubtful
     "chance_of_playing_next_round": pl.Int64(),
+    # Share of managers owning the player, as a percentage. Published on every
+    # element and previously dropped.
+    #
+    # It is not a nicety: an objective that seeks differentials or protects a
+    # rank is *defined* by ownership, and without this column those objectives
+    # would silently score every player identically on the term that
+    # distinguishes them. Nullable, because a preseason payload can omit it.
+    #
+    # **Not effective ownership.** EO folds in captaincy and is what actually
+    # moves rank; FPL does not publish it. Treated as a proxy everywhere.
+    "selected_by_percent": pl.Float64(),
     "available_time": _UTC,
 }
 

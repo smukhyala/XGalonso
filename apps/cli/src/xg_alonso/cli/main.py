@@ -2070,3 +2070,126 @@ def build_discovery_frame_command(
         f"Wrote {frame.height:,} rows x {frame.width} columns to {destination}",
         fg=typer.colors.GREEN,
     )
+
+
+@app.command(name="advise")
+def advise_command(
+    request: Annotated[str, typer.Argument(help="What you want, in plain English.")],
+    entry_id: Annotated[int, typer.Option("--entry", help="Public FPL entry id.")] = 0,
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    squad_file: Annotated[
+        Path | None,
+        typer.Option("--squad-file", help="Read the squad from a picks JSON file."),
+    ] = None,
+    model_path: Annotated[
+        Path | None, typer.Option("--model", help="Use trained component models.")
+    ] = None,
+    preset: Annotated[str, typer.Option("--preset", help="Objective to start from.")] = (
+        "expected_points"
+    ),
+) -> None:
+    """Recommend a transfer under your objective, constraints and beliefs.
+
+    The difference from `xg recommend`: that command answers "which transfer
+    gains the most expected points". This one answers "which transfer best
+    serves *what you are trying to do*" — and shows what your own instructions
+    cost you, separately from what the model thinks.
+    """
+    from xg_alonso.cli.pipeline import recommend_for_objective
+    from xg_alonso.domain.intent import build_name_index, compile_intent
+    from xg_alonso.prediction.inference import load_models
+
+    context = _load_context(data_root, parse_season(season))
+    state = _squad_state(context, entry_id, squad_file)
+
+    names = build_name_index(
+        {int(r["player_code"]): str(r["web_name"]) for r in context.players.iter_rows(named=True)}
+    )
+    intent = compile_intent(
+        request,
+        players=names,
+        base_preset=preset,
+        next_gameweek=int(state.gameweek),
+        current_squad=[int(p.player_code) for p in state.picks],
+    )
+    bundle = intent.bundle
+
+    typer.secho("Your request, as understood", bold=True)
+    typer.echo(f"  objective        {bundle.objective.id}")
+    typer.echo(
+        f"  risk             {bundle.objective.risk_preference.value} "
+        f"(variance term {bundle.objective.signed_uncertainty_penalty:+.2f})"
+    )
+    typer.echo(f"  horizon          {bundle.objective.planning_horizon} gameweek(s)")
+    typer.echo(f"  ownership        {bundle.objective.ownership_preference.value}")
+    typer.echo(f"  confidence       {intent.overall_confidence:.0%}")
+    for clause in intent.unparsed:
+        typer.secho(f"  not understood:  {clause}", fg=typer.colors.YELLOW)
+
+    models = None
+    if model_path is not None:
+        models = load_models(model_path).models
+
+    run_id = f"advise-{uuid.uuid4().hex[:12]}"
+    manifest = git_manifest("advise", run_id=run_id)
+
+    result = recommend_for_objective(
+        context=context,
+        squad=state,
+        bundle=bundle,
+        entry_id=EntryId(entry_id),
+        run_id=run_id,
+        code_version=manifest.git_commit,
+        generated_at=utc_now(),
+        models=models,
+    )
+
+    for problem in result.constraint_problems:
+        typer.secho(f"  ! {problem}", fg=typer.colors.RED)
+
+    names_by_code = context.player_names()
+    prices = {
+        PlayerCode(int(r["player_code"])): int(r["current_price"])
+        for r in context.players.iter_rows(named=True)
+    }
+
+    typer.secho("\nRecommendation", bold=True)
+    typer.echo(render_recommendation(result.raw, names=names_by_code, prices=prices))
+
+    if result.constraint_report.is_binding:
+        typer.secho("\nWhat your instructions changed", bold=True)
+        for line in result.constraint_report.explain():
+            typer.echo(f"  {line}")
+
+    if result.opportunity_costs:
+        typer.secho("\nWhat holding them cost", bold=True)
+        for held, alternative, forgone in result.opportunity_costs:
+            target = names_by_code.get(alternative, "?") if alternative else "nobody"
+            typer.echo(
+                f"  keeping {names_by_code.get(held, held)} gave up {forgone:.2f} "
+                f"projected points (best alternative: {target})"
+            )
+    elif result.constraint_report.locked_players:
+        typer.echo(
+            "\n  Holding your locked players cost nothing: no affordable alternative scored higher."
+        )
+
+    if result.adjusted is not None:
+        typer.secho("\nWith your beliefs applied", bold=True)
+        for adjustment in result.belief_adjustments:
+            typer.echo(
+                f"  {names_by_code.get(adjustment.player_code, '?')}: {adjustment.explain()}"
+            )
+        if result.beliefs_changed_the_answer:
+            typer.secho("  Your beliefs changed the recommendation:", fg=typer.colors.YELLOW)
+            typer.echo(render_recommendation(result.adjusted, names=names_by_code, prices=prices))
+        else:
+            typer.echo(
+                "  Your beliefs did not change the recommendation — they were "
+                "weighed and the move stands either way."
+            )
+        typer.secho(
+            "  Shown separately on purpose: a belief is your judgement, not evidence.",
+            fg=typer.colors.BLUE,
+        )
