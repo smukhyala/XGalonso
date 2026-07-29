@@ -44,6 +44,7 @@ import polars as pl
 from xg_alonso.contracts.folds import WalkForwardFold
 
 __all__ = [
+    "ALL_POSITIONS",
     "IMPORTANCE_SCHEMA_VERSION",
     "LABEL_TO_BREAKDOWN",
     "FeatureImportance",
@@ -54,16 +55,37 @@ __all__ = [
     "write_importance",
 ]
 
-IMPORTANCE_SCHEMA_VERSION: Final[str] = "importance_v1"
+IMPORTANCE_SCHEMA_VERSION: Final[str] = "importance_v2"
+"""Bumped from v1 when ``position`` joined the measurement.
+
+A v1 table has no position column. It is still readable — its rows load as the
+``ALL`` slice, which is exactly what they were — so an existing table degrades
+to "no positional detail" rather than failing to load."""
 
 #: Labels modelled as probabilities. Mirrors the trained module's own split;
 #: read from there rather than restated so the two cannot drift.
 _BINARY_LABELS: Final[frozenset[str]] = frozenset({"label_clean_sheets", "label_starts"})
 
 
+#: The slice covering every player, as opposed to one position's rows.
+ALL_POSITIONS: Final[str] = "ALL"
+
+
 @dataclass(frozen=True)
 class FeatureImportance:
-    """One feature's measured effect on one label, on one fold."""
+    """One feature's measured effect on one label, on one fold, for one position.
+
+    **Position is part of the measurement, not a display filter.** A global
+    ranking answers "what predicts a footballer's return", which is a question
+    nobody is asking. Minutes played dominates a striker's goals; for a
+    defender the same minutes matter through clean sheets, and a feature that
+    ranks third overall may rank first for goalkeepers and last for forwards.
+    Averaging those into one number does not describe any of them.
+
+    ``position`` is ``ALL`` for the pooled slice, which is kept because it is
+    the right denominator for "is this feature worth its place in the catalogue
+    at all".
+    """
 
     feature_name: str
     family: str
@@ -74,6 +96,17 @@ class FeatureImportance:
     mae_delta_std: float
     repeats: int
     degenerate_label: bool
+    position: str = ALL_POSITIONS
+    """Which players this measurement describes. Defaults to the pooled slice so
+    a v1 table and every existing call site keep their original meaning."""
+
+    rows_measured: int = 0
+    """How many validation rows the slice had.
+
+    Carried because a positional slice is small — goalkeepers are a twentieth of
+    the pool — and an importance measured on eighty rows deserves to be read
+    differently from one measured on eight thousand. Zero means unrecorded,
+    which is what a v1 table gives."""
 
     @property
     def mae_delta(self) -> float:
@@ -127,18 +160,24 @@ class ImportanceTable:
     close call.
     """
 
-    def by_feature(self) -> dict[str, float]:
+    def by_feature(self, position: str = ALL_POSITIONS) -> dict[str, float]:
         """Weighted overall importance per feature, averaged across folds.
 
         Each label's relative degradation is scaled by that label's contribution
         to expected points, so the result answers "which features move the
         number the product actually uses" rather than "which features move some
         component".
+
+        **One slice at a time, always.** A table holds the pooled rows and every
+        positional slice together, so an aggregate that ignored ``position``
+        would quietly average a goalkeeper's measurement with a striker's and
+        report the mean as importance. Defaults to the pooled slice, which is
+        what every existing caller meant.
         """
         totals: dict[str, float] = {}
         counts: dict[str, int] = {}
         for row in self.rows:
-            if row.degenerate_label:
+            if row.degenerate_label or row.position != position:
                 continue
             weight = self.label_weights.get(row.label, 0.0)
             totals[row.feature_name] = (
@@ -147,7 +186,7 @@ class ImportanceTable:
             counts[row.feature_name] = counts.get(row.feature_name, 0) + 1
         return {name: totals[name] / counts[name] for name in totals if counts[name] > 0}
 
-    def by_family(self) -> dict[str, float]:
+    def by_family(self, position: str = ALL_POSITIONS) -> dict[str, float]:
         """Weighted importance summed within each catalogue family.
 
         The honest complement to the flat ranking. Correlated features inside a
@@ -155,7 +194,7 @@ class ImportanceTable:
         total is what says whether that *kind* of feature matters.
         """
         totals: dict[str, float] = {}
-        per_feature = self.by_feature()
+        per_feature = self.by_feature(position)
         family_of = {row.feature_name: row.family for row in self.rows}
         for name, value in per_feature.items():
             family = family_of.get(name, "unknown")
@@ -166,7 +205,14 @@ class ImportanceTable:
         """How many distinct folds contributed rows."""
         return len({row.fold_index for row in self.rows})
 
-    def stability(self) -> dict[str, float]:
+    def positions_measured(self) -> tuple[str, ...]:
+        """Slices present, pooled first then positions in a stable order."""
+        found = {row.position for row in self.rows}
+        ordered = [ALL_POSITIONS] if ALL_POSITIONS in found else []
+        ordered.extend(sorted(found - {ALL_POSITIONS}))
+        return tuple(ordered)
+
+    def stability(self, position: str = ALL_POSITIONS) -> dict[str, float]:
         """Standard deviation of each feature's rank across folds.
 
         A feature that ranks third on one fold and hundredth on the next has not
@@ -186,24 +232,27 @@ class ImportanceTable:
 
         grouped: dict[tuple[int, str], list[tuple[str, float]]] = {}
         for row in self.rows:
-            if row.degenerate_label:
+            # Same reason as `by_feature`: ranking a pooled row against a
+            # positional one would measure the difference between slices and
+            # report it as instability across folds.
+            if row.degenerate_label or row.position != position:
                 continue
             grouped.setdefault((row.fold_index, row.label), []).append(
                 (row.feature_name, row.relative_delta)
             )
 
-        # rank[label][feature] = that feature's position on each fold
+        # rank[label][feature] = where that feature placed on each fold
         per_label: dict[str, dict[str, list[int]]] = {}
         for (_, label), entries in grouped.items():
             entries.sort(key=lambda pair: -pair[1])
-            for position, (name, _) in enumerate(entries):
-                per_label.setdefault(label, {}).setdefault(name, []).append(position)
+            for rank, (name, _) in enumerate(entries):
+                per_label.setdefault(label, {}).setdefault(name, []).append(rank)
 
         spreads: dict[str, list[float]] = {}
         for ranks_by_feature in per_label.values():
-            for name, positions in ranks_by_feature.items():
-                if len(positions) > 1:
-                    spreads.setdefault(name, []).append(float(np.std(positions)))
+            for name, ranks in ranks_by_feature.items():
+                if len(ranks) > 1:
+                    spreads.setdefault(name, []).append(float(np.std(ranks)))
 
         return {name: sum(values) / len(values) for name, values in spreads.items() if values}
 
@@ -219,6 +268,8 @@ class ImportanceTable:
                     "family": pl.Utf8,
                     "label": pl.Utf8,
                     "fold_index": pl.Int64,
+                    "position": pl.Utf8,
+                    "rows_measured": pl.Int64,
                     "baseline_mae": pl.Float64,
                     "permuted_mae": pl.Float64,
                     "mae_delta": pl.Float64,
@@ -239,6 +290,8 @@ class ImportanceTable:
                 "family": [r.family for r in self.rows],
                 "label": [r.label for r in self.rows],
                 "fold_index": [r.fold_index for r in self.rows],
+                "position": [r.position for r in self.rows],
+                "rows_measured": [r.rows_measured for r in self.rows],
                 "baseline_mae": [r.baseline_mae for r in self.rows],
                 "permuted_mae": [r.permuted_mae for r in self.rows],
                 "mae_delta": [r.mae_delta for r in self.rows],
@@ -337,6 +390,7 @@ def permutation_importance(
     n_repeats: int = 5,
     seed: int = 20260727,
     features: tuple[str, ...] | None = None,
+    position: str = ALL_POSITIONS,
 ) -> ImportanceTable:
     """Measure how much each feature is worth to each component model.
 
@@ -353,6 +407,9 @@ def permutation_importance(
         n_repeats: Shuffles per feature. The spread across repeats is what
             separates a real effect from a lucky permutation.
         seed: Fixed, so the same inputs give the same table.
+        position: Which slice ``validation`` represents. The caller filters the
+            frame; this only labels the result, so the two cannot disagree about
+            what was measured.
         features: Which features to measure. Defaults to every feature the
             models were fitted on.
 
@@ -373,7 +430,7 @@ def permutation_importance(
 
     degenerate = set(models.degenerate_labels())
     base_matrix = _matrix(validation, columns)
-    index_of = {name: position for position, name in enumerate(columns)}
+    index_of = {name: column for column, name in enumerate(columns)}
     generator = np.random.default_rng(seed)
 
     rows: list[FeatureImportance] = []
@@ -386,15 +443,15 @@ def permutation_importance(
         baseline = float(np.mean(np.abs(_predict(model, label, base_matrix) - truth)))
 
         for feature in measured:
-            position = index_of[feature]
-            original = base_matrix[:, position].copy()
+            column = index_of[feature]
+            original = base_matrix[:, column].copy()
 
             deltas: list[float] = []
             for _ in range(n_repeats):
-                base_matrix[:, position] = generator.permutation(original)
+                base_matrix[:, column] = generator.permutation(original)
                 permuted = float(np.mean(np.abs(_predict(model, label, base_matrix) - truth)))
                 deltas.append(permuted - baseline)
-            base_matrix[:, position] = original
+            base_matrix[:, column] = original
 
             rows.append(
                 FeatureImportance(
@@ -407,6 +464,8 @@ def permutation_importance(
                     mae_delta_std=float(np.std(deltas)),
                     repeats=n_repeats,
                     degenerate_label=label in degenerate,
+                    position=position,
+                    rows_measured=validation.height,
                 )
             )
 
@@ -427,10 +486,19 @@ def write_importance(table: ImportanceTable, path: Path) -> Path:
 
 
 def load_importance(path: Path) -> pl.DataFrame:
-    """Read a persisted table.
+    """Read a persisted table, tolerating one written before positions existed.
 
     Returns the frame rather than the dataclass because every consumer so far —
     the API and the CLI report — filters and aggregates, and rebuilding objects
     only to tear them down again would buy nothing.
+
+    A v1 table has no ``position`` column. Its rows *were* the pooled slice, so
+    they are labelled ``ALL`` rather than null: null would suggest the slice is
+    unknown, when it is known exactly.
     """
-    return pl.read_parquet(path)
+    frame = pl.read_parquet(path)
+    if "position" not in frame.columns:
+        frame = frame.with_columns(pl.lit(ALL_POSITIONS).alias("position"))
+    if "rows_measured" not in frame.columns:
+        frame = frame.with_columns(pl.lit(0, dtype=pl.Int64).alias("rows_measured"))
+    return frame

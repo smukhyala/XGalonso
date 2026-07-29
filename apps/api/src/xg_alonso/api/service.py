@@ -53,6 +53,7 @@ from xg_alonso.contracts.reason_codes import Reason
 from xg_alonso.contracts.recommendation import TransferOption
 from xg_alonso.contracts.squad import SquadState
 from xg_alonso.evaluation.importance import load_importance
+from xg_alonso.explanations.context import build_fixture_run, build_season_lines
 from xg_alonso.explanations.derivation import derive_points
 from xg_alonso.explanations.history import build_history_notes
 from xg_alonso.explanations.lineup_diff import compare_lineups, selection_from_starters
@@ -367,10 +368,17 @@ class DecisionService:
         derivation: list[Any] = []
         horizon: list[Any] = []
         horizon_total: float | None = None
+        context = None
         if with_depth:
             derivation, _ = self._derivation_out(prediction)
             horizon, horizon_total = self._horizon_out(
                 prediction.from_gameweek, prediction.player_code, self._HORIZON_WEEKS
+            )
+            context = self._context_out(
+                player_code=int(prediction.player_code),
+                position=prediction.position.value,
+                team_id=int(row["team_id"]),
+                gameweek=prediction.from_gameweek,
             )
         return PlayerSummary(
             player_code=int(prediction.player_code),
@@ -387,6 +395,76 @@ class DecisionService:
             derivation=derivation,
             horizon=horizon,
             horizon_total=horizon_total,
+            context=context,
+        )
+
+    def _context_out(
+        self, *, player_code: int, position: str, team_id: int, gameweek: GameweekId
+    ) -> Any:
+        """Prior seasons and the upcoming run, as the API shape.
+
+        Built only for the deep payload. On a 600-row board this would be 600
+        multi-season aggregations to render text nobody has scrolled to yet.
+        """
+        from xg_alonso.api.main import (
+            FixtureRunOut,
+            PlayerContextOut,
+            ScheduledFixtureOut,
+            SeasonLineOut,
+        )
+
+        stats = self._context.player_stats
+        cutoff = self._context.deadline_for(gameweek)
+        seasons = build_season_lines(stats, player_code=player_code, cutoff=cutoff)
+
+        team_names = {
+            int(row["team_id"]): str(row["short_name"] or row["name"])
+            for row in self._context.teams.iter_rows(named=True)
+        }
+        run = build_fixture_run(
+            self._context.fixtures,
+            team_id=team_id,
+            from_gameweek=int(gameweek),
+            team_names=team_names,
+        )
+
+        return PlayerContextOut(
+            seasons=[
+                SeasonLineOut(
+                    season=line.season,
+                    appearances=line.appearances,
+                    minutes=line.minutes,
+                    goals=line.goals,
+                    assists=line.assists,
+                    clean_sheets=line.clean_sheets,
+                    points=line.points,
+                    expected_goals=line.expected_goals,
+                    expected_assists=line.expected_assists,
+                    per_90=line.per_90,
+                    points_per_appearance=line.points_per_appearance,
+                    sentence=line.sentence(position),
+                )
+                for line in seasons
+            ],
+            run=FixtureRunOut(
+                fixtures=[
+                    ScheduledFixtureOut(
+                        gameweek=fixture.gameweek,
+                        opponent=fixture.opponent,
+                        is_home=fixture.is_home,
+                        difficulty=fixture.difficulty,
+                        label=fixture.label,
+                    )
+                    for fixture in run.fixtures
+                ],
+                mean_difficulty=run.mean_difficulty,
+                home_count=run.home_count,
+                blanks=list(run.blanks),
+                doubles=list(run.doubles),
+                sentence=run.sentence(),
+            )
+            if run.fixtures
+            else None,
         )
 
     # -- endpoints --------------------------------------------------------
@@ -1098,15 +1176,21 @@ class DecisionService:
         *,
         label: str | None = None,
         family: str | None = None,
+        position: str | None = None,
         limit: int = 60,
     ) -> FeatureImportanceResponse:
-        """Serve the measured importance table.
+        """Serve the measured importance table, pooled or for one position.
 
         Reads the parquet `xg importance` writes rather than computing on
         demand: a permutation run is minutes of work over 184 features and nine
         labels, and doing it inside a request would make the page look broken.
+
+        ``position`` defaults to the pooled slice. It is a filter over rows that
+        were *measured* separately, never a reweighting of pooled numbers — a
+        defender's ranking comes from permuting features on defenders' rows.
         """
         from xg_alonso.api.main import FeatureImportanceOut, FeatureImportanceResponse
+        from xg_alonso.evaluation.importance import ALL_POSITIONS
 
         path = self._config.data_root / "gold" / "feature_importance.parquet"
         if not path.exists():
@@ -1123,14 +1207,24 @@ class DecisionService:
             for row in frame.select(["label", "label_weight"]).unique().iter_rows(named=True)
         }
 
+        positions = sorted(frame["position"].unique().drop_nulls().to_list())
+        wanted_position = position or ALL_POSITIONS
+
         scoped = frame.filter(~pl.col("degenerate_label"))
+        # Filter to one slice *before* anything else. Without this every
+        # aggregate below would average a defender's measurement together with a
+        # striker's and call the result importance.
+        scoped = scoped.filter(pl.col("position") == wanted_position)
         if label is not None:
             scoped = scoped.filter(pl.col("label") == label)
         if family is not None:
             scoped = scoped.filter(pl.col("family") == family)
 
         if scoped.is_empty():
-            raise LookupError(f"no importance rows for label={label!r} family={family!r}")
+            raise LookupError(
+                f"no importance rows for position={wanted_position!r} "
+                f"label={label!r} family={family!r}"
+            )
 
         # A single label is already a like-for-like comparison, so weighting it
         # would only rescale every row by the same constant and make the numbers
@@ -1181,14 +1275,25 @@ class DecisionService:
             degenerate_labels=degenerate,
             labels=labels,
             label_weights=weights,
-            folds_measured=int(frame["fold_index"].n_unique()),
-            features_measured=int(frame["feature_name"].n_unique()),
+            folds_measured=int(scoped["fold_index"].n_unique()),
+            features_measured=int(scoped["feature_name"].n_unique()),
+            position=wanted_position,
+            positions=positions,
+            rows_measured=self._slice_rows(scoped),
             features_with_no_effect=int(ranked.filter(pl.col("importance") <= 0.0).height),
             catalogue_version=str(frame["catalogue_version"][0]),
             model_fingerprint=fingerprint,
             computed_at=frame["computed_at"][0],
             stale=(self._models is not None and self._models.fingerprint() != fingerprint),
         )
+
+    @staticmethod
+    def _slice_rows(scoped: pl.DataFrame) -> int:
+        """Validation rows behind a slice, or 0 when the table predates the field."""
+        if "rows_measured" not in scoped.columns:
+            return 0
+        counts = scoped["rows_measured"].cast(pl.Int64, strict=False).drop_nulls().to_list()
+        return int(max(counts)) if counts else 0
 
     @staticmethod
     def _rank_stability(scoped: pl.DataFrame) -> dict[str, float]:

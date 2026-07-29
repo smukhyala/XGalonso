@@ -10,12 +10,14 @@ bookkeeping around that.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import numpy as np
 import polars as pl
 import pytest
 
 from xg_alonso.evaluation.importance import (
+    ALL_POSITIONS,
     IMPORTANCE_SCHEMA_VERSION,
     ImportanceTable,
     label_weights_from_predictions,
@@ -227,3 +229,73 @@ class TestPersistence:
         )
         path = write_importance(empty, tmp_path / "empty.parquet")
         assert load_importance(path).height == 0
+
+
+class TestPositionalSlices:
+    """A ranking must describe the players it was measured on, and say which."""
+
+    def test_the_pooled_slice_is_the_default(self) -> None:
+        frame = _frame()
+        table = _table(frame, _models(frame))
+        assert {row.position for row in table.rows} == {ALL_POSITIONS}
+
+    def test_a_slice_records_which_position_it_describes(self) -> None:
+        frame = _frame()
+        table = permutation_importance(
+            _models(frame),
+            frame,
+            label_columns=("label_goals_scored",),
+            families={"signal": "player_rate", "noise": "player_rate"},
+            label_weights={"label_goals_scored": 1.0},
+            catalogue_version="test_v1",
+            computed_at=COMPUTED_AT,
+            n_repeats=5,
+            seed=11,
+            position="DEF",
+        )
+        assert {row.position for row in table.rows} == {"DEF"}
+        assert all(row.rows_measured == frame.height for row in table.rows)
+
+    def test_a_slice_can_rank_features_differently_from_the_pool(self) -> None:
+        """The reason positions are measured rather than reweighted.
+
+        The pooled frame is built so `signal` predicts the label. Half of it is
+        relabelled into a slice where that relationship is destroyed, so the
+        feature that leads the pool must not lead the slice. If a slice could
+        only ever reproduce the pooled order there would be no point measuring
+        one.
+        """
+        frame = _frame()
+        models = _models(frame)
+
+        scrambled = frame.with_columns(
+            pl.col("signal").shuffle(seed=7).alias("signal"),
+        )
+        pooled = _table(frame, models).by_feature()
+        sliced = permutation_importance(
+            models,
+            scrambled,
+            label_columns=("label_goals_scored",),
+            families={"signal": "player_rate", "noise": "player_rate"},
+            label_weights={"label_goals_scored": 1.0},
+            catalogue_version="test_v1",
+            computed_at=COMPUTED_AT,
+            n_repeats=5,
+            seed=11,
+            position="GKP",
+        ).by_feature("GKP")
+
+        assert pooled["signal"] > pooled["noise"]
+        assert sliced["signal"] < pooled["signal"]
+
+    def test_a_v1_table_loads_as_the_pooled_slice(self, tmp_path: Path) -> None:
+        """An older table has no position column; its rows *were* the pool."""
+        frame = _frame()
+        table = _table(frame, _models(frame))
+        legacy = table.to_frame().drop(["position", "rows_measured"])
+        destination = tmp_path / "v1.parquet"
+        legacy.write_parquet(destination)
+
+        loaded = load_importance(destination)
+        assert loaded["position"].unique().to_list() == [ALL_POSITIONS]
+        assert loaded["rows_measured"].unique().to_list() == [0]

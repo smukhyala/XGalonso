@@ -1662,6 +1662,7 @@ def importance(
     """
     from xg_alonso.contracts.provenance import utc_now
     from xg_alonso.evaluation.importance import (
+        ALL_POSITIONS,
         ImportanceTable,
         label_weights_from_predictions,
         permutation_importance,
@@ -1739,6 +1740,38 @@ def importance(
         f"{len(models.models)} labels x {repeats} repeats x {len(windows)} fold(s) ..."
     )
     computed_at = utc_now()
+
+    # Measured once pooled, then once per position.
+    #
+    # The pooled slice answers "does this feature earn its place in the
+    # catalogue". The positional slices answer the question a manager actually
+    # asks, which is different for every position: minutes drives a striker's
+    # goals, but for a defender the same minutes matter through clean sheets,
+    # and a feature that ranks third overall can rank first for goalkeepers and
+    # last for forwards. Averaging those into one ranking describes none of them.
+    #
+    # A slice with too few rows is skipped rather than measured, because
+    # permutation importance on a handful of rows is noise wearing a number's
+    # clothes.
+    min_rows_for_a_slice = 150
+    slices: list[tuple[str, int, pl.DataFrame]] = [
+        (ALL_POSITIONS, fold_index, rows) for fold_index, rows in windows
+    ]
+    if "position" in data.frame.columns:
+        for fold_index, rows in windows:
+            if "position" not in rows.columns:
+                continue
+            for position in sorted(rows["position"].unique().drop_nulls().to_list()):
+                subset = rows.filter(pl.col("position") == position)
+                if subset.height >= min_rows_for_a_slice:
+                    slices.append((str(position), fold_index, subset))
+
+    measured_positions = sorted({name for name, _, _ in slices if name != ALL_POSITIONS})
+    if measured_positions:
+        typer.echo(f"  positional slices: {', '.join(measured_positions)}")
+    else:
+        typer.echo("  no positional slice had enough rows; measuring pooled only")
+
     tables = [
         permutation_importance(
             models,
@@ -1750,8 +1783,9 @@ def importance(
             computed_at=computed_at,
             n_repeats=repeats,
             fold_index=fold_index,
+            position=position,
         )
-        for fold_index, rows in windows
+        for position, fold_index, rows in slices
     ]
     table = ImportanceTable(
         rows=tuple(row for measured in tables for row in measured.rows),

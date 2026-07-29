@@ -120,6 +120,65 @@ class GameweekProjectionOut(BaseModel):
     )
 
 
+class SeasonLineOut(BaseModel):
+    """One completed season, counted from played matches."""
+
+    season: str
+    appearances: int
+    minutes: int
+    goals: int
+    assists: int
+    clean_sheets: int
+    points: int
+    expected_goals: float | None = None
+    expected_assists: float | None = None
+    per_90: float | None = Field(
+        default=None,
+        description=(
+            "Goal involvements per 90, withheld below a minutes floor. Null "
+            "means the sample cannot support a rate, not that the rate is zero."
+        ),
+    )
+    points_per_appearance: float | None = None
+    sentence: str = Field(description="The line as prose, framed for the position.")
+
+
+class ScheduledFixtureOut(BaseModel):
+    """One upcoming match from the published schedule."""
+
+    gameweek: int
+    opponent: str
+    is_home: bool
+    difficulty: int | None = Field(
+        default=None,
+        description="FPL's published 1-5 rating. Null preseason, when it is unset.",
+    )
+    label: str = Field(description="e.g. 'BUR (H)'")
+
+
+class FixtureRunOut(BaseModel):
+    """The next few fixtures, characterised."""
+
+    fixtures: list[ScheduledFixtureOut] = Field(default_factory=list)
+    mean_difficulty: float | None = None
+    home_count: int = 0
+    blanks: list[int] = Field(default_factory=list)
+    doubles: list[int] = Field(default_factory=list)
+    sentence: str = ""
+
+
+class PlayerContextOut(BaseModel):
+    """Where a player is coming from and what he is walking into.
+
+    Everything here is retrieved, never modelled — a season line is a sum over
+    matches that happened and a fixture run is the published schedule. It sits
+    beside modelled numbers precisely so the two can be told apart.
+    """
+
+    seasons: list[SeasonLineOut] = Field(default_factory=list)
+    run: FixtureRunOut | None = None
+
+
 class PlayerSummary(BaseModel):
     player_code: int
     name: str
@@ -146,6 +205,13 @@ class PlayerSummary(BaseModel):
     horizon_total: float | None = Field(
         default=None,
         description="Discounted value across the horizon, comparable to a single gameweek.",
+    )
+    context: PlayerContextOut | None = Field(
+        default=None,
+        description=(
+            "Prior-season output and the upcoming fixture run. Absent on the "
+            "shallow payload, where it would be a per-player query nobody reads."
+        ),
     )
 
 
@@ -409,6 +475,25 @@ class FeatureImportanceResponse(BaseModel):
     folds_measured: int
     features_measured: int
     features_with_no_effect: int
+    position: str = Field(
+        default="ALL",
+        description="Which slice these numbers describe. ALL is the pooled measurement.",
+    )
+    positions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Slices present in the table. A table computed before positions "
+            "were measured offers ALL only."
+        ),
+    )
+    rows_measured: int = Field(
+        default=0,
+        description=(
+            "Validation rows behind this slice. Carried because a positional "
+            "slice is small, and importance measured on eighty rows should not "
+            "read the same as one measured on eight thousand."
+        ),
+    )
     catalogue_version: str
     model_fingerprint: str
     computed_at: datetime
@@ -511,6 +596,10 @@ def feature_importance(
     service: ServiceDep,
     label: Annotated[str | None, Query(description="Restrict to one component label.")] = None,
     family: Annotated[str | None, Query(description="Restrict to one catalogue family.")] = None,
+    position: Annotated[
+        str | None,
+        Query(description="GKP, DEF, MID, FWD, or ALL for the pooled slice."),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 60,
 ) -> FeatureImportanceResponse:
     """Which features actually earn their place, measured out of sample.
@@ -520,7 +609,9 @@ def feature_importance(
     indistinguishable from "no feature matters".
     """
     try:
-        return service.feature_importance(label=label, family=family, limit=limit)
+        return service.feature_importance(
+            label=label, family=family, position=position, limit=limit
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
