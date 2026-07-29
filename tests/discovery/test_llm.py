@@ -20,6 +20,7 @@ from xg_alonso.discovery.llm import (
     LlmProposal,
     LlmUnavailableError,
     _compile_proposals,
+    api_key_origin,
     generate_with_llm,
     load_api_key,
 )
@@ -182,3 +183,109 @@ class TestCredentialHandling:
         env = tmp_path / ".env"
         env.write_text("SOMETHING_ELSE=1\n")
         assert load_api_key(env_file=env) is None
+
+    def test_walks_up_to_find_a_key_a_worktree_does_not_have(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A git worktree gets its own untracked files; the key lives up the tree.
+
+        Without the upward walk, a key written to the main checkout is invisible
+        from a worktree and the failure looks like a bad credential rather than a
+        bad path.
+        """
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=from-the-repo-root\n")
+        nested = tmp_path / ".claude" / "worktrees" / "feature"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+
+        assert load_api_key() == "from-the-repo-root"
+        assert api_key_origin() == str(tmp_path / ".env")
+
+    def test_a_nearer_dotenv_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=outer\n")
+        nested = tmp_path / "inner"
+        nested.mkdir()
+        (nested / ".env").write_text("ANTHROPIC_API_KEY=inner\n")
+        monkeypatch.chdir(nested)
+
+        assert load_api_key() == "inner"
+
+    def test_a_dotenv_without_the_key_does_not_end_the_search(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A .env holding unrelated settings must not mask one holding the key."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=outer\n")
+        nested = tmp_path / "inner"
+        nested.mkdir()
+        (nested / ".env").write_text("UNRELATED=1\n")
+        monkeypatch.chdir(nested)
+
+        assert load_api_key() == "outer"
+
+    def test_the_origin_is_a_path_never_the_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        env = tmp_path / ".env"
+        env.write_text("ANTHROPIC_API_KEY=sk-ant-secret\n")
+        origin = api_key_origin(env_file=env)
+        assert origin == str(env)
+        assert "sk-ant-secret" not in (origin or "")
+
+
+class TestBudgetSplit:
+    """The cap must not silently discard the stream that costs money."""
+
+    @staticmethod
+    def _fake(names: list[str]) -> list[object]:
+        return [object() for _ in names]
+
+    def test_deterministic_only_is_truncated_and_counted(self) -> None:
+        from xg_alonso.discovery.experiment import split_budget
+
+        kept, dropped = split_budget(self._fake(list("abcdef")), [], limit=4)  # type: ignore[arg-type]
+        assert len(kept) == 4
+        assert dropped == 2
+
+    def test_llm_proposals_survive_a_full_deterministic_pool(self) -> None:
+        """The regression: appending then truncating dropped these entirely."""
+        from xg_alonso.discovery.experiment import split_budget
+
+        deterministic = self._fake(list("abcdefghij"))
+        from_llm = self._fake(["w", "x", "y", "z"])
+        kept, dropped = split_budget(deterministic, from_llm, limit=10)  # type: ignore[arg-type]
+
+        assert len(kept) == 10
+        survivors = [item for item in from_llm if item in kept]
+        assert len(survivors) == 4, "an LLM proposal must reach compilation"
+        assert dropped == 4
+
+    def test_reserves_no_more_than_half_the_budget(self) -> None:
+        """The model advises; it does not get to crowd out the measured pool."""
+        from xg_alonso.discovery.experiment import split_budget
+
+        deterministic = self._fake(list("abcdefgh"))
+        from_llm = self._fake(list("stuvwxyz"))
+        kept, _ = split_budget(deterministic, from_llm, limit=8)  # type: ignore[arg-type]
+
+        from_model = sum(1 for item in kept if item in from_llm)
+        assert from_model == 4
+        assert sum(1 for item in kept if item in deterministic) == 4
+
+    def test_a_small_budget_still_admits_one_llm_proposal(self) -> None:
+        from xg_alonso.discovery.experiment import split_budget
+
+        from_llm = self._fake(["x", "y"])
+        kept, _ = split_budget(self._fake(["a"]), from_llm, limit=1)  # type: ignore[arg-type]
+        assert len(kept) == 1
+        assert kept[0] in from_llm
+
+    def test_everything_is_dropped_and_counted_at_zero_budget(self) -> None:
+        from xg_alonso.discovery.experiment import split_budget
+
+        kept, dropped = split_budget(self._fake(["a", "b"]), self._fake(["x"]), limit=0)  # type: ignore[arg-type]
+        assert kept == []
+        assert dropped == 3

@@ -57,9 +57,30 @@ model's good behaviour — it is that **the model can only emit data**:
   way, and a missing key, missing SDK or failed call degrades to "no extra
   proposals" rather than breaking the run.
 
+- The **budget is split, not concatenated**. Appending the model's proposals to
+  the deterministic pool and truncating from the front discards them entirely
+  whenever the deterministic generators already fill the quota — the common
+  case — so `--llm` would pay for a call and contribute nothing, silently.
+  `split_budget` reserves up to half the budget for the model, and reports the
+  count it had to drop rather than letting a cap read as "everything was tried".
+
 Enable with `xg discover ... --llm` and an `ANTHROPIC_API_KEY` in the
-environment or in a `.env` at the repo root. Install the optional extra with
+environment or in a `.env`. Install the optional extra with
 `uv sync --extra llm`.
+
+The key is resolved by walking **up** from the working directory to the nearest
+`.env` that defines it. That matters in a git worktree, which gets its own copy
+of untracked files: a key written to the main checkout is otherwise invisible,
+and a stale `.env` left in the worktree shadows it silently — producing a 401
+that looks like a bad credential rather than a bad path. `api_key_origin()`
+reports which file was read, so that failure is one line away from diagnosed.
+
+Verified live on 2026-07-29 against `claude-opus-5`: four proposals returned,
+all four parsed, all four passed static validation against the real schema and
+forbidden-column list, all four were measured over five walk-forward folds — and
+**none was accepted**. Two were marked `revise` and two `rejected`; the four
+accepted features that run were all deterministic. That is the design working:
+the model proposes, the measurement decides.
 
 **Every relationship reported is a predictive association.** No causal claim is
 made anywhere in the output vocabulary. A hypothesis's `football_rationale` is a

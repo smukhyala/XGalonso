@@ -92,6 +92,7 @@ __all__ = [
     "ExperimentConfig",
     "residual_weakness",
     "run_discovery",
+    "split_budget",
 ]
 
 #: Columns a discovered feature may never read, because they are the outcome.
@@ -332,21 +333,28 @@ def run_discovery(
             limit=max(1, settings.max_hypotheses // 2),
         )
     )
+    from_llm: list[SeededHypothesis] = []
     if settings.use_llm:
-        proposals.extend(
-            _llm_proposals(
-                bundle=bundle,
-                training=working,
-                player_stats=player_stats,
-                weak=weak,
-                existing=[p.program.name for p in proposals],
-                registry=registry,
-                settings=settings,
-                announce=announce,
-            )
+        from_llm = _llm_proposals(
+            bundle=bundle,
+            training=working,
+            player_stats=player_stats,
+            weak=weak,
+            existing=[p.program.name for p in proposals],
+            registry=registry,
+            settings=settings,
+            announce=announce,
         )
 
-    proposals = proposals[: settings.max_hypotheses]
+    proposals, dropped = split_budget(proposals, from_llm, limit=settings.max_hypotheses)
+
+    # A cap that silently drops candidates reads downstream as "everything was
+    # tried and this is what survived", which is a different claim.
+    if dropped:
+        announce(
+            ExperimentStage.VALIDATING,
+            f"budget of {settings.max_hypotheses} dropped {dropped} further proposal(s)",
+        )
 
     # --- compile, validate, compute ---------------------------------------
     announce(ExperimentStage.COMPUTING_FEATURES, f"compiling {len(proposals)} programs")
@@ -776,6 +784,39 @@ def _lessons(
             )
         )
     return out
+
+
+def split_budget(
+    deterministic: Sequence[SeededHypothesis],
+    from_llm: Sequence[SeededHypothesis],
+    *,
+    limit: int,
+) -> tuple[list[SeededHypothesis], int]:
+    """Fit two proposal streams into one budget, and report what did not fit.
+
+    Concatenating the streams and truncating from the front discards the model's
+    proposals entirely whenever the deterministic generators already fill the
+    quota — which is the common case, so ``use_llm`` would pay for an API call
+    and contribute nothing, silently. Reserving up to half the budget means an
+    LLM proposal competes with the deterministic ones on measured value, which
+    is the only place it should compete at all.
+
+    Returns the kept proposals and the number dropped. The count exists because
+    a silent cap reads downstream as "everything was tried and this is what
+    survived", which is a different claim.
+    """
+    if limit <= 0:
+        return [], len(deterministic) + len(from_llm)
+
+    if not from_llm:
+        kept = list(deterministic[:limit])
+        return kept, len(deterministic) - len(kept)
+
+    reserved = min(len(from_llm), max(1, limit // 2))
+    kept_llm = list(from_llm[:reserved])
+    kept_deterministic = list(deterministic[: max(0, limit - len(kept_llm))])
+    dropped = (len(deterministic) - len(kept_deterministic)) + (len(from_llm) - len(kept_llm))
+    return [*kept_deterministic, *kept_llm], dropped
 
 
 def _llm_proposals(

@@ -52,6 +52,7 @@ __all__ = [
     "LlmProposal",
     "LlmProposalBatch",
     "LlmUnavailableError",
+    "api_key_origin",
     "generate_with_llm",
     "load_api_key",
 ]
@@ -72,25 +73,14 @@ class LlmUnavailableError(RuntimeError):
     """
 
 
-def load_api_key(*, env_file: Path | None = None) -> str | None:
-    """Find an Anthropic API key, from the environment or a local ``.env``.
-
-    The SDK reads ``ANTHROPIC_API_KEY`` from the environment and does not parse
-    ``.env`` files, so this bridges the gap without taking a dependency on
-    ``python-dotenv`` for what is ten lines of parsing.
-
-    Returns ``None`` when no key is found. **Never logs or returns the key's
-    value anywhere else** — it is passed straight to the client.
-    """
-    from_env = os.environ.get("ANTHROPIC_API_KEY")
-    if from_env:
-        return from_env
-
-    candidate = env_file or Path(".env")
-    if not candidate.exists():
+def _read_key(path: Path) -> str | None:
+    """Extract ``ANTHROPIC_API_KEY`` from one ``.env`` file, if it defines one."""
+    try:
+        text = path.read_text()
+    except OSError:
         return None
 
-    for line in candidate.read_text().splitlines():
+    for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
@@ -98,6 +88,70 @@ def load_api_key(*, env_file: Path | None = None) -> str | None:
         if name.strip() == "ANTHROPIC_API_KEY":
             return value.strip().strip("'\"") or None
     return None
+
+
+def _find_key(env_file: Path | None = None) -> tuple[str, str] | None:
+    """Locate a key and record where it came from.
+
+    Search order is environment, then the nearest ``.env`` that actually
+    *defines* the key, walking upward from the working directory.
+
+    The upward walk is not a convenience. A git worktree gets its own copy of
+    untracked files, so a key written to the main checkout is invisible from a
+    worktree — and a *stale* ``.env`` left behind in the worktree shadows the
+    real one silently, producing a 401 that looks like a bad credential rather
+    than a bad path. Walking up means a worktree with no ``.env`` of its own
+    inherits the repository's.
+
+    A file that exists but defines no key is skipped rather than ending the
+    search, since a ``.env`` holding unrelated settings should not mask one that
+    holds the key.
+
+    Returns ``(key, origin)`` or ``None``. The origin is a path or the word
+    ``environment`` — never the key itself.
+    """
+    from_env = os.environ.get("ANTHROPIC_API_KEY")
+    if from_env:
+        return from_env, "environment"
+
+    if env_file is not None:
+        key = _read_key(env_file)
+        return (key, str(env_file)) if key else None
+
+    start = Path.cwd().resolve()
+    for directory in (start, *start.parents):
+        candidate = directory / ".env"
+        if candidate.is_file():
+            key = _read_key(candidate)
+            if key:
+                return key, str(candidate)
+    return None
+
+
+def load_api_key(*, env_file: Path | None = None) -> str | None:
+    """Find an Anthropic API key, from the environment or a nearby ``.env``.
+
+    The SDK reads ``ANTHROPIC_API_KEY`` from the environment and does not parse
+    ``.env`` files, so this bridges the gap without taking a dependency on
+    ``python-dotenv`` for what is a few lines of parsing.
+
+    Returns ``None`` when no key is found. **Never logs or returns the key's
+    value anywhere else** — it is passed straight to the client. Use
+    :func:`api_key_origin` when you need to say *where* a key came from.
+    """
+    found = _find_key(env_file)
+    return found[0] if found else None
+
+
+def api_key_origin(*, env_file: Path | None = None) -> str | None:
+    """Where :func:`load_api_key` would read its key from, or ``None``.
+
+    Exists so an authentication failure is one line of output away from being
+    diagnosed. "The key is invalid" and "you are reading a different file than
+    you think" produce the same 401, and only the second is common.
+    """
+    found = _find_key(env_file)
+    return found[1] if found else None
 
 
 class LlmProposal(BaseModel):
