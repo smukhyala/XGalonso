@@ -1786,3 +1786,286 @@ def refresh_plan_command(
             f"\n  {plan.lookups} lookups instead of {naive} "
             f"({naive / max(plan.lookups, 1):.0f}x fewer)."
         )
+
+
+# ---------------------------------------------------------------------------
+# Objective-conditioned feature discovery
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="discover")
+def discover_command(
+    request: Annotated[
+        str,
+        typer.Argument(
+            help=(
+                "What you want, in plain English. e.g. 'I am 40 points behind in my "
+                "mini-league, keep Haaland, aggressive three-gameweek strategy, keep xG "
+                "and find complementary signals'."
+            )
+        ),
+    ],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    frame_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--frame",
+            help="Training frame from `xg build-discovery-frame`. Defaults to the gold copy.",
+        ),
+    ] = None,
+    preset: Annotated[
+        str,
+        typer.Option("--preset", help="Objective preset to start from before the text adjusts it."),
+    ] = "expected_points",
+    max_hypotheses: Annotated[
+        int, typer.Option("--max-hypotheses", help="Proposals to test this run.")
+    ] = 6,
+    holdout: Annotated[
+        str,
+        typer.Option("--holdout", help="Seasons excluded from every fold. Never optimised on."),
+    ] = "2025-26",
+    clusters: Annotated[
+        int, typer.Option("--clusters", help="Objective-conditioned clusters.")
+    ] = 5,
+    no_controls: Annotated[
+        bool,
+        typer.Option("--no-controls", help="Skip the noise and shuffled controls (much faster)."),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show the parsed intent and stop.")
+    ] = False,
+) -> None:
+    """Compile a request, discover features that serve it, and report the verdicts.
+
+    Prints the parsed intent **before** running anything. Natural language is
+    ambiguous and a system that acts on its own guess without showing it will
+    eventually act on a wrong one silently, so the structured interpretation and
+    everything the parser did *not* understand are surfaced first.
+    """
+    from xg_alonso.contracts.discovery import ExperimentStage
+    from xg_alonso.discovery.experiment import ExperimentConfig, run_discovery
+    from xg_alonso.discovery.harness import HarnessConfig
+    from xg_alonso.discovery.registry import DiscoveryRegistry
+    from xg_alonso.domain.intent import build_name_index, compile_intent
+    from xg_alonso.features.generators import stage_window
+    from xg_alonso.storage.duckdb_store import DuckDBTableStore
+
+    frame_file = frame_path or (data_root / "gold" / "discovery_training.parquet")
+    if not frame_file.exists():
+        typer.secho(
+            f"No training frame at {frame_file}. Run `xg build-discovery-frame` first.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+    frame = pl.read_parquet(frame_file)
+    stats = pl.read_parquet(data_root / "silver" / "player_gameweek_stats.parquet")
+    history = pl.read_parquet(data_root / "silver" / "players_history.parquet")
+    # Indexed by full name *and* by unambiguous surname: the stored name is
+    # "Erling Haaland" and a manager types "Haaland".
+    names = build_name_index(
+        dict(
+            zip(
+                history["player_code"].to_list(),
+                history["web_name"].to_list(),
+                strict=True,
+            )
+        )
+    )
+
+    intent = compile_intent(request, players=names, base_preset=preset)
+    bundle = intent.bundle
+    objective = bundle.objective
+
+    typer.secho("\nParsed intent", bold=True)
+    typer.echo(f"  objective        {objective.id}")
+    typer.echo(f"  primary metric   {objective.primary_metric.value}")
+    typer.echo(
+        f"  risk             {objective.risk_preference.value} "
+        f"(variance term {objective.signed_uncertainty_penalty:+.2f})"
+    )
+    typer.echo(f"  horizon          {objective.planning_horizon} gameweek(s)")
+    typer.echo(f"  ownership        {objective.ownership_preference.value}")
+    if bundle.constraints.locked_players:
+        held = ", ".join(str(int(c)) for c in bundle.constraints.locked_players)
+        typer.echo(f"  locked players   {held}")
+    if bundle.constraints.locked_position_set():
+        frozen = ", ".join(sorted(p.value for p in bundle.constraints.locked_position_set()))
+        typer.echo(f"  frozen positions {frozen}")
+    typer.echo(f"  max points hit   {bundle.constraints.max_points_hit}")
+    typer.echo(f"  required features {list(bundle.constraints.required_features) or '(none)'}")
+    for belief in bundle.beliefs:
+        typer.echo(
+            f"  belief           player {belief.entity_id} "
+            f"{belief.proposition.value} @ {belief.confidence:.0%}"
+        )
+    typer.echo(f"  confidence       {intent.overall_confidence:.0%}")
+    if intent.unparsed:
+        typer.secho("  not understood:", fg=typer.colors.YELLOW)
+        for clause in intent.unparsed:
+            typer.secho(f"    - {clause}", fg=typer.colors.YELLOW)
+
+    if dry_run:
+        typer.echo("\n(dry run — nothing was executed)")
+        return
+
+    store = DuckDBTableStore(data_root / "discovery.duckdb")
+    registry = DiscoveryRegistry(store)
+
+    def on_stage(stage: ExperimentStage, detail: str) -> None:
+        typer.echo(f"  [{stage.value:<19}] {detail}")
+
+    typer.secho("\nRunning", bold=True)
+    try:
+        result = run_discovery(
+            bundle=bundle,
+            training=frame,
+            player_stats=stats,
+            stage_window=stage_window,
+            registry=registry,
+            config=ExperimentConfig(
+                harness=HarnessConfig(
+                    holdout_seasons=tuple(s.strip() for s in holdout.split(",") if s.strip()),
+                    max_folds=5,
+                ),
+                max_hypotheses=max_hypotheses,
+                cluster_k=clusters,
+                run_controls=not no_controls,
+            ),
+            on_stage=on_stage,
+        )
+    finally:
+        pass
+
+    typer.secho("\n" + result.summary(), bold=True)
+
+    if result.weak_segments:
+        typer.secho("\nWhere the required feature set is weakest", bold=True)
+        for kind, segment, error in result.weak_segments:
+            typer.echo(f"  {kind:<10} {segment:<8} relative error {error:.3f}")
+
+    if result.rejected_programs:
+        typer.secho("\nRefused before computation", fg=typer.colors.YELLOW)
+        for name, issues in result.rejected_programs:
+            typer.echo(f"  {name}: {'; '.join(str(i) for i in issues)[:120]}")
+
+    report = registry.acceptance_report(objective.id)
+    if report.height:
+        typer.secho("\nVerdicts", bold=True)
+        for row in report.iter_rows(named=True):
+            colour = (
+                typer.colors.GREEN
+                if row["status"].startswith("accepted")
+                else typer.colors.YELLOW
+                if row["status"] in {"revise", "insufficient_data"}
+                else typer.colors.RED
+            )
+            typer.secho(
+                f"  {row['status']:<26} {row['feature']:<34} "
+                f"utility {row['utility']:+.4f}  incremental {row['incremental_value']:+.5f}  "
+                f"folds {row['folds_improved']}/{row['folds']}  stability {row['stability']:.2f}",
+                fg=colour,
+            )
+            typer.echo(f"      {row['complementarity']} — {row['reason'][:110]}")
+
+    if result.cluster_summaries:
+        typer.secho("\nObjective-conditioned clusters", bold=True)
+        for summary in result.cluster_summaries:
+            typer.echo(f"  c{summary.cluster_id} n={summary.size:<6} {summary.label}")
+
+    if result.search is not None:
+        search = result.search
+        typer.secho("\nComplementary search", bold=True)
+        typer.echo(
+            f"  baseline MAE {search.baseline.metric:.4f} -> {search.final.metric:.4f} "
+            f"({search.total_gain:+.2%}) over {search.evaluations} evaluations"
+        )
+        for step in search.steps:
+            typer.echo(f"    + {step.describe()}")
+        if search.rejected:
+            passed = ", ".join(f"{n} ({g:+.2%})" for n, g in search.rejected[:5])
+            typer.echo(f"    passed over: {passed}")
+        if search.truncated:
+            typer.secho(
+                "    (a cap stopped the search — this is not proof nothing more exists)",
+                fg=typer.colors.YELLOW,
+            )
+
+    if result.lessons:
+        typer.secho("\nLessons recorded", bold=True)
+        for lesson in result.lessons:
+            typer.echo(f"  [{lesson.hypothesis_family}] {lesson.result}")
+            if lesson.promising_direction:
+                typer.echo(f"      -> {lesson.promising_direction}")
+
+    manifest_path = data_root / "reports" / f"{result.manifest.experiment_id}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(result.manifest.model_dump_json(indent=2))
+    typer.echo(f"\nManifest written to {manifest_path}")
+    if not result.manifest.reproducible:
+        typer.secho(
+            "This run is NOT reproducible: the working tree is dirty or the commit is "
+            "unknown, so the recorded code version does not describe what ran.",
+            fg=typer.colors.YELLOW,
+        )
+    store.close()
+
+
+@app.command(name="build-discovery-frame")
+def build_discovery_frame_command(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    seasons: Annotated[
+        str, typer.Option("--seasons", help="Comma-separated seasons to build.")
+    ] = "2023-24,2024-25",
+    min_gameweek: Annotated[
+        int, typer.Option("--min-gw", help="Skip the opening gameweeks of each season.")
+    ] = 2,
+) -> None:
+    """Build the point-in-time training frame the discovery loop runs on.
+
+    Separate from `xg discover` because it is the expensive step — the feature
+    window is recomputed per gameweek rather than once over the whole frame,
+    which is the price of a dataset that is not silently poisoned.
+    """
+    from xg_alonso.prediction.dataset import build_training_frame
+
+    wanted = [s.strip() for s in seasons.split(",") if s.strip()]
+    stats = pl.read_parquet(data_root / "silver" / "player_gameweek_stats.parquet")
+    history = pl.read_parquet(data_root / "silver" / "players_history.parquet")
+
+    typer.echo(f"Building features as of every deadline in {', '.join(wanted)}...")
+    data = build_training_frame(stats, seasons=wanted, min_gameweek=min_gameweek)
+    frame = data.frame
+
+    # The component labels carry no points total by design (D8: models predict
+    # components and the domain prices them). A discovered feature is judged on
+    # the number a manager reads, so attach it here.
+    totals = (
+        stats.filter(pl.col("season").is_in(wanted))
+        .group_by(["player_code", "season", "gameweek_id"])
+        .agg(pl.col("total_points").sum().alias("label_total_points"))
+    )
+    frame = frame.join(
+        totals,
+        left_on=["player_code", "label_season", "label_gameweek"],
+        right_on=["player_code", "season", "gameweek_id"],
+        how="left",
+    )
+
+    meta = history.select("player_code", "season", "position", "team_name").unique(
+        subset=["player_code", "season"]
+    )
+    frame = frame.join(
+        meta,
+        left_on=["player_code", "label_season"],
+        right_on=["player_code", "season"],
+        how="left",
+    ).filter(pl.col("label_total_points").is_not_null() & pl.col("position").is_not_null())
+
+    destination = data_root / "gold" / "discovery_training.parquet"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_parquet(destination)
+    typer.secho(
+        f"Wrote {frame.height:,} rows x {frame.width} columns to {destination}",
+        fg=typer.colors.GREEN,
+    )

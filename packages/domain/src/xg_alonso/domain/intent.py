@@ -52,8 +52,44 @@ from xg_alonso.domain.objectives import objective_preset
 
 __all__ = [
     "FEATURE_ALIASES",
+    "build_name_index",
     "compile_intent",
 ]
+
+
+def build_name_index(players: Mapping[int, str]) -> dict[str, int]:
+    """Searchable names for the players a manager might refer to.
+
+    The stored name is the full one — ``"Erling Haaland"`` — and nobody types
+    that. So each player is indexed under his full name *and* under his surname,
+    with one hard rule:
+
+    **A surname that two players share is not indexed at all.** Resolving
+    "Silva" to whichever of them happened to be first would lock or exclude the
+    wrong footballer, and a wrong lock is worse than an unmatched one because it
+    is invisible: the recommendation simply comes back respecting a constraint
+    the manager never gave. An unmatched name at least shows up in
+    :attr:`CompiledIntent.unparsed`.
+
+    Returns a lowercase index. Matching in :func:`compile_intent` is whole-word,
+    so "Son" will not match inside "Sonny".
+    """
+    surnames: dict[str, set[int]] = {}
+    for code, name in players.items():
+        parts = str(name).strip().split()
+        if len(parts) > 1:
+            surnames.setdefault(parts[-1].lower(), set()).add(int(code))
+
+    index: dict[str, int] = {}
+    for code, name in players.items():
+        cleaned = str(name).strip()
+        if cleaned:
+            index[cleaned.lower()] = int(code)
+    for surname, codes in surnames.items():
+        if len(codes) == 1 and surname not in index:
+            index[surname] = next(iter(codes))
+    return index
+
 
 #: Number words the horizon parser understands, so "next three gameweeks" works
 #: as well as "next 3".

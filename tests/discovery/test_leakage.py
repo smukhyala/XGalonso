@@ -22,15 +22,8 @@ import numpy as np
 import polars as pl
 import pytest
 
+from tests.discovery.conftest import T0, make_entities, make_history
 from xg_alonso.contracts.folds import walk_forward_folds
-from xg_alonso.features.generators import stage_window
-from xg_alonso.features.leakage import (
-    LeakageDetected,
-    assert_detects_leakage,
-    assert_no_leakage,
-    find_leakage,
-    make_future_records,
-)
 from xg_alonso.discovery.clusters import fit_clusters
 from xg_alonso.discovery.compile import CompileContext, compile_program, validate_program
 from xg_alonso.discovery.dsl import (
@@ -51,8 +44,13 @@ from xg_alonso.discovery.dsl import (
 )
 from xg_alonso.discovery.embeddings import fit_embedding
 from xg_alonso.discovery.harness import HarnessConfig, _folds
-
-from tests.discovery.conftest import T0, make_entities, make_history
+from xg_alonso.features.generators import stage_window
+from xg_alonso.features.leakage import (
+    assert_detects_leakage,
+    assert_no_leakage,
+    find_leakage,
+    make_future_records,
+)
 
 pytestmark = pytest.mark.leakage
 
