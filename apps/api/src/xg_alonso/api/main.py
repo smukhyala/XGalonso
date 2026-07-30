@@ -643,6 +643,14 @@ class RequirementOut(BaseModel):
         default=None, description="How sure the parser was, when this came from text."
     )
     evidence: str = Field(default="", description="The phrase that produced it.")
+    source: str = Field(
+        default="matched",
+        description=(
+            "'matched' when a vocabulary rule produced it, 'model' when a "
+            "language model read it. Kept so a reader can tell a phrase that "
+            "was matched from a reading that was inferred."
+        ),
+    )
 
 
 class RequirementInput(BaseModel):
@@ -675,6 +683,23 @@ class ParsedRequirementsResponse(BaseModel):
     )
     overall_confidence: float = 0.0
 
+    interpreted: bool = Field(
+        default=False, description="Whether a language model read the request as well."
+    )
+    interpreter_note: str = Field(
+        default="",
+        description="Why the model was or was not consulted. Shown rather than swallowed.",
+    )
+    ownership_preference: str = Field(
+        default="",
+        description="A lean the model read from the request, e.g. 'differential'.",
+    )
+    risk_preference: str = ""
+    model_notes: list[str] = Field(
+        default_factory=list,
+        description="What the model understood but could not express as a requirement.",
+    )
+
 
 class RequirementOutcomeOut(BaseModel):
     """What happened to one requirement, and what honouring it cost."""
@@ -704,6 +729,7 @@ class PlanRequest(BaseModel):
             "parsing the text, so an edited set is never silently re-derived."
         ),
     )
+    interpret: bool = Field(default=False, description="Use the language-model reader too.")
 
 
 class PlanResponse(BaseModel):
@@ -728,6 +754,14 @@ class CompileRequest(BaseModel):
 
     text: str = Field(min_length=1, description="What you want, in plain English")
     preset: str = Field(default="expected_points", description="Objective to start from")
+    interpret: bool = Field(
+        default=False,
+        description=(
+            "Also ask a language model to read what the vocabulary could not. "
+            "Needs ANTHROPIC_API_KEY; without one the deterministic parse stands "
+            "alone and the request still succeeds."
+        ),
+    )
 
 
 class ParsedField(BaseModel):
@@ -796,7 +830,9 @@ def parse_requirements(payload: CompileRequest, service: ServiceDep) -> ParsedRe
     """
     try:
         return ParsedRequirementsResponse(
-            **service.parse_requirements(payload.text, preset=payload.preset)
+            **service.parse_requirements(
+                payload.text, preset=payload.preset, interpret=payload.interpret
+            )
         )
     except KeyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

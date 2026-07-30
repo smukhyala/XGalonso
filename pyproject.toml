@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 dependencies = [
     "xg-alonso-contracts",
     "xg-alonso-domain",
+    "xg-alonso-interpreter",
     "xg-alonso-storage",
     "xg-alonso-features",
     "xg-alonso-prediction",
@@ -23,6 +24,18 @@ dependencies = [
     "xg-alonso-normalization",
     "xg-alonso-cli",
     "xg-alonso-api",
+]
+
+[project.optional-dependencies]
+# Language-model features, in one place so they install with one command.
+#
+# Both are off by default and degrade to "the deterministic path runs alone", so
+# the core install needs no LLM client and no credential. Declared here as well
+# as on the packages because a workspace extra is not reachable from the root
+# without it, and "uv sync --extra llm" is the instruction people will try.
+llm = [
+    "xg-alonso-interpreter[llm]",
+    "xg-alonso-discovery[llm]",
 ]
 
 [project.scripts]
@@ -46,6 +59,7 @@ xg-alonso-optimization = { workspace = true }
 xg-alonso-evaluation = { workspace = true }
 xg-alonso-explanations = { workspace = true }
 xg-alonso-discovery = { workspace = true }
+xg-alonso-interpreter = { workspace = true }
 xg-alonso-ingestion = { workspace = true }
 xg-alonso-normalization = { workspace = true }
 xg-alonso-cli = { workspace = true }
@@ -80,6 +94,7 @@ target-version = "py312"
 src = [
     "packages/data_contracts/src",
     "packages/domain/src",
+    "packages/interpreter/src",
     "packages/storage/src",
     "packages/feature_factory/src",
     "packages/prediction/src",
@@ -144,6 +159,7 @@ explicit_package_bases = true
 mypy_path = [
     "packages/data_contracts/src",
     "packages/domain/src",
+    "packages/interpreter/src",
     "packages/storage/src",
     "packages/feature_factory/src",
     "packages/prediction/src",

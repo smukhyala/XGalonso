@@ -19,6 +19,7 @@ layers =
     xg_alonso.optimization : xg_alonso.explanations
     xg_alonso.prediction
     xg_alonso.features
+    xg_alonso.interpreter
     xg_alonso.domain : xg_alonso.storage
     xg_alonso.contracts
 
@@ -33,6 +34,7 @@ type = forbidden
 source_modules =
     xg_alonso.contracts
     xg_alonso.domain
+    xg_alonso.interpreter
     xg_alonso.features
     xg_alonso.prediction
     xg_alonso.optimization

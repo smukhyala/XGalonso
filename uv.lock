@@ -18,6 +18,7 @@ members = [
     "xg-alonso-explanations",
     "xg-alonso-features",
     "xg-alonso-ingestion",
+    "xg-alonso-interpreter",
     "xg-alonso-normalization",
     "xg-alonso-optimization",
     "xg-alonso-prediction",
@@ -1604,10 +1605,17 @@ dependencies = [
     { name = "xg-alonso-explanations" },
     { name = "xg-alonso-features" },
     { name = "xg-alonso-ingestion" },
+    { name = "xg-alonso-interpreter" },
     { name = "xg-alonso-normalization" },
     { name = "xg-alonso-optimization" },
     { name = "xg-alonso-prediction" },
     { name = "xg-alonso-storage" },
+]
+
+[package.optional-dependencies]
+llm = [
+    { name = "xg-alonso-discovery", extra = ["llm"] },
+    { name = "xg-alonso-interpreter", extra = ["llm"] },
 ]
 
 [package.dev-dependencies]
@@ -1628,16 +1636,20 @@ requires-dist = [
     { name = "xg-alonso-cli", editable = "apps/cli" },
     { name = "xg-alonso-contracts", editable = "packages/data_contracts" },
     { name = "xg-alonso-discovery", editable = "packages/discovery" },
+    { name = "xg-alonso-discovery", extras = ["llm"], marker = "extra == 'llm'", editable = "packages/discovery" },
     { name = "xg-alonso-domain", editable = "packages/domain" },
     { name = "xg-alonso-evaluation", editable = "packages/evaluation" },
     { name = "xg-alonso-explanations", editable = "packages/explanations" },
     { name = "xg-alonso-features", editable = "packages/feature_factory" },
     { name = "xg-alonso-ingestion", editable = "pipelines/ingestion" },
+    { name = "xg-alonso-interpreter", editable = "packages/interpreter" },
+    { name = "xg-alonso-interpreter", extras = ["llm"], marker = "extra == 'llm'", editable = "packages/interpreter" },
     { name = "xg-alonso-normalization", editable = "pipelines/normalization" },
     { name = "xg-alonso-optimization", editable = "packages/optimization" },
     { name = "xg-alonso-prediction", editable = "packages/prediction" },
     { name = "xg-alonso-storage", editable = "packages/storage" },
 ]
+provides-extras = ["llm"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1870,6 +1882,30 @@ requires-dist = [
     { name = "xg-alonso-domain", editable = "packages/domain" },
     { name = "xg-alonso-storage", editable = "packages/storage" },
 ]
+
+[[package]]
+name = "xg-alonso-interpreter"
+version = "0.1.0"
+source = { editable = "packages/interpreter" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "xg-alonso-contracts" },
+    { name = "xg-alonso-domain" },
+]
+
+[package.optional-dependencies]
+llm = [
+    { name = "anthropic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", marker = "extra == 'llm'", specifier = ">=0.69" },
+    { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "xg-alonso-contracts", editable = "packages/data_contracts" },
+    { name = "xg-alonso-domain", editable = "packages/domain" },
+]
+provides-extras = ["llm"]
 
 [[package]]
 name = "xg-alonso-normalization"

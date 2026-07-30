@@ -48,15 +48,37 @@ __all__ = [
 #:
 #: Matched on either side of the name, because English puts them on both:
 #: "start Haaland" and "Haaland has to start" mean the same thing.
-_START_WORDS: Final[str] = r"start(?:s|ing|er)?|in the (?:xi|eleven|starting)|must play|has to play"
+#: Every vocabulary below is anchored on word boundaries, and that is not
+#: cosmetic. Unanchored, `no` matched inside "bru**no**" and — being one
+#: character from the name, exactly as close as the "starting" that followed it —
+#: won the tie-break and *excluded* a player the manager had asked to start.
+#: A requirement inverted by a substring match is the worst failure this parser
+#: has, because the squad comes back looking deliberate.
+_START_WORDS: Final[str] = (
+    r"\b(?:starts?|starting|starter|in the (?:xi|eleven|starting)|must play|has to play)\b"
+)
 
 #: Words that only ask for ownership. Kept distinct from the above on purpose.
-_OWN_WORDS: Final[str] = r"keep|own|have|include|want|bring in|sign|buy|pick|hold|retain|lock"
+_OWN_WORDS: Final[str] = (
+    r"\b(?:keep|own|have|include|want|bring in|sign|buy|pick|hold|retain|lock)\b"
+)
 
 
-_EXCLUDE_WORDS: Final[str] = r"avoid|exclude|without|never|no|drop|sell|don'?t (?:want|pick|buy)"
+#: Negations are matched as whole phrases and listed **first**, because
+#: alternation is leftmost-first and the ownership verb inside them would
+#: otherwise win on its own. "Never pick Salah" put `pick` one character from the
+#: name and `never` six away, so the nearest-verb rule read it as a request to
+#: sign him.
+_EXCLUDE_WORDS: Final[str] = (
+    r"\b(?:"
+    r"(?:never|do ?n[o']t|not|no)\s+(?:pick|want|buy|sign|include|have|take|use)"
+    r"|avoid|exclude|without|never|drop|sell|no"
+    r")\b"
+)
 
-_CAPTAIN_WORDS: Final[str] = r"captain|armband|\(c\)|skipper"
+#: ``(c)`` carries its own delimiters, so it is left unanchored while the words
+#: beside it are not.
+_CAPTAIN_WORDS: Final[str] = r"(?:\b(?:captain|armband|skipper)\b|\(c\))"
 
 #: Vocabularies that may legitimately appear *after* a name.
 #:
@@ -68,7 +90,7 @@ _CAPTAIN_WORDS: Final[str] = r"captain|armband|\(c\)|skipper"
 _TRAILING: Final[dict[RequirementKind, str]] = {
     RequirementKind.MUST_START: _START_WORDS,
     RequirementKind.MUST_CAPTAIN: _CAPTAIN_WORDS,
-    RequirementKind.MUST_INCLUDE: r"in (?:the|my) (?:squad|fifteen|15)",
+    RequirementKind.MUST_INCLUDE: r"\bin (?:the|my) (?:squad|fifteen|15)\b",
 }
 
 #: A legal FPL shape. The keeper is implied, so three numbers summing to ten.
@@ -210,15 +232,28 @@ def parse_squad_requirements(
         parse.evidence.append((field_name, confidence, ParseSource.EXPLICIT, evidence))
 
     # --- players -----------------------------------------------------------
+    #
+    # Longest key first, and a span is claimed once. Without this, "bruno
+    # fernandes" matches both the full name and the bare surname — which belong
+    # to *different footballers* — and the shorter, wrong one wins on iteration
+    # order. Claiming the span means the most specific name a manager wrote is
+    # the one that counts.
     seen: set[int] = set()
-    for name, code in (players or {}).items():
+    claimed: list[tuple[int, int]] = []
+    ordered_names = sorted((players or {}).items(), key=lambda pair: -len(pair[0]))
+
+    def overlaps(span: tuple[int, int]) -> bool:
+        return any(span[0] < end and start < span[1] for start, end in claimed)
+
+    for name, code in ordered_names:
         if not name or name.lower() in ambiguous:
             continue
         match = re.search(rf"\b{re.escape(name.lower())}\b", lowered)
         if match is None:
             continue
-        if code in seen:
+        if code in seen or overlaps(match.span()):
             continue
+        claimed.append(match.span())
 
         before, after = _clause_around(lowered, match.start(), match.end())
         phrase = text[max(0, match.start() - 20) : match.end() + 20].strip()

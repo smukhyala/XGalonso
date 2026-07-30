@@ -8,6 +8,8 @@ weaker request. Most of these exist to hold that line.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from xg_alonso.contracts.objective import RequirementKind
@@ -204,3 +206,70 @@ class TestCompiledIntent:
         from xg_alonso.domain.intent import compile_intent
 
         assert compile_intent("maximise points", players=_PLAYERS).requirements.requirements == ()
+
+
+class TestSubstringSafety:
+    """Vocabularies are anchored, and this is why.
+
+    Unanchored, `no` matched inside "bru**no**" and — being exactly as close to
+    the name as the "starting" that followed it — won the tie-break and
+    *excluded* a player the manager had asked to start. A requirement inverted
+    by a substring match is the worst failure this parser has, because the squad
+    comes back looking deliberate.
+    """
+
+    def test_a_name_containing_no_does_not_exclude(self) -> None:
+        players = {"fernandes": 1}
+        parse = parse_squad_requirements("bruno fernandes starting", players=players)
+        assert [r.kind for r in parse.requirements] == [RequirementKind.MUST_START]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "bruno fernandes starting",
+            "keep bruno fernandes",
+            "brown fernandes starting",
+        ],
+    )
+    def test_substrings_never_flip_a_requirement(self, text: str) -> None:
+        parse = parse_squad_requirements(text, players={"fernandes": 1})
+        assert parse.requirements
+        assert all(r.kind is not RequirementKind.MUST_EXCLUDE for r in parse.requirements)
+
+    def test_a_negated_ownership_verb_still_excludes(self) -> None:
+        """ "Never pick X" puts `pick` nearer the name than `never`."""
+        assert (
+            parse_squad_requirements("never pick Haaland", players=_PLAYERS).requirements[0].kind
+            is RequirementKind.MUST_EXCLUDE
+        )
+
+    @pytest.mark.parametrize(
+        "text", ["never pick Haaland", "don't want Haaland", "do not buy Haaland", "no Haaland"]
+    )
+    def test_every_negation_excludes(self, text: str) -> None:
+        kinds = {r.kind for r in parse_squad_requirements(text, players=_PLAYERS).requirements}
+        assert kinds == {RequirementKind.MUST_EXCLUDE}
+
+
+class TestLongestMatchWins:
+    """Two players can share a name, and the longer one is the one written."""
+
+    INDEX: ClassVar[dict[str, int]] = {
+        "b.fernandes": 141746,
+        "bruno fernandes": 141746,
+        "mateus fernandes": 551226,
+        "haaland": 223094,
+    }
+
+    def test_the_full_name_beats_a_shorter_key(self) -> None:
+        parse = parse_squad_requirements("bruno fernandes starting", players=self.INDEX)
+        assert [int(c) for r in parse.requirements for c in r.players] == [141746]
+
+    def test_the_other_player_is_still_reachable(self) -> None:
+        parse = parse_squad_requirements("mateus fernandes starting", players=self.INDEX)
+        assert [int(c) for r in parse.requirements for c in r.players] == [551226]
+
+    def test_one_phrase_produces_one_requirement(self) -> None:
+        """Both keys match the same span; only the specific one may count."""
+        parse = parse_squad_requirements("bruno fernandes starting", players=self.INDEX)
+        assert len(parse.requirements) == 1

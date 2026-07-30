@@ -1,0 +1,29 @@
+[project]
+name = "xg-alonso-interpreter"
+version = "0.1.0"
+description = "Language-model reading of a manager's request, resolved against real players."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.10,<3",
+    "xg-alonso-contracts",
+    "xg-alonso-domain",
+]
+
+[project.optional-dependencies]
+# The interpreter is optional and off by default. Without a key the
+# deterministic parser answers alone, so the core install needs no LLM client
+# and no credential.
+llm = [
+    "anthropic>=0.69",
+]
+
+[tool.uv.sources]
+xg-alonso-contracts = { workspace = true }
+xg-alonso-domain = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xg_alonso"]

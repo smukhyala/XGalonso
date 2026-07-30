@@ -38,6 +38,7 @@ const EXAMPLES = [
   "keep Haaland and Saka, at least 3 from Arsenal",
   "chase differentials aggressively over three gameweeks, Haaland starting",
   "captain Haaland, avoid Chelsea defenders, 3-4-3",
+  "Haaland starting, prioritise the non-elite players",
 ];
 
 /** How each requirement kind reads, and the colour it carries throughout. */
@@ -66,6 +67,7 @@ function toInput(requirement: Requirement): RequirementInput {
 
 export default function PlanPage() {
   const [text, setText] = useState("");
+  const [interpret, setInterpret] = useState(true);
   const [parsed, setParsed] = useState<ParsedRequirements | null>(null);
   const [dropped, setDropped] = useState<Set<number>>(new Set());
   const [plan, setPlan] = useState<Plan | null>(null);
@@ -83,17 +85,19 @@ export default function PlanPage() {
     }
     timer.current = setTimeout(() => {
       api
-        .parseRequirements(text)
+        .parseRequirements(text, "expected_points", interpret)
         .then((next) => {
           setParsed(next);
           setDropped(new Set());
         })
         .catch(() => setParsed(null));
-    }, 300);
+      // Slower when the model is involved: that call costs money and a token
+      // per keystroke is not a feature.
+    }, interpret ? 900 : 300);
     return () => {
       if (timer.current) clearTimeout(timer.current);
     };
-  }, [text]);
+  }, [text, interpret]);
 
   const kept = (parsed?.requirements ?? []).filter((_, index) => !dropped.has(index));
 
@@ -103,14 +107,14 @@ export default function PlanPage() {
     try {
       // The edited set is sent, not the sentence. Re-deriving from the text
       // here would silently discard whatever the manager just corrected.
-      setPlan(await api.plan({ text, requirements: kept.map(toInput) }));
+      setPlan(await api.plan({ text, requirements: kept.map(toInput), interpret }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not build a squad.");
       setPlan(null);
     } finally {
       setBuilding(false);
     }
-  }, [text, kept]);
+  }, [text, kept, interpret]);
 
   return (
     <main className="mx-auto max-w-6xl px-6 pb-28 sm:px-10">
@@ -154,7 +158,31 @@ export default function PlanPage() {
           }}
         />
 
-        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2">
+        <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3">
+          <button
+            type="button"
+            onClick={() => setInterpret((on) => !on)}
+            className="flex items-center gap-2.5 text-[12px] transition-opacity hover:opacity-100"
+            style={{ color: interpret ? "var(--color-text)" : "var(--color-dim)" }}
+            aria-pressed={interpret}
+          >
+            <span
+              aria-hidden
+              className="inline-block h-3 w-3 rounded-[2px]"
+              style={{
+                background: interpret ? "rgba(126, 200, 148, 0.9)" : "transparent",
+                border: "1px solid var(--color-line)",
+              }}
+            />
+            Read it with Claude too
+          </button>
+          <span className="text-[12px]" style={{ color: "var(--color-dim)" }}>
+            Catches intent the vocabulary cannot — “prioritise the non-elite players”, “I’m bored
+            of my team”. It never overrides a matched phrase.
+          </span>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2">
           {EXAMPLES.map((example) => (
             <button
               key={example}
@@ -229,6 +257,7 @@ function Understood({
         <p className="eyebrow">What I understood</p>
         <p className="eyebrow hidden sm:block">
           {parsed.objective_id} · {Math.round(parsed.overall_confidence * 100)}% confident
+          {parsed.interpreted ? " · read by claude" : ""}
         </p>
       </div>
       <div className="hairline mt-4" />
@@ -254,8 +283,16 @@ function Understood({
                   }}
                   title={off ? "Excluded from the build — click to restore" : "Click to drop"}
                 >
-                  <span className="eyebrow" style={{ color: meta.tone }}>
-                    {meta.label}
+                  <span className="flex flex-col gap-0.5">
+                    <span className="eyebrow" style={{ color: meta.tone }}>
+                      {meta.label}
+                    </span>
+                    {requirement.source === "model" && (
+                      // Inferred, not matched. A reader has to be able to tell.
+                      <span className="eyebrow" style={{ color: "var(--color-dim)" }}>
+                        claude
+                      </span>
+                    )}
                   </span>
                   <span className="flex flex-col gap-0.5">
                     <span
@@ -299,6 +336,40 @@ function Understood({
             ))}
           </ul>
         </div>
+      )}
+
+      {(parsed.ownership_preference || parsed.risk_preference) && (
+        <div className="mt-5">
+          <p className="eyebrow">Read as a lean, not a requirement</p>
+          <p className="mt-2 text-[13px]" style={{ color: "var(--color-muted)" }}>
+            {[parsed.ownership_preference, parsed.risk_preference].filter(Boolean).join(" · ")} —
+            this shapes the objective rather than constraining the squad, so it does not appear
+            as a chip.
+          </p>
+        </div>
+      )}
+
+      {parsed.model_notes.length > 0 && (
+        <div className="mt-5">
+          <p className="eyebrow">What Claude made of it</p>
+          <ul className="mt-2 space-y-1.5">
+            {parsed.model_notes.map((note) => (
+              <li
+                key={note}
+                className="text-[13px] leading-relaxed"
+                style={{ color: "var(--color-muted)" }}
+              >
+                {note}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {parsed.interpreter_note && !parsed.interpreted && (
+        <p className="mt-5 text-[12px]" style={{ color: "var(--color-dim)" }}>
+          Claude was not consulted: {parsed.interpreter_note}. The matched reading above stands.
+        </p>
       )}
 
       {parsed.unparsed.length > 0 && (

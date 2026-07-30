@@ -70,6 +70,7 @@ from xg_alonso.features.slice1 import (
 )
 from xg_alonso.optimization import SquadCandidate, best_starting_xi, build_squad
 from xg_alonso.optimization.horizon import discount_weights, value_over_horizon
+from xg_alonso.optimization.objective import ObjectiveContext, objective_valued
 from xg_alonso.pipelines.ingestion import SOURCE_BOOTSTRAP, SOURCE_FIXTURES, FplApiClient
 from xg_alonso.pipelines.normalization import PLAYER_GAMEWEEK_STATS_SCHEMA, empty_frame
 from xg_alonso.prediction import load_models, predict_with_models
@@ -546,13 +547,29 @@ class DecisionService:
                 "The picks endpoint returns 404 until that gameweek's deadline."
             ) from exc
 
-    def _squad_response(self, squad: SquadState, *, prices_assumed: bool) -> SquadResponse:
+    def _squad_response(
+        self,
+        squad: SquadState,
+        *,
+        prices_assumed: bool,
+        selection: Any | None = None,
+    ) -> SquadResponse:
+        """Render a squad.
+
+        ``selection`` pins the eleven and the armband a caller already chose.
+        Without it the XI is re-derived here, which is right for an
+        unconstrained squad and **wrong the moment a requirement binds the
+        eleven**: re-deriving discards every `must_start` and `must_captain`,
+        so the response would report a requirement honoured while displaying a
+        lineup that ignored it. That is worse than either failure alone.
+        """
         from xg_alonso.api.main import SquadPlayer, SquadResponse
 
         gameweek = squad.gameweek
         by_code = {p.player_code: p for p in self._predict(gameweek)}
         rows = self._player_rows()
-        selection = best_starting_xi(squad.picks, by_code, self._context.squad_rules)
+        if selection is None:
+            selection = best_starting_xi(squad.picks, by_code, self._context.squad_rules)
         starters = {p.player_code for p in selection.starters}
 
         players: list[SquadPlayer] = []
@@ -1363,11 +1380,25 @@ class DecisionService:
     # -- requirements and planning -----------------------------------------
 
     def _name_index(self) -> dict[str, int]:
+        """Every form a manager might write a player's name in.
+
+        Full names are supplied as well as display names, because FPL's display
+        name is a short form nobody types — and because two players can share
+        one. "Fernandes" is Bruno's teammate-in-name Mateus in the 2026/27 game,
+        so the bare surname resolves to neither and "bruno fernandes" resolves
+        exactly.
+        """
         from xg_alonso.domain.intent import build_name_index
 
-        return build_name_index(
-            {int(code): str(row["web_name"]) for code, row in self._player_rows().items()}
-        )
+        rows = self._player_rows()
+        display = {int(code): str(row["web_name"]) for code, row in rows.items()}
+        full: dict[int, str] = {}
+        for code, row in rows.items():
+            first = str(row.get("first_name") or "").strip()
+            second = str(row.get("second_name") or "").strip()
+            if first and second:
+                full[int(code)] = f"{first} {second}"
+        return build_name_index(display, full_names=full)
 
     def _team_index(self) -> dict[str, int]:
         index: dict[str, int] = {}
@@ -1389,7 +1420,9 @@ class DecisionService:
             next_gameweek=int(self._context.next_gameweek()),
         )
 
-    def _requirement_out(self, requirement: Any, evidence: str = "") -> dict[str, Any]:
+    def _requirement_out(
+        self, requirement: Any, evidence: str = "", source: str = "matched"
+    ) -> dict[str, Any]:
         names = {int(code): str(row["web_name"]) for code, row in self._player_rows().items()}
         return {
             "kind": requirement.kind.value,
@@ -1402,10 +1435,21 @@ class DecisionService:
             "amount": None if requirement.amount is None else int(requirement.amount),
             "priority": requirement.priority,
             "evidence": evidence,
+            "source": source,
         }
 
-    def parse_requirements(self, text: str, *, preset: str = "expected_points") -> dict[str, Any]:
-        """Parse without solving. Cheap enough to call as a manager types."""
+    def parse_requirements(
+        self, text: str, *, preset: str = "expected_points", interpret: bool = False
+    ) -> dict[str, Any]:
+        """Parse without solving. Cheap enough to call as a manager types.
+
+        ``interpret`` adds a language-model pass over what the vocabulary could
+        not key on. It runs *after* the deterministic parse and never overrides
+        it: where both read the same player, the matched reading wins, because
+        it can show the phrase that produced it. Any failure — no key, no SDK,
+        a bad call — leaves the deterministic parse standing and is reported in
+        ``interpreter_note`` rather than swallowed.
+        """
         from xg_alonso.optimization.requirements import as_requirements, coherence_problems
 
         intent = self._compile(text, preset)
@@ -1457,13 +1501,62 @@ class DecisionService:
             max_per_club=self._context.squad_rules.max_per_club,
         )
 
-        return {
+        result: dict[str, Any] = {
             "objective_id": intent.bundle.objective.id,
             "requirements": out,
             "unparsed": list(intent.unparsed),
             "unresolved_names": [],
             "problems": problems,
             "overall_confidence": intent.overall_confidence,
+            "interpreted": False,
+            "interpreter_note": "",
+            "ownership_preference": "",
+            "risk_preference": "",
+            "model_notes": [],
+        }
+
+        if interpret and text.strip():
+            result.update(self._interpret(text, bundle, out))
+
+        return result
+
+    def _interpret(self, text: str, bundle: Any, matched: list[dict[str, Any]]) -> dict[str, Any]:
+        """Second pass. Additive, attributed, and never able to break the first."""
+        from xg_alonso.interpreter import InterpreterUnavailableError, interpret_request
+
+        try:
+            reading = interpret_request(
+                text,
+                players=self._name_index(),
+                teams=self._team_index(),
+                already_parsed=bundle.requirements,
+                unparsed=[],
+            )
+        except InterpreterUnavailableError as exc:
+            return {"interpreted": False, "interpreter_note": str(exc)}
+        except Exception as exc:
+            return {
+                "interpreted": False,
+                "interpreter_note": f"the model could not be reached: {type(exc).__name__}",
+            }
+
+        added = [
+            self._requirement_out(
+                requirement, reading.readings.get(requirement.label, ""), source="model"
+            )
+            for requirement in reading.requirements
+        ]
+        note = "read by claude-opus-5"
+        if reading.unresolved_names:
+            note += f"; could not place {reading.unresolved_names}"
+        return {
+            "requirements": [*matched, *added],
+            "interpreted": True,
+            "interpreter_note": note,
+            "ownership_preference": reading.ownership_preference,
+            "risk_preference": reading.risk_preference,
+            "model_notes": list(reading.notes),
+            "unresolved_names": list(reading.unresolved_names),
         }
 
     def plan_squad(self, payload: Any) -> dict[str, Any]:
@@ -1482,7 +1575,11 @@ class DecisionService:
         from xg_alonso.optimization.squad_builder import build_constrained_squad
 
         intent = self._compile(payload.text or "", payload.preset)
-        parsed = self.parse_requirements(payload.text or "", preset=payload.preset)
+        parsed = self.parse_requirements(
+            payload.text or "",
+            preset=payload.preset,
+            interpret=getattr(payload, "interpret", False),
+        )
 
         if payload.requirements is None:
             requirements = intent.requirements
@@ -1522,13 +1619,33 @@ class DecisionService:
         available = {
             code: row for code, row in rows.items() if row.get("status") in (None, "a", "d")
         }
+
+        # A lean the model read — "prioritise the non-elite players" — reaches
+        # the squad by re-pricing every prediction through the objective, which
+        # is the one substitution point every scoring path already reads. Left
+        # out, the lean would be a label on a page and nothing else.
+        objective = self._leaning_objective(intent.bundle.objective, parsed)
+        priced = {p.player_code: p for p in predictions}
+        if objective is not None:
+            priced = objective_valued(
+                priced,
+                objective=objective,
+                context=ObjectiveContext(
+                    ownership=self._ownership_share(),
+                    prices={
+                        PlayerCode(int(code)): TenthsOfMillion(int(row["current_price"]))
+                        for code, row in available.items()
+                    },
+                ),
+            )
+
         candidates = [
             SquadCandidate(
                 player_code=p.player_code,
                 position=p.position,
                 team_id=TeamId(int(available[int(p.player_code)]["team_id"])),
                 price=TenthsOfMillion(int(available[int(p.player_code)]["current_price"])),
-                prediction=p,
+                prediction=priced.get(p.player_code, p),
             )
             for p in predictions
             if int(p.player_code) in available
@@ -1540,10 +1657,12 @@ class DecisionService:
             entry_id=EntryId(0),
             gameweek=gameweek,
             requirements=requirements,
-            predictions={p.player_code: p for p in predictions},
+            predictions=priced,
         )
 
-        response = self._squad_response(built.squad, prices_assumed=False)
+        response = self._squad_response(
+            built.squad, prices_assumed=False, selection=built.selection
+        )
         return {
             "objective_id": intent.bundle.objective.id,
             "model_note": self._model_note(),
@@ -1567,6 +1686,49 @@ class DecisionService:
             ],
             "parsed": parsed,
         }
+
+    def _leaning_objective(self, objective: Any, parsed: dict[str, Any]) -> Any:
+        """Fold a model-read lean into the objective, or ``None`` if there is none.
+
+        Returns ``None`` rather than an unchanged objective so the caller can
+        skip re-pricing entirely — an objective that changes nothing should not
+        quietly rewrite every prediction on its way through.
+        """
+        from xg_alonso.contracts.objective import OwnershipPreference, RiskPreference
+
+        updates: dict[str, Any] = {}
+        ownership = parsed.get("ownership_preference") or ""
+        risk = parsed.get("risk_preference") or ""
+        if ownership:
+            updates["ownership_preference"] = OwnershipPreference(ownership)
+        if risk:
+            updates["risk_preference"] = RiskPreference(risk)
+        if not updates:
+            return None
+        return objective.model_copy(update=updates)
+
+    def _ownership_share(self) -> dict[PlayerCode, float]:
+        """Each player's ownership relative to the most-owned. Absent stays absent.
+
+        A player without a published share is left out rather than defaulted to
+        the average: unowned and average-owned are exactly the distinction a
+        differential objective exists to make.
+        """
+        shares: dict[PlayerCode, float] = {}
+        raw: dict[int, float] = {}
+        for code, row in self._player_rows().items():
+            value = row.get("selected_by_percent")
+            if value is None:
+                continue
+            raw[int(code)] = float(value)
+        if not raw:
+            return shares
+        top = max(raw.values())
+        if top <= 0:
+            return shares
+        for code, value in raw.items():
+            shares[PlayerCode(code)] = value / top
+        return shares
 
     def _model_note(self) -> str:
         """Which model scored the candidates. Named so the number is traceable."""

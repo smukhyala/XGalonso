@@ -58,38 +58,60 @@ __all__ = [
 ]
 
 
-def build_name_index(players: Mapping[int, str]) -> dict[str, int]:
+def build_name_index(
+    players: Mapping[int, str],
+    *,
+    full_names: Mapping[int, str] | None = None,
+) -> dict[str, int]:
     """Searchable names for the players a manager might refer to.
 
-    The stored name is the full one — ``"Erling Haaland"`` — and nobody types
-    that. So each player is indexed under his full name *and* under his surname,
-    with one hard rule:
+    FPL's display name is a short form — ``"B.Fernandes"`` — and nobody types
+    that either. So each player is indexed under every form he might be written
+    as: the display name, his full name when one is supplied, and his surname.
 
-    **A surname that two players share is not indexed at all.** Resolving
-    "Silva" to whichever of them happened to be first would lock or exclude the
+    **A key that two players share is not indexed at all.** Two Fernandes in the
+    league is not hypothetical — Bruno Borges Fernandes and Mateus Fernandes are
+    both in the 2026/27 game, and the second one's *display name* is literally
+    "Fernandes". Resolving a bare "Fernandes" to whichever came first locks the
     wrong footballer, and a wrong lock is worse than an unmatched one because it
-    is invisible: the recommendation simply comes back respecting a constraint
-    the manager never gave. An unmatched name at least shows up in
+    is invisible: the squad comes back respecting a constraint the manager never
+    gave. An unmatched name at least shows up in
     :attr:`CompiledIntent.unparsed`.
 
-    Returns a lowercase index. Matching in :func:`compile_intent` is whole-word,
-    so "Son" will not match inside "Sonny".
+    That rule now applies to display names too, not only to derived surnames.
+    Exempting them let the ambiguous case through the front door.
+
+    Args:
+        players: Player code to display name.
+        full_names: Player code to full name, e.g. ``"Bruno Fernandes"``. Supply
+            it and "bruno fernandes" resolves exactly, which is what makes the
+            ambiguous surname recoverable rather than merely refused.
+
+    Returns a lowercase index. Matching is whole-word, so "Son" will not match
+    inside "Sonny".
     """
-    surnames: dict[str, set[int]] = {}
+    candidates: dict[str, set[int]] = {}
+
+    def offer(key: str, code: int) -> None:
+        cleaned = " ".join(str(key).strip().lower().split())
+        if cleaned:
+            candidates.setdefault(cleaned, set()).add(int(code))
+
     for code, name in players.items():
+        offer(str(name), int(code))
         parts = str(name).strip().split()
         if len(parts) > 1:
-            surnames.setdefault(parts[-1].lower(), set()).add(int(code))
+            offer(parts[-1], int(code))
 
-    index: dict[str, int] = {}
-    for code, name in players.items():
-        cleaned = str(name).strip()
-        if cleaned:
-            index[cleaned.lower()] = int(code)
-    for surname, codes in surnames.items():
-        if len(codes) == 1 and surname not in index:
-            index[surname] = next(iter(codes))
-    return index
+    for code, name in (full_names or {}).items():
+        offer(str(name), int(code))
+        parts = str(name).strip().split()
+        if len(parts) > 1:
+            # "Bruno Borges Fernandes" is also written "Bruno Fernandes".
+            offer(f"{parts[0]} {parts[-1]}", int(code))
+            offer(parts[-1], int(code))
+
+    return {key: next(iter(codes)) for key, codes in candidates.items() if len(codes) == 1}
 
 
 #: Number words the horizon parser understands, so "next three gameweeks" works

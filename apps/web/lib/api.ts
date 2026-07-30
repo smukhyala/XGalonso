@@ -303,6 +303,8 @@ export interface Requirement {
   confidence: number | null;
   /** The phrase that produced it — so you can see why it thinks you asked. */
   evidence: string;
+  /** "matched" by a vocabulary rule, or "model" if a language model read it. */
+  source: "matched" | "model";
 }
 
 /** A requirement sent back after editing. Replaces the parse, never adds to it. */
@@ -324,6 +326,14 @@ export interface ParsedRequirements {
   /** Contradictions found without solving, e.g. four players from one club. */
   problems: string[];
   overall_confidence: number;
+  interpreted: boolean;
+  /** Why the model was or was not consulted. Shown, never swallowed. */
+  interpreter_note: string;
+  /** A lean read from the request, e.g. "differential". Not a requirement. */
+  ownership_preference: string;
+  risk_preference: string;
+  /** Understood but not expressible as a requirement. */
+  model_notes: string[];
 }
 
 export interface RequirementOutcome {
@@ -481,11 +491,15 @@ export const api = {
       `/recommend/${entryId}${squadFile ? `?squad_file=${encodeURIComponent(squadFile)}` : ""}`,
     ),
   buildSquadExplained: () => get<SquadBuild>("/build-squad/explained"),
-  parseRequirements: (text: string, preset = "expected_points") =>
-    post<ParsedRequirements>("/requirements/parse", { text, preset }),
+  parseRequirements: (text: string, preset = "expected_points", interpret = false) =>
+    post<ParsedRequirements>("/requirements/parse", { text, preset, interpret }),
 
-  plan: (body: { text: string; preset?: string; requirements?: RequirementInput[] }) =>
-    post<Plan>("/squad/plan", body),
+  plan: (body: {
+    text: string;
+    preset?: string;
+    requirements?: RequirementInput[];
+    interpret?: boolean;
+  }) => post<Plan>("/squad/plan", body),
 
   objectives: () => get<ObjectivePreset[]>("/objectives"),
 
