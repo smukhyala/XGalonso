@@ -8,6 +8,7 @@ we use" would pass just as well with a gate that allows everything.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 import polars as pl
@@ -167,9 +168,21 @@ class TestRobotsGate:
 
 
 class TestFetch:
+    """Fetches here are respx-mocked, so `XG_ALONSO_OFFLINE` is cleared per test.
+
+    The guard exists so a test reaching for the *real* network fails loudly
+    instead of flaking. respx intercepts every request in these, and an
+    unmocked one raises — so the guarantee the guard provides is already held by
+    stricter means. `test_honours_offline_mode` sets it back on purpose.
+    """
+
     @respx.mock
-    def test_refuses_before_downloading_when_the_origin_says_no(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_refuses_before_downloading_when_the_origin_says_no(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from xg_alonso.storage.bronze import FileSystemBronzeStore
+
+        monkeypatch.delenv("XG_ALONSO_OFFLINE", raising=False)
 
         robots = respx.get("https://www.football-data.co.uk/robots.txt").mock(
             return_value=httpx.Response(200, text=_UNDERSTAT_ROBOTS)
@@ -190,8 +203,12 @@ class TestFetch:
         assert payload.call_count == 0, "a refused source must cost no download"
 
     @respx.mock
-    def test_writes_a_bronze_snapshot(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_writes_a_bronze_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from xg_alonso.storage.bronze import FileSystemBronzeStore
+
+        monkeypatch.delenv("XG_ALONSO_OFFLINE", raising=False)
 
         respx.get("https://www.football-data.co.uk/robots.txt").mock(
             return_value=httpx.Response(200, text=_PERMISSIVE_ROBOTS)
@@ -211,8 +228,12 @@ class TestFetch:
         assert bronze.read(result.ref) == body
         assert bronze.latest(f"{SOURCE_MATCH_EVENTS}.E0.2024-25") is not None
 
-    def test_rejects_an_unknown_division_before_touching_the_network(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_rejects_an_unknown_division_before_touching_the_network(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from xg_alonso.storage.bronze import FileSystemBronzeStore
+
+        monkeypatch.delenv("XG_ALONSO_OFFLINE", raising=False)
 
         with pytest.raises(KeyError):
             fetch_match_events_season(
@@ -222,7 +243,7 @@ class TestFetch:
                 division="ZZ",
             )
 
-    def test_honours_offline_mode(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def test_honours_offline_mode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from xg_alonso.storage.bronze import FileSystemBronzeStore
 
         monkeypatch.setenv("XG_ALONSO_OFFLINE", "1")

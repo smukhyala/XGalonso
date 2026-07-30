@@ -331,6 +331,18 @@ def generate_with_llm(
     and partly ours, and the registry would attribute the whole thing to the
     model.
     """
+    # Key first, then the SDK. Both are legitimate reasons to be unavailable, but
+    # the missing key is far the more common and it is the one a user can act on
+    # without touching the install. Checking the import first also made the error
+    # depend on the environment: with the extra installed you were told about the
+    # key, and without it you were told about the package, for the same call.
+    key = api_key or load_api_key(env_file=env_file)
+    if not key:
+        raise LlmUnavailableError(
+            "no ANTHROPIC_API_KEY in the environment or in .env. The deterministic "
+            "generator runs without one; set a key only to enable LLM proposals."
+        )
+
     try:
         import anthropic
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on install extras
@@ -338,13 +350,6 @@ def generate_with_llm(
             "the `anthropic` package is not installed. Install the optional extra: "
             "`uv sync --extra llm`. The deterministic generator runs without it."
         ) from exc
-
-    key = api_key or load_api_key(env_file=env_file)
-    if not key:
-        raise LlmUnavailableError(
-            "no ANTHROPIC_API_KEY in the environment or in .env. The deterministic "
-            "generator runs without one; set a key only to enable LLM proposals."
-        )
 
     evidence = _Evidence(
         available_columns=tuple(available_columns),

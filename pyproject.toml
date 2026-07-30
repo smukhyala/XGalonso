@@ -178,6 +178,15 @@ mypy_path = [
 module = ["duckdb.*", "scipy.*", "sklearn.*"]
 ignore_missing_imports = true
 
+# `anthropic` is an optional extra, so a default install genuinely does not have
+# it and CI type-checks without it. Both call sites already guard the import
+# with `try/except ImportError` and degrade to "the deterministic path runs
+# alone", so an absent module is a supported state rather than a broken one.
+# Without this, the core install could not be type-checked at all.
+[[tool.mypy.overrides]]
+module = ["anthropic.*"]
+ignore_missing_imports = true
+
 # ---------------------------------------------------------------------------
 # pytest
 # ---------------------------------------------------------------------------
