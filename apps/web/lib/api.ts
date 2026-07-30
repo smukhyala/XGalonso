@@ -276,6 +276,80 @@ export interface FeatureImportance {
 }
 
 
+
+// --- Requirements and planning -------------------------------------------
+
+export type RequirementKind =
+  | "must_start"
+  | "must_include"
+  | "must_exclude"
+  | "must_captain"
+  | "club_floor"
+  | "club_ceiling"
+  | "formation"
+  | "bank_floor";
+
+export interface Requirement {
+  kind: RequirementKind;
+  label: string;
+  players: number[];
+  player_names: string[];
+  team_id: number | null;
+  count: number | null;
+  formation: string | null;
+  amount: number | null;
+  priority: number;
+  /** How sure the parser was. Null when supplied directly rather than parsed. */
+  confidence: number | null;
+  /** The phrase that produced it — so you can see why it thinks you asked. */
+  evidence: string;
+}
+
+/** A requirement sent back after editing. Replaces the parse, never adds to it. */
+export interface RequirementInput {
+  kind: RequirementKind;
+  players?: number[];
+  team_id?: number | null;
+  count?: number | null;
+  formation?: string | null;
+  amount?: number | null;
+  priority?: number;
+}
+
+export interface ParsedRequirements {
+  objective_id: string;
+  requirements: Requirement[];
+  unparsed: string[];
+  unresolved_names: string[];
+  /** Contradictions found without solving, e.g. four players from one club. */
+  problems: string[];
+  overall_confidence: number;
+}
+
+export interface RequirementOutcome {
+  kind: RequirementKind;
+  label: string;
+  honoured: boolean;
+  /** Points given up, holding the others fixed. Zero means it cost nothing. */
+  cost: number | null;
+  note: string;
+}
+
+export interface Plan {
+  objective_id: string;
+  model_note: string;
+  gameweek: number;
+  formation: string;
+  bank: number;
+  expected_points: number;
+  unconstrained_points: number;
+  total_cost: number;
+  feasible_as_asked: boolean;
+  players: SquadPlayer[];
+  outcomes: RequirementOutcome[];
+  parsed: ParsedRequirements | null;
+}
+
 // --- Objective-conditioned discovery -------------------------------------
 
 export interface ObjectivePreset {
@@ -379,6 +453,21 @@ async function get<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+/** POST helper. Same error discipline as `get`: the server's detail wins. */
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`/api${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(detail.detail ?? `Request failed (${response.status})`);
+  }
+  return response.json() as Promise<T>;
+}
+
 export const api = {
   health: () => get<Health>("/health"),
   players: (limit = 20) => get<PlayerSummary[]>(`/players?limit=${limit}`),
@@ -392,6 +481,12 @@ export const api = {
       `/recommend/${entryId}${squadFile ? `?squad_file=${encodeURIComponent(squadFile)}` : ""}`,
     ),
   buildSquadExplained: () => get<SquadBuild>("/build-squad/explained"),
+  parseRequirements: (text: string, preset = "expected_points") =>
+    post<ParsedRequirements>("/requirements/parse", { text, preset }),
+
+  plan: (body: { text: string; preset?: string; requirements?: RequirementInput[] }) =>
+    post<Plan>("/squad/plan", body),
+
   objectives: () => get<ObjectivePreset[]>("/objectives"),
 
   experiments: () => get<Experiment[]>("/experiments"),

@@ -203,6 +203,9 @@ function Masthead({
         />
       </div>
 
+      <Link href="/plan" className="eyebrow transition-opacity hover:opacity-70">
+        Plan
+      </Link>
       <Link href="/discovery" className="eyebrow transition-opacity hover:opacity-70">
         Discovery
       </Link>

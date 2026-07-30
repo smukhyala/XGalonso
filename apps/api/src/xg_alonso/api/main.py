@@ -627,6 +627,102 @@ def feature_importance(
 # ---------------------------------------------------------------------------
 
 
+class RequirementOut(BaseModel):
+    """One thing the manager asked for, as the UI needs to show and edit it."""
+
+    kind: str
+    label: str
+    players: list[int] = Field(default_factory=list)
+    player_names: list[str] = Field(default_factory=list)
+    team_id: int | None = None
+    count: int | None = None
+    formation: str | None = None
+    amount: int | None = None
+    priority: int = 0
+    confidence: float | None = Field(
+        default=None, description="How sure the parser was, when this came from text."
+    )
+    evidence: str = Field(default="", description="The phrase that produced it.")
+
+
+class RequirementInput(BaseModel):
+    """A requirement supplied directly, bypassing the parser.
+
+    The UI sends these after a manager edits what the parser produced. Editing
+    is the point: natural language is ambiguous, so the parse is a proposal and
+    this is the accepted version.
+    """
+
+    kind: str
+    players: list[int] = Field(default_factory=list)
+    team_id: int | None = None
+    count: int | None = None
+    formation: str | None = None
+    amount: int | None = None
+    priority: int = 0
+
+
+class ParsedRequirementsResponse(BaseModel):
+    """What the parser made of a request, before anything is built."""
+
+    objective_id: str
+    requirements: list[RequirementOut] = Field(default_factory=list)
+    unparsed: list[str] = Field(default_factory=list)
+    unresolved_names: list[str] = Field(default_factory=list)
+    problems: list[str] = Field(
+        default_factory=list,
+        description="Contradictions detectable without solving, e.g. four from one club.",
+    )
+    overall_confidence: float = 0.0
+
+
+class RequirementOutcomeOut(BaseModel):
+    """What happened to one requirement, and what honouring it cost."""
+
+    kind: str
+    label: str
+    honoured: bool
+    cost: float | None = Field(
+        default=None,
+        description=(
+            "Expected points given up, holding the other requirements fixed. "
+            "Zero is a real answer: the optimizer wanted this anyway."
+        ),
+    )
+    note: str = ""
+
+
+class PlanRequest(BaseModel):
+    """Build a squad to a set of requirements."""
+
+    text: str = Field(default="", description="What you want, in plain English")
+    preset: str = Field(default="expected_points")
+    requirements: list[RequirementInput] | None = Field(
+        default=None,
+        description=(
+            "Explicit requirements. When present these are used *instead of* "
+            "parsing the text, so an edited set is never silently re-derived."
+        ),
+    )
+
+
+class PlanResponse(BaseModel):
+    """A squad built to requirements, and the price of each."""
+
+    objective_id: str
+    model_note: str = Field(description="Which model scored the candidates, and why.")
+    gameweek: int
+    formation: str
+    bank: int
+    expected_points: float
+    unconstrained_points: float
+    total_cost: float
+    feasible_as_asked: bool
+    players: list[SquadPlayer] = Field(default_factory=list)
+    outcomes: list[RequirementOutcomeOut] = Field(default_factory=list)
+    parsed: ParsedRequirementsResponse | None = None
+
+
 class CompileRequest(BaseModel):
     """A manager's request, in their own words."""
 
@@ -687,6 +783,44 @@ class ObjectivePreset(BaseModel):
     risk_preference: str
     planning_horizon: int
     ownership_preference: str
+
+
+@app.post("/requirements/parse", response_model=ParsedRequirementsResponse)
+def parse_requirements(payload: CompileRequest, service: ServiceDep) -> ParsedRequirementsResponse:
+    """Read squad requirements out of a request, without building anything.
+
+    Fast enough to call as the manager types. Nothing is solved here — the point
+    is to show the interpretation *before* acting on it, because a system that
+    acts on its own guess without showing it will eventually act on a wrong one
+    silently.
+    """
+    try:
+        return ParsedRequirementsResponse(
+            **service.parse_requirements(payload.text, preset=payload.preset)
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/squad/plan", response_model=PlanResponse)
+def plan_squad(payload: PlanRequest, service: ServiceDep) -> PlanResponse:
+    """Build the best legal squad that honours what was asked for.
+
+    Requirements are hard bounds on the solver, so each is either honoured
+    exactly or reported as impossible — never approximated. When a set cannot
+    all hold, the lowest-priority requirements are dropped until one can and
+    every dropped one is named.
+
+    This solves a MILP and prices each requirement by re-solving without it, so
+    it is measured in seconds rather than milliseconds. It is still a request
+    rather than a job because the whole thing runs well under a timeout; the
+    minute-long work in this system is `xg discover`, which is deliberately not
+    exposed.
+    """
+    try:
+        return PlanResponse(**service.plan_squad(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/objectives", response_model=list[ObjectivePreset])

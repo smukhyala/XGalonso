@@ -454,6 +454,9 @@ function Masthead() {
         </span>
       </Link>
       <nav className="flex gap-6">
+        <Link href="/plan" className="eyebrow transition-opacity hover:opacity-70">
+          Plan
+        </Link>
         <Link href="/features" className="eyebrow transition-opacity hover:opacity-70">
           Feature lab
         </Link>

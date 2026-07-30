@@ -1360,6 +1360,220 @@ class DecisionService:
         )
         return self._squad_response(squad, prices_assumed=False)
 
+    # -- requirements and planning -----------------------------------------
+
+    def _name_index(self) -> dict[str, int]:
+        from xg_alonso.domain.intent import build_name_index
+
+        return build_name_index(
+            {int(code): str(row["web_name"]) for code, row in self._player_rows().items()}
+        )
+
+    def _team_index(self) -> dict[str, int]:
+        index: dict[str, int] = {}
+        for row in self._context.teams.iter_rows(named=True):
+            index[str(row["name"])] = int(row["team_id"])
+            short = row.get("short_name")
+            if short:
+                index[str(short)] = int(row["team_id"])
+        return index
+
+    def _compile(self, text: str, preset: str) -> Any:
+        from xg_alonso.domain.intent import compile_intent
+
+        return compile_intent(
+            text,
+            players=self._name_index(),
+            teams=self._team_index(),
+            base_preset=preset,
+            next_gameweek=int(self._context.next_gameweek()),
+        )
+
+    def _requirement_out(self, requirement: Any, evidence: str = "") -> dict[str, Any]:
+        names = {int(code): str(row["web_name"]) for code, row in self._player_rows().items()}
+        return {
+            "kind": requirement.kind.value,
+            "label": requirement.label,
+            "players": [int(c) for c in requirement.players],
+            "player_names": [names.get(int(c), str(int(c))) for c in requirement.players],
+            "team_id": None if requirement.team_id is None else int(requirement.team_id),
+            "count": requirement.count,
+            "formation": requirement.formation,
+            "amount": None if requirement.amount is None else int(requirement.amount),
+            "priority": requirement.priority,
+            "evidence": evidence,
+        }
+
+    def parse_requirements(self, text: str, *, preset: str = "expected_points") -> dict[str, Any]:
+        """Parse without solving. Cheap enough to call as a manager types."""
+        from xg_alonso.optimization.requirements import as_requirements, coherence_problems
+
+        intent = self._compile(text, preset)
+        bundle = intent.requirements
+
+        # Each chip carries the phrase that produced it, so a manager can see
+        # *why* the parser thinks they asked for something. Matched on the field
+        # name the parser recorded rather than on the rendered label — a label is
+        # display text and will be reworded eventually, at which point a
+        # label-based match would quietly stop finding anything.
+        from xg_alonso.contracts.objective import RequirementKind
+
+        field_for = {
+            RequirementKind.MUST_START: "start",
+            RequirementKind.MUST_INCLUDE: "include",
+            RequirementKind.MUST_EXCLUDE: "exclude",
+            RequirementKind.MUST_CAPTAIN: "captain",
+            RequirementKind.CLUB_FLOOR: RequirementKind.CLUB_FLOOR.value,
+            RequirementKind.CLUB_CEILING: RequirementKind.CLUB_CEILING.value,
+            RequirementKind.FORMATION: "formation",
+            RequirementKind.BANK_FLOOR: "bank_floor",
+        }
+        names = {int(code): str(row["web_name"]) for code, row in self._player_rows().items()}
+
+        out: list[dict[str, Any]] = []
+        for requirement in bundle.requirements:
+            prefix = f"requirements.{field_for[requirement.kind]}"
+            # A player requirement is keyed with the name in brackets, so two
+            # locks of the same kind stay distinguishable.
+            wanted = prefix
+            if requirement.players:
+                who = names.get(int(requirement.players[0]), "")
+                wanted = f"{prefix}[{who}]"
+
+            match = next(
+                (c for c in intent.confidences if c.field == wanted),
+                next((c for c in intent.confidences if c.field.startswith(prefix)), None),
+            )
+            row = self._requirement_out(requirement, match.evidence if match else "")
+            row["confidence"] = match.confidence if match else None
+            out.append(row)
+
+        teams_of = {
+            PlayerCode(int(code)): int(row["team_id"]) for code, row in self._player_rows().items()
+        }
+        problems = coherence_problems(
+            as_requirements(bundle),
+            teams_of=teams_of,
+            max_per_club=self._context.squad_rules.max_per_club,
+        )
+
+        return {
+            "objective_id": intent.bundle.objective.id,
+            "requirements": out,
+            "unparsed": list(intent.unparsed),
+            "unresolved_names": [],
+            "problems": problems,
+            "overall_confidence": intent.overall_confidence,
+        }
+
+    def plan_squad(self, payload: Any) -> dict[str, Any]:
+        """Build a squad to a set of requirements, and price each one.
+
+        An explicit requirement list replaces the parse rather than adding to
+        it. That is the whole point of showing the interpretation first: once a
+        manager has edited it, silently re-deriving from the original text would
+        discard their correction.
+        """
+        from xg_alonso.contracts.objective import (
+            Requirement,
+            RequirementKind,
+            SquadRequirements,
+        )
+        from xg_alonso.optimization.squad_builder import build_constrained_squad
+
+        intent = self._compile(payload.text or "", payload.preset)
+        parsed = self.parse_requirements(payload.text or "", preset=payload.preset)
+
+        if payload.requirements is None:
+            requirements = intent.requirements
+        else:
+            names = {int(code): str(row["web_name"]) for code, row in self._player_rows().items()}
+            supplied: list[Requirement] = []
+            for item in payload.requirements:
+                kind = RequirementKind(item.kind)
+                who = ", ".join(names.get(int(c), str(c)) for c in item.players)
+                label = {
+                    RequirementKind.MUST_START: f"{who} must start",
+                    RequirementKind.MUST_INCLUDE: f"{who} in the squad",
+                    RequirementKind.MUST_EXCLUDE: f"never pick {who}",
+                    RequirementKind.MUST_CAPTAIN: f"captain {who}",
+                    RequirementKind.CLUB_FLOOR: f"at least {item.count} from club {item.team_id}",
+                    RequirementKind.CLUB_CEILING: f"at most {item.count} from club {item.team_id}",
+                    RequirementKind.FORMATION: f"play {item.formation}",
+                    RequirementKind.BANK_FLOOR: f"leave {(item.amount or 0) / 10:.1f}m in the bank",
+                }[kind]
+                supplied.append(
+                    Requirement(
+                        kind=kind,
+                        label=label,
+                        players=tuple(PlayerCode(int(c)) for c in item.players),
+                        team_id=None if item.team_id is None else TeamId(int(item.team_id)),
+                        count=item.count,
+                        formation=item.formation,
+                        amount=(None if item.amount is None else TenthsOfMillion(int(item.amount))),
+                        priority=item.priority,
+                    )
+                )
+            requirements = SquadRequirements(requirements=tuple(supplied))
+
+        gameweek = self._context.next_gameweek()
+        predictions = self._predict(gameweek)
+        rows = self._player_rows()
+        available = {
+            code: row for code, row in rows.items() if row.get("status") in (None, "a", "d")
+        }
+        candidates = [
+            SquadCandidate(
+                player_code=p.player_code,
+                position=p.position,
+                team_id=TeamId(int(available[int(p.player_code)]["team_id"])),
+                price=TenthsOfMillion(int(available[int(p.player_code)]["current_price"])),
+                prediction=p,
+            )
+            for p in predictions
+            if int(p.player_code) in available
+        ]
+
+        built = build_constrained_squad(
+            candidates,
+            rules=self._context.squad_rules,
+            entry_id=EntryId(0),
+            gameweek=gameweek,
+            requirements=requirements,
+            predictions={p.player_code: p for p in predictions},
+        )
+
+        response = self._squad_response(built.squad, prices_assumed=False)
+        return {
+            "objective_id": intent.bundle.objective.id,
+            "model_note": self._model_note(),
+            "gameweek": int(gameweek),
+            "formation": built.selection.formation_label,
+            "bank": int(built.squad.bank),
+            "expected_points": built.expected_points,
+            "unconstrained_points": built.unconstrained_points,
+            "total_cost": built.total_cost,
+            "feasible_as_asked": built.feasible_as_asked,
+            "players": response.players,
+            "outcomes": [
+                {
+                    "kind": outcome.requirement.kind.value,
+                    "label": outcome.requirement.label,
+                    "honoured": outcome.honoured,
+                    "cost": outcome.cost,
+                    "note": outcome.note,
+                }
+                for outcome in built.outcomes
+            ],
+            "parsed": parsed,
+        }
+
+    def _model_note(self) -> str:
+        """Which model scored the candidates. Named so the number is traceable."""
+        if self._models is None:
+            return "closed-form baseline"
+        return f"trained model {self._models.fingerprint()[:12]}"
+
     # -- objective-conditioned feature discovery ---------------------------
     #
     # Read surfaces over what `xg discover` produced, plus the objective
