@@ -159,6 +159,164 @@ def ingest(
         typer.echo(f"\n  pinned the rules from this snapshot -> {_pinned_path(data_root, parsed)}")
 
 
+@app.command()
+def refresh(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    entry_id: Annotated[
+        int | None,
+        typer.Option("--entry", help="Your FPL team id, so squad changes rank as critical."),
+    ] = None,
+    squad_file: Annotated[
+        Path | None, typer.Option("--squad-file", help="Picks JSON, when the API has no squad yet.")
+    ] = None,
+    show_all: Annotated[
+        bool, typer.Option("--all", help="List the minor events too, not just what matters.")
+    ] = False,
+) -> None:
+    """Re-read the official payload and report what changed.
+
+    **This is the answer to "the platform did not know".** A striker picked up a
+    foot injury and FPL published `status='i'` with a dated news line against
+    him; the recommendation kept naming him because nobody re-read the source.
+    No amount of scraping fixes that — one re-poll does.
+
+    Costs exactly one request for all 564 players however much moved, so it is
+    a scheduled job rather than anything a query triggers. FPL sends no ETag,
+    but `cache-control: max-age=300` means polling faster than five minutes
+    returns CDN-cached bytes; run it on the deadline, and hourly on the days
+    before one.
+
+    Writes an append-only event log. Nothing downstream ever fetches — it reads
+    what this wrote, and the API reports how old that is rather than presenting
+    stale numbers with a confident face.
+    """
+    import json
+
+    from xg_alonso.contracts.events import Materiality
+    from xg_alonso.pipelines.ingestion import SOURCE_BOOTSTRAP, diff_bootstrap
+
+    parsed = parse_season(season)
+    run_id = f"refresh-{uuid.uuid4().hex[:12]}"
+    bronze = _bronze(data_root)
+
+    previous_ref = bronze.latest(SOURCE_BOOTSTRAP)
+    previous = json.loads(bronze.read(previous_ref)) if previous_ref else None
+
+    pinned_scoring, pinned_squad = _load_pinned_rules(data_root, parsed)
+    with FplApiClient() as client:
+        result = ingest_bootstrap(
+            client=client,
+            bronze=bronze,
+            season=parsed,
+            run_id=run_id,
+            pinned_scoring=pinned_scoring,
+            pinned_squad=pinned_squad,
+        )
+
+    current_ref = result.snapshots[0]
+    current = json.loads(bronze.read(current_ref))
+    typer.echo(
+        f"  polled bootstrap-static  {current_ref.byte_size:,} bytes  "
+        f"{current_ref.content_sha256[:12]}"
+    )
+
+    # Content-addressed bronze makes an unchanged payload free: identical bytes
+    # write nothing, so the hash comparison ends the run before a single player
+    # is examined.
+    if previous_ref is not None and previous_ref.content_sha256 == current_ref.content_sha256:
+        typer.echo("  unchanged since the last poll — nothing to do")
+        _write_events(data_root, [], checked_at=utc_now())
+        return
+
+    held: list[int] = []
+    if entry_id is not None or squad_file is not None:
+        try:
+            context = _load_context(data_root, parsed)
+            state = _squad_state(context, entry_id or 0, squad_file)
+            held = [int(p.player_code) for p in state.picks]
+        except Exception as exc:
+            typer.secho(f"  (no squad loaded: {exc})", fg=typer.colors.YELLOW)
+
+    diff = diff_bootstrap(
+        previous,
+        current,
+        detected_at=utc_now(),
+        squad=held,
+        previous_hash=previous_ref.content_sha256 if previous_ref else "",
+        current_hash=current_ref.content_sha256,
+        payload_bytes=current_ref.byte_size,
+    )
+
+    if previous is None:
+        typer.echo("  first snapshot — no baseline to compare against yet")
+        _write_events(data_root, [], checked_at=diff.compared_at)
+        return
+
+    surfaced = diff.worth_surfacing()
+    minor = [e for e in diff.events if not e.materiality.is_worth_surfacing]
+    typer.echo(f"  compared {diff.players_compared:,} players — {len(diff.events)} change(s)")
+
+    if surfaced:
+        typer.echo("")
+        for event in surfaced:
+            colour = (
+                typer.colors.RED
+                if event.materiality is Materiality.CRITICAL
+                else typer.colors.YELLOW
+            )
+            typer.secho(f"  {event.materiality.value.upper():<8} {event.headline}", fg=colour)
+            stamp = (
+                event.source_reported_at.strftime("%d %b %H:%M")
+                if event.source_reported_at
+                else "no source timestamp"
+            )
+            typer.echo(f"           {event.reason} · reported {stamp}")
+            if event.detail and event.detail not in event.headline:
+                typer.echo(f'           "{event.detail}"')
+    else:
+        typer.echo("  nothing material")
+
+    if minor:
+        if show_all:
+            typer.echo("\n  minor:")
+            for event in minor:
+                typer.echo(f"    {event.headline}  ({event.reason})")
+        else:
+            names = ", ".join(e.web_name for e in minor[:6])
+            more = f" and {len(minor) - 6} more" if len(minor) > 6 else ""
+            typer.echo(f"  minor ({len(minor)}): {names}{more}   --all to list")
+
+    path = _write_events(data_root, list(diff.events), checked_at=diff.compared_at)
+    typer.echo(f"\n  appended to {path}")
+
+
+def _write_events(data_root: Path, events: list[Any], *, checked_at: datetime) -> Path:
+    """Append events to the log and record when we last looked.
+
+    **Append-only, and the timestamp is written even when nothing changed.**
+    "We checked and nothing moved" and "we have not checked since Tuesday" are
+    entirely different states, and a log that only grows on change cannot tell
+    them apart — which is exactly the confusion that let a stale snapshot look
+    current.
+    """
+    import json
+
+    directory = data_root / "events"
+    directory.mkdir(parents=True, exist_ok=True)
+
+    log = directory / "player_events.jsonl"
+    with log.open("a", encoding="utf-8") as handle:
+        for event in events:
+            handle.write(event.model_dump_json() + "\n")
+
+    (directory / "last_checked.json").write_text(
+        json.dumps({"checked_at": checked_at.isoformat(), "events": len(events)}, indent=2),
+        encoding="utf-8",
+    )
+    return log
+
+
 def _pinned_path(data_root: Path, season: Season) -> Path:
     return data_root / "pinned" / f"rules_{season}.json"
 

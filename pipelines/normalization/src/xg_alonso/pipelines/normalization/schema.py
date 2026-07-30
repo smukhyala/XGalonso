@@ -42,6 +42,16 @@ PLAYERS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "current_price": pl.Int64(),  # tenths of a million
     "status": pl.Utf8(),  # a=available, i=injured, s=suspended, u=unavailable, d=doubtful
     "chance_of_playing_next_round": pl.Int64(),
+    "chance_of_playing_this_round": pl.Int64(),
+    # Why the free-text news is carried, when `status` already encodes
+    # availability: `news_added` is an **authoritative event timestamp from the
+    # source**. It says when the club's announcement reached FPL, which is the
+    # one thing a change-detector cannot derive by diffing — a diff knows
+    # something moved, not when it moved or why. Dropping these fields was how a
+    # 9.9%-owned striker stayed in the recommended eleven with a foot injury
+    # already published against his name.
+    "news": pl.Utf8(),
+    "news_added": _UTC,
     # Share of managers owning the player, as a percentage. Published on every
     # element and previously dropped.
     #

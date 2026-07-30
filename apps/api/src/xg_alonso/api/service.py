@@ -21,6 +21,7 @@ import os
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -475,18 +476,57 @@ class DecisionService:
 
         gameweek = self._context.next_gameweek()
         deadline = self._context.deadline_for(gameweek)
+        checked_at, unseen = self._freshness()
+        now = utc_now()
         return HealthResponse(
             status="ok",
-            season=str(self._season),
+            season=self._config.season,
             next_gameweek=int(gameweek),
             deadline=deadline,
             players_loaded=self._context.players.height,
             history_rows=self._context.player_stats.height,
             model_loaded=self._models is not None,
-            # A snapshot older than the deadline it is predicting cannot reflect
-            # team news, so saying so is more useful than a confident number.
-            stale=deadline < utc_now(),
+            stale=deadline < now,
+            last_checked=checked_at,
+            seconds_since_check=None
+            if checked_at is None
+            else int((now - checked_at).total_seconds()),
+            unseen_events=unseen,
         )
+
+    def _freshness(self) -> tuple[datetime | None, int]:
+        """When the source was last polled, and how many material events wait.
+
+        Read from what `xg refresh` wrote rather than by fetching. The API never
+        reaches for the network on a request — a page that blocks on an origin
+        is a page that fails when the origin does.
+        """
+        import json
+
+        directory = self._config.data_root / "events"
+        marker = directory / "last_checked.json"
+        if not marker.exists():
+            return None, 0
+
+        try:
+            payload = json.loads(marker.read_text())
+            checked_at = datetime.fromisoformat(str(payload["checked_at"]))
+        except (OSError, ValueError, KeyError):
+            return None, 0
+
+        unseen = 0
+        log = directory / "player_events.jsonl"
+        if log.exists():
+            try:
+                for line in log.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    if record.get("materiality") in {"critical", "material"}:
+                        unseen += 1
+            except (OSError, ValueError):
+                return checked_at, 0
+        return checked_at, unseen
 
     def players(
         self,

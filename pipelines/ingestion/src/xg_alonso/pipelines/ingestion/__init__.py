@@ -41,6 +41,11 @@ from xg_alonso.pipelines.ingestion.bootstrap import (
     load_rules_from_snapshot,
     read_snapshot_payload,
 )
+from xg_alonso.pipelines.ingestion.changes import (
+    MATERIAL_OWNERSHIP,
+    diff_bootstrap,
+    elements_by_code,
+)
 from xg_alonso.pipelines.ingestion.fpl_client import (
     FPL_BASE_URL,
     FplApiClient,
@@ -80,6 +85,7 @@ __all__ = [
     "DIVISIONS",
     "FOOTBALL_DATA_BASE_URL",
     "FPL_BASE_URL",
+    "MATERIAL_OWNERSHIP",
     "REQUIRED_COLUMNS",
     "SOURCE_ARCHIVE_GW",
     "SOURCE_ARCHIVE_PLAYERS",
@@ -102,7 +108,9 @@ __all__ = [
     "RobotsUnavailableError",
     "derive_available_time",
     "detect_preseason_hazards",
+    "diff_bootstrap",
     "division_name",
+    "elements_by_code",
     "fetch_archive_season",
     "fetch_archive_teams",
     "fetch_match_events_season",

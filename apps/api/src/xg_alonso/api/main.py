@@ -78,6 +78,21 @@ class HealthResponse(BaseModel):
         "which means the stored snapshot is out of date."
     )
 
+    # Freshness is reported rather than hidden. A confident projection built on
+    # a three-day-old snapshot is worse than one that says how old it is: an
+    # injured striker stayed in the recommended eleven for exactly as long as
+    # nobody could see when the source was last read.
+    last_checked: datetime | None = Field(
+        default=None, description="When `xg refresh` last polled the official payload."
+    )
+    seconds_since_check: int | None = Field(
+        default=None, description="Age of that poll. Null means it has never run."
+    )
+    unseen_events: int = Field(
+        default=0,
+        description="Material changes recorded since the last poll that a reader has not been shown.",
+    )
+
 
 class HistoryNoteOut(BaseModel):
     """A checkable fact about what this player has done in this situation.
