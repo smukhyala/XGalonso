@@ -32,6 +32,7 @@ from xg_alonso.contracts.identifiers import (
     TeamId,
     TenthsOfMillion,
 )
+from xg_alonso.contracts.objective import ObjectiveBundle
 from xg_alonso.contracts.prediction import PlayerPrediction, Position
 from xg_alonso.contracts.recommendation import TransferRecommendation
 from xg_alonso.contracts.squad import ChipState, ChipStatus, SquadPick, SquadState
@@ -49,6 +50,14 @@ from xg_alonso.features.slice1 import (
     build_slice1_features,
     build_team_gameweek_stats,
 )
+from xg_alonso.optimization.objective import (
+    ConstraintReport,
+    ObjectiveContext,
+    constraint_filter,
+    objective_valued,
+    opportunity_cost,
+    validate_constraints,
+)
 from xg_alonso.optimization.transfer import (
     Candidate,
     best_single_transfer,
@@ -62,6 +71,7 @@ from xg_alonso.pipelines.normalization import (
     normalize_teams,
 )
 from xg_alonso.prediction.baseline import predict_frame
+from xg_alonso.prediction.beliefs import BeliefAdjustment, apply_beliefs
 from xg_alonso.prediction.form import apply_form_signals, load_signals
 from xg_alonso.prediction.inference import predict_with_models
 from xg_alonso.prediction.trained import ComponentModels
@@ -79,12 +89,14 @@ _DEFAULT_SIGNALS = Path(".data/signals/form_signals.json")
 
 __all__ = [
     "PRICES_WERE_ASSUMED",
+    "ObjectiveRecommendation",
     "SliceContext",
     "build_context",
     "build_entities",
     "fetch_squad",
     "load_squad_file",
     "recommend",
+    "recommend_for_objective",
 ]
 
 
@@ -680,3 +692,197 @@ def fetch_squad(
     # not warn about a budget it can actually stand behind.
     PRICES_WERE_ASSUMED[int(entry_id)] = not reconstruction.complete
     return state.model_copy(update={"chips": chips})
+
+
+@dataclass(frozen=True)
+class ObjectiveRecommendation:
+    """A recommendation made under a manager's objective, with its counterfactuals.
+
+    Three things are carried side by side rather than collapsed, because a user
+    needs to tell them apart:
+
+    - ``raw`` — what the model says, unconditioned. The evidence.
+    - ``adjusted`` — the same search after the manager's stated beliefs. Shown
+      *next to* ``raw``, never instead of it, so a hunch never arrives wearing a
+      model's authority.
+    - ``constraint_report`` and ``opportunity_costs`` — what the manager's own
+      instructions removed from consideration, and what that cost.
+
+    A recommendation that cannot separate "the model preferred this" from "you
+    told me to" is one nobody can argue with intelligently.
+    """
+
+    raw: TransferRecommendation
+    adjusted: TransferRecommendation | None
+    constraint_report: ConstraintReport
+    opportunity_costs: tuple[tuple[PlayerCode, PlayerCode | None, float], ...] = ()
+    """``(held_player, best_alternative, points_forgone)`` per locked player."""
+
+    belief_adjustments: tuple[BeliefAdjustment, ...] = ()
+    constraint_problems: tuple[str, ...] = ()
+
+    @property
+    def beliefs_changed_the_answer(self) -> bool:
+        """Whether acting on the stated beliefs produces a different move.
+
+        The question a sensitivity display exists to answer. When this is false,
+        the beliefs were heard and simply did not matter — which is worth saying
+        explicitly rather than leaving a user to infer it from two identical
+        recommendations.
+        """
+        if self.adjusted is None:
+            return False
+        return self.raw.package.moves != self.adjusted.package.moves
+
+
+def recommend_for_objective(
+    *,
+    context: SliceContext,
+    squad: SquadState,
+    bundle: ObjectiveBundle,
+    entry_id: EntryId,
+    run_id: str,
+    code_version: str,
+    generated_at: datetime,
+    models: ComponentModels | None = None,
+    form_signals_path: Path | None = None,
+) -> ObjectiveRecommendation:
+    """Recommend a transfer under an objective, its constraints and its beliefs.
+
+    The three are applied at three different points, which is not an accident:
+
+    - **Constraints** filter the search *before* anything is scored. A lock is
+      not a penalty a good enough alternative can overcome.
+    - **The objective** re-prices every prediction through
+      :func:`~xg_alonso.optimization.objective.objective_valued`, one
+      substitution point that every scoring path already reads — so the captain
+      and the squad around him cannot end up chosen on different objectives.
+    - **Beliefs** produce a *second* recommendation rather than replacing the
+      first.
+    """
+    gameweek = squad.gameweek
+    problems = validate_constraints(bundle.constraints, squad)
+
+    base_recommendation, predictions = recommend(
+        context=context,
+        squad=squad,
+        entry_id=entry_id,
+        run_id=run_id,
+        code_version=code_version,
+        generated_at=generated_at,
+        horizon_gameweeks=1,
+        models=models,
+        form_signals_path=form_signals_path,
+        horizon=bundle.objective.planning_horizon,
+    )
+    del base_recommendation  # rebuilt below under the objective
+
+    rows = list(context.players.iter_rows(named=True))
+    price_by_code = {
+        PlayerCode(int(r["player_code"])): TenthsOfMillion(int(r["current_price"])) for r in rows
+    }
+    team_by_code = {PlayerCode(int(r["player_code"])): int(r["team_id"]) for r in rows}
+    available = {int(r["player_code"]) for r in rows if r.get("status") in (None, "a", "d")}
+
+    # Ownership share, for the objective's differential and template terms. Taken
+    # from `selected` over the visible pool: FPL does not publish effective
+    # ownership, so this is a share of the market, not of the field, and is
+    # labelled a proxy wherever it surfaces.
+    ownership = _ownership_share(context)
+
+    objective_context = ObjectiveContext(ownership=ownership, prices=price_by_code)
+
+    sellable, buyable, report = constraint_filter(
+        squad,
+        constraints=bundle.constraints,
+        candidate_codes=[c for c in predictions if int(c) in available],
+        candidate_teams=team_by_code,
+    )
+
+    def _build(source: dict[PlayerCode, PlayerPrediction], tag: str) -> TransferRecommendation:
+        priced = objective_valued(source, objective=bundle.objective, context=objective_context)
+        candidates = [
+            Candidate(
+                player_code=code,
+                position=priced[code].position,
+                team_id=TeamId(team_by_code[code]),
+                price=price_by_code[code],
+                prediction=priced[code],
+            )
+            for code in buyable
+            if code in priced and code in price_by_code and code in team_by_code
+        ]
+        return best_single_transfer(
+            squad,
+            candidates=candidates,
+            predictions=priced,
+            rules=context.squad_rules,
+            entry_id=entry_id,
+            gameweek=gameweek,
+            generated_at=generated_at,
+            run_id=run_id,
+            optimizer_config_hash=f"{bundle.objective.cache_key()}:{tag}",
+            horizon_gameweeks=bundle.objective.planning_horizon,
+            sellable=sellable,
+        )
+
+    raw = _build(predictions, "raw")
+
+    adjusted: TransferRecommendation | None = None
+    adjustments: tuple[BeliefAdjustment, ...] = ()
+    if bundle.beliefs:
+        applied = apply_beliefs(
+            list(predictions.values()),
+            bundle.beliefs,
+            gameweek=gameweek,
+            rules=context.scoring,
+        )
+        adjustments = tuple(a for a in applied if a.moved)
+        adjusted = _build({a.player_code: a.adjusted for a in applied}, "belief_adjusted")
+
+    # What each lock gave up. Reported, never acted on: the manager asked for the
+    # player to be kept, not for the system to argue about it every week.
+    costs: list[tuple[PlayerCode, PlayerCode | None, float]] = []
+    for pick in squad.picks:
+        if pick.player_code in sellable:
+            continue
+        best, forgone = opportunity_cost(
+            pick,
+            predictions=predictions,
+            candidates=list(buyable),
+            prices=price_by_code,
+            budget=TenthsOfMillion(pick.selling_price + squad.bank),
+            objective=bundle.objective,
+            context=objective_context,
+        )
+        if forgone > 0:
+            costs.append((pick.player_code, best, forgone))
+
+    return ObjectiveRecommendation(
+        raw=raw,
+        adjusted=adjusted,
+        constraint_report=report,
+        opportunity_costs=tuple(sorted(costs, key=lambda entry: -entry[2])),
+        belief_adjustments=adjustments,
+        constraint_problems=problems,
+    )
+
+
+def _ownership_share(context: SliceContext) -> dict[PlayerCode, float]:
+    """Each player's ownership as a share of the most-owned player.
+
+    **A proxy, and labelled one.** FPL publishes `selected_by_percent` on the
+    bootstrap payload but not effective ownership, which accounts for captaincy
+    and is what actually determines rank movement. Normalising to the most-owned
+    player keeps the scale stable across seasons as the manager base changes.
+    """
+    if "selected_by_percent" not in context.players.columns:
+        return {}
+    values = {
+        PlayerCode(int(r["player_code"])): float(r.get("selected_by_percent") or 0.0)
+        for r in context.players.iter_rows(named=True)
+    }
+    peak = max(values.values(), default=0.0)
+    if peak <= 0:
+        return {}
+    return {code: value / peak for code, value in values.items()}

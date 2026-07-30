@@ -21,6 +21,7 @@ import os
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,7 @@ from xg_alonso.contracts.reason_codes import Reason
 from xg_alonso.contracts.recommendation import TransferOption
 from xg_alonso.contracts.squad import SquadState
 from xg_alonso.evaluation.importance import load_importance
+from xg_alonso.explanations.context import build_fixture_run, build_season_lines
 from xg_alonso.explanations.derivation import derive_points
 from xg_alonso.explanations.history import build_history_notes
 from xg_alonso.explanations.lineup_diff import compare_lineups, selection_from_starters
@@ -69,6 +71,7 @@ from xg_alonso.features.slice1 import (
 )
 from xg_alonso.optimization import SquadCandidate, best_starting_xi, build_squad
 from xg_alonso.optimization.horizon import discount_weights, value_over_horizon
+from xg_alonso.optimization.objective import ObjectiveContext, objective_valued
 from xg_alonso.pipelines.ingestion import SOURCE_BOOTSTRAP, SOURCE_FIXTURES, FplApiClient
 from xg_alonso.pipelines.normalization import PLAYER_GAMEWEEK_STATS_SCHEMA, empty_frame
 from xg_alonso.prediction import load_models, predict_with_models
@@ -367,10 +370,17 @@ class DecisionService:
         derivation: list[Any] = []
         horizon: list[Any] = []
         horizon_total: float | None = None
+        context = None
         if with_depth:
             derivation, _ = self._derivation_out(prediction)
             horizon, horizon_total = self._horizon_out(
                 prediction.from_gameweek, prediction.player_code, self._HORIZON_WEEKS
+            )
+            context = self._context_out(
+                player_code=int(prediction.player_code),
+                position=prediction.position.value,
+                team_id=int(row["team_id"]),
+                gameweek=prediction.from_gameweek,
             )
         return PlayerSummary(
             player_code=int(prediction.player_code),
@@ -387,6 +397,76 @@ class DecisionService:
             derivation=derivation,
             horizon=horizon,
             horizon_total=horizon_total,
+            context=context,
+        )
+
+    def _context_out(
+        self, *, player_code: int, position: str, team_id: int, gameweek: GameweekId
+    ) -> Any:
+        """Prior seasons and the upcoming run, as the API shape.
+
+        Built only for the deep payload. On a 600-row board this would be 600
+        multi-season aggregations to render text nobody has scrolled to yet.
+        """
+        from xg_alonso.api.main import (
+            FixtureRunOut,
+            PlayerContextOut,
+            ScheduledFixtureOut,
+            SeasonLineOut,
+        )
+
+        stats = self._context.player_stats
+        cutoff = self._context.deadline_for(gameweek)
+        seasons = build_season_lines(stats, player_code=player_code, cutoff=cutoff)
+
+        team_names = {
+            int(row["team_id"]): str(row["short_name"] or row["name"])
+            for row in self._context.teams.iter_rows(named=True)
+        }
+        run = build_fixture_run(
+            self._context.fixtures,
+            team_id=team_id,
+            from_gameweek=int(gameweek),
+            team_names=team_names,
+        )
+
+        return PlayerContextOut(
+            seasons=[
+                SeasonLineOut(
+                    season=line.season,
+                    appearances=line.appearances,
+                    minutes=line.minutes,
+                    goals=line.goals,
+                    assists=line.assists,
+                    clean_sheets=line.clean_sheets,
+                    points=line.points,
+                    expected_goals=line.expected_goals,
+                    expected_assists=line.expected_assists,
+                    per_90=line.per_90,
+                    points_per_appearance=line.points_per_appearance,
+                    sentence=line.sentence(position),
+                )
+                for line in seasons
+            ],
+            run=FixtureRunOut(
+                fixtures=[
+                    ScheduledFixtureOut(
+                        gameweek=fixture.gameweek,
+                        opponent=fixture.opponent,
+                        is_home=fixture.is_home,
+                        difficulty=fixture.difficulty,
+                        label=fixture.label,
+                    )
+                    for fixture in run.fixtures
+                ],
+                mean_difficulty=run.mean_difficulty,
+                home_count=run.home_count,
+                blanks=list(run.blanks),
+                doubles=list(run.doubles),
+                sentence=run.sentence(),
+            )
+            if run.fixtures
+            else None,
         )
 
     # -- endpoints --------------------------------------------------------
@@ -396,18 +476,57 @@ class DecisionService:
 
         gameweek = self._context.next_gameweek()
         deadline = self._context.deadline_for(gameweek)
+        checked_at, unseen = self._freshness()
+        now = utc_now()
         return HealthResponse(
             status="ok",
-            season=str(self._season),
+            season=self._config.season,
             next_gameweek=int(gameweek),
             deadline=deadline,
             players_loaded=self._context.players.height,
             history_rows=self._context.player_stats.height,
             model_loaded=self._models is not None,
-            # A snapshot older than the deadline it is predicting cannot reflect
-            # team news, so saying so is more useful than a confident number.
-            stale=deadline < utc_now(),
+            stale=deadline < now,
+            last_checked=checked_at,
+            seconds_since_check=None
+            if checked_at is None
+            else int((now - checked_at).total_seconds()),
+            unseen_events=unseen,
         )
+
+    def _freshness(self) -> tuple[datetime | None, int]:
+        """When the source was last polled, and how many material events wait.
+
+        Read from what `xg refresh` wrote rather than by fetching. The API never
+        reaches for the network on a request — a page that blocks on an origin
+        is a page that fails when the origin does.
+        """
+        import json
+
+        directory = self._config.data_root / "events"
+        marker = directory / "last_checked.json"
+        if not marker.exists():
+            return None, 0
+
+        try:
+            payload = json.loads(marker.read_text())
+            checked_at = datetime.fromisoformat(str(payload["checked_at"]))
+        except (OSError, ValueError, KeyError):
+            return None, 0
+
+        unseen = 0
+        log = directory / "player_events.jsonl"
+        if log.exists():
+            try:
+                for line in log.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    if record.get("materiality") in {"critical", "material"}:
+                        unseen += 1
+            except (OSError, ValueError):
+                return checked_at, 0
+        return checked_at, unseen
 
     def players(
         self,
@@ -468,13 +587,29 @@ class DecisionService:
                 "The picks endpoint returns 404 until that gameweek's deadline."
             ) from exc
 
-    def _squad_response(self, squad: SquadState, *, prices_assumed: bool) -> SquadResponse:
+    def _squad_response(
+        self,
+        squad: SquadState,
+        *,
+        prices_assumed: bool,
+        selection: Any | None = None,
+    ) -> SquadResponse:
+        """Render a squad.
+
+        ``selection`` pins the eleven and the armband a caller already chose.
+        Without it the XI is re-derived here, which is right for an
+        unconstrained squad and **wrong the moment a requirement binds the
+        eleven**: re-deriving discards every `must_start` and `must_captain`,
+        so the response would report a requirement honoured while displaying a
+        lineup that ignored it. That is worse than either failure alone.
+        """
         from xg_alonso.api.main import SquadPlayer, SquadResponse
 
         gameweek = squad.gameweek
         by_code = {p.player_code: p for p in self._predict(gameweek)}
         rows = self._player_rows()
-        selection = best_starting_xi(squad.picks, by_code, self._context.squad_rules)
+        if selection is None:
+            selection = best_starting_xi(squad.picks, by_code, self._context.squad_rules)
         starters = {p.player_code for p in selection.starters}
 
         players: list[SquadPlayer] = []
@@ -1098,15 +1233,21 @@ class DecisionService:
         *,
         label: str | None = None,
         family: str | None = None,
+        position: str | None = None,
         limit: int = 60,
     ) -> FeatureImportanceResponse:
-        """Serve the measured importance table.
+        """Serve the measured importance table, pooled or for one position.
 
         Reads the parquet `xg importance` writes rather than computing on
         demand: a permutation run is minutes of work over 184 features and nine
         labels, and doing it inside a request would make the page look broken.
+
+        ``position`` defaults to the pooled slice. It is a filter over rows that
+        were *measured* separately, never a reweighting of pooled numbers — a
+        defender's ranking comes from permuting features on defenders' rows.
         """
         from xg_alonso.api.main import FeatureImportanceOut, FeatureImportanceResponse
+        from xg_alonso.evaluation.importance import ALL_POSITIONS
 
         path = self._config.data_root / "gold" / "feature_importance.parquet"
         if not path.exists():
@@ -1118,19 +1259,38 @@ class DecisionService:
 
         labels = sorted(frame["label"].unique().to_list())
         degenerate = sorted(frame.filter(pl.col("degenerate_label"))["label"].unique().to_list())
-        weights = {
-            str(row["label"]): float(row["label_weight"])
-            for row in frame.select(["label", "label_weight"]).unique().iter_rows(named=True)
-        }
+
+        # Weights are read from the *selected slice*, not the whole frame. Each
+        # slice carries its own weighting now — a keeper's points are mostly
+        # saves and clean sheets, a forward's are mostly goals — so a frame-wide
+        # `unique()` yields one row per (label, slice) and the dict below would
+        # silently keep whichever happened to come last.
+        def _weights(rows: pl.DataFrame) -> dict[str, float]:
+            return {
+                str(row["label"]): float(row["label_weight"])
+                for row in rows.select(["label", "label_weight"]).unique().iter_rows(named=True)
+            }
+
+        positions = sorted(frame["position"].unique().drop_nulls().to_list())
+        wanted_position = position or ALL_POSITIONS
 
         scoped = frame.filter(~pl.col("degenerate_label"))
+        # Filter to one slice *before* anything else. Without this every
+        # aggregate below would average a defender's measurement together with a
+        # striker's and call the result importance.
+        scoped = scoped.filter(pl.col("position") == wanted_position)
         if label is not None:
             scoped = scoped.filter(pl.col("label") == label)
         if family is not None:
             scoped = scoped.filter(pl.col("family") == family)
 
         if scoped.is_empty():
-            raise LookupError(f"no importance rows for label={label!r} family={family!r}")
+            raise LookupError(
+                f"no importance rows for position={wanted_position!r} "
+                f"label={label!r} family={family!r}"
+            )
+
+        weights = _weights(frame.filter(pl.col("position") == wanted_position))
 
         # A single label is already a like-for-like comparison, so weighting it
         # would only rescale every row by the same constant and make the numbers
@@ -1181,14 +1341,25 @@ class DecisionService:
             degenerate_labels=degenerate,
             labels=labels,
             label_weights=weights,
-            folds_measured=int(frame["fold_index"].n_unique()),
-            features_measured=int(frame["feature_name"].n_unique()),
+            folds_measured=int(scoped["fold_index"].n_unique()),
+            features_measured=int(scoped["feature_name"].n_unique()),
+            position=wanted_position,
+            positions=positions,
+            rows_measured=self._slice_rows(scoped),
             features_with_no_effect=int(ranked.filter(pl.col("importance") <= 0.0).height),
             catalogue_version=str(frame["catalogue_version"][0]),
             model_fingerprint=fingerprint,
             computed_at=frame["computed_at"][0],
             stale=(self._models is not None and self._models.fingerprint() != fingerprint),
         )
+
+    @staticmethod
+    def _slice_rows(scoped: pl.DataFrame) -> int:
+        """Validation rows behind a slice, or 0 when the table predates the field."""
+        if "rows_measured" not in scoped.columns:
+            return 0
+        counts = scoped["rows_measured"].cast(pl.Int64, strict=False).drop_nulls().to_list()
+        return int(max(counts)) if counts else 0
 
     @staticmethod
     def _rank_stability(scoped: pl.DataFrame) -> dict[str, float]:
@@ -1245,3 +1416,563 @@ class DecisionService:
             predictions={p.player_code: p for p in predictions},
         )
         return self._squad_response(squad, prices_assumed=False)
+
+    # -- requirements and planning -----------------------------------------
+
+    def _name_index(self) -> dict[str, int]:
+        """Every form a manager might write a player's name in.
+
+        Full names are supplied as well as display names, because FPL's display
+        name is a short form nobody types — and because two players can share
+        one. "Fernandes" is Bruno's teammate-in-name Mateus in the 2026/27 game,
+        so the bare surname resolves to neither and "bruno fernandes" resolves
+        exactly.
+        """
+        from xg_alonso.domain.intent import build_name_index
+
+        rows = self._player_rows()
+        display = {int(code): str(row["web_name"]) for code, row in rows.items()}
+        full: dict[int, str] = {}
+        for code, row in rows.items():
+            first = str(row.get("first_name") or "").strip()
+            second = str(row.get("second_name") or "").strip()
+            if first and second:
+                full[int(code)] = f"{first} {second}"
+        return build_name_index(display, full_names=full)
+
+    def _team_index(self) -> dict[str, int]:
+        index: dict[str, int] = {}
+        for row in self._context.teams.iter_rows(named=True):
+            index[str(row["name"])] = int(row["team_id"])
+            short = row.get("short_name")
+            if short:
+                index[str(short)] = int(row["team_id"])
+        return index
+
+    def _compile(self, text: str, preset: str) -> Any:
+        from xg_alonso.domain.intent import compile_intent
+
+        return compile_intent(
+            text,
+            players=self._name_index(),
+            teams=self._team_index(),
+            base_preset=preset,
+            next_gameweek=int(self._context.next_gameweek()),
+        )
+
+    def _requirement_out(
+        self, requirement: Any, evidence: str = "", source: str = "matched"
+    ) -> dict[str, Any]:
+        names = {int(code): str(row["web_name"]) for code, row in self._player_rows().items()}
+        return {
+            "kind": requirement.kind.value,
+            "label": requirement.label,
+            "players": [int(c) for c in requirement.players],
+            "player_names": [names.get(int(c), str(int(c))) for c in requirement.players],
+            "team_id": None if requirement.team_id is None else int(requirement.team_id),
+            "count": requirement.count,
+            "formation": requirement.formation,
+            "amount": None if requirement.amount is None else int(requirement.amount),
+            "priority": requirement.priority,
+            "evidence": evidence,
+            "source": source,
+        }
+
+    def parse_requirements(
+        self, text: str, *, preset: str = "expected_points", interpret: bool = False
+    ) -> dict[str, Any]:
+        """Parse without solving. Cheap enough to call as a manager types.
+
+        ``interpret`` adds a language-model pass over what the vocabulary could
+        not key on. It runs *after* the deterministic parse and never overrides
+        it: where both read the same player, the matched reading wins, because
+        it can show the phrase that produced it. Any failure — no key, no SDK,
+        a bad call — leaves the deterministic parse standing and is reported in
+        ``interpreter_note`` rather than swallowed.
+        """
+        from xg_alonso.optimization.requirements import as_requirements, coherence_problems
+
+        intent = self._compile(text, preset)
+        bundle = intent.requirements
+
+        # Each chip carries the phrase that produced it, so a manager can see
+        # *why* the parser thinks they asked for something. Matched on the field
+        # name the parser recorded rather than on the rendered label — a label is
+        # display text and will be reworded eventually, at which point a
+        # label-based match would quietly stop finding anything.
+        from xg_alonso.contracts.objective import RequirementKind
+
+        field_for = {
+            RequirementKind.MUST_START: "start",
+            RequirementKind.MUST_INCLUDE: "include",
+            RequirementKind.MUST_EXCLUDE: "exclude",
+            RequirementKind.MUST_CAPTAIN: "captain",
+            RequirementKind.CLUB_FLOOR: RequirementKind.CLUB_FLOOR.value,
+            RequirementKind.CLUB_CEILING: RequirementKind.CLUB_CEILING.value,
+            RequirementKind.FORMATION: "formation",
+            RequirementKind.BANK_FLOOR: "bank_floor",
+        }
+        names = {int(code): str(row["web_name"]) for code, row in self._player_rows().items()}
+
+        out: list[dict[str, Any]] = []
+        for requirement in bundle.requirements:
+            prefix = f"requirements.{field_for[requirement.kind]}"
+            # A player requirement is keyed with the name in brackets, so two
+            # locks of the same kind stay distinguishable.
+            wanted = prefix
+            if requirement.players:
+                who = names.get(int(requirement.players[0]), "")
+                wanted = f"{prefix}[{who}]"
+
+            match = next(
+                (c for c in intent.confidences if c.field == wanted),
+                next((c for c in intent.confidences if c.field.startswith(prefix)), None),
+            )
+            row = self._requirement_out(requirement, match.evidence if match else "")
+            row["confidence"] = match.confidence if match else None
+            out.append(row)
+
+        teams_of = {
+            PlayerCode(int(code)): int(row["team_id"]) for code, row in self._player_rows().items()
+        }
+        problems = coherence_problems(
+            as_requirements(bundle),
+            teams_of=teams_of,
+            max_per_club=self._context.squad_rules.max_per_club,
+        )
+
+        result: dict[str, Any] = {
+            "objective_id": intent.bundle.objective.id,
+            "requirements": out,
+            "unparsed": list(intent.unparsed),
+            "unresolved_names": [],
+            "problems": problems,
+            "overall_confidence": intent.overall_confidence,
+            "interpreted": False,
+            "interpreter_note": "",
+            "ownership_preference": "",
+            "risk_preference": "",
+            "model_notes": [],
+        }
+
+        if interpret and text.strip():
+            result.update(self._interpret(text, bundle, out))
+
+        return result
+
+    def _interpret(self, text: str, bundle: Any, matched: list[dict[str, Any]]) -> dict[str, Any]:
+        """Second pass. Additive, attributed, and never able to break the first."""
+        from xg_alonso.interpreter import InterpreterUnavailableError, interpret_request
+
+        try:
+            reading = interpret_request(
+                text,
+                players=self._name_index(),
+                teams=self._team_index(),
+                already_parsed=bundle.requirements,
+                unparsed=[],
+            )
+        except InterpreterUnavailableError as exc:
+            return {"interpreted": False, "interpreter_note": str(exc)}
+        except Exception as exc:
+            return {
+                "interpreted": False,
+                "interpreter_note": f"the model could not be reached: {type(exc).__name__}",
+            }
+
+        added = [
+            self._requirement_out(
+                requirement, reading.readings.get(requirement.label, ""), source="model"
+            )
+            for requirement in reading.requirements
+        ]
+        note = "read by claude-opus-5"
+        if reading.unresolved_names:
+            note += f"; could not place {reading.unresolved_names}"
+        return {
+            "requirements": [*matched, *added],
+            "interpreted": True,
+            "interpreter_note": note,
+            "ownership_preference": reading.ownership_preference,
+            "risk_preference": reading.risk_preference,
+            "model_notes": list(reading.notes),
+            "unresolved_names": list(reading.unresolved_names),
+        }
+
+    def plan_squad(self, payload: Any) -> dict[str, Any]:
+        """Build a squad to a set of requirements, and price each one.
+
+        An explicit requirement list replaces the parse rather than adding to
+        it. That is the whole point of showing the interpretation first: once a
+        manager has edited it, silently re-deriving from the original text would
+        discard their correction.
+        """
+        from xg_alonso.contracts.objective import (
+            Requirement,
+            RequirementKind,
+            SquadRequirements,
+        )
+        from xg_alonso.optimization.squad_builder import build_constrained_squad
+
+        intent = self._compile(payload.text or "", payload.preset)
+        parsed = self.parse_requirements(
+            payload.text or "",
+            preset=payload.preset,
+            interpret=getattr(payload, "interpret", False),
+        )
+
+        if payload.requirements is None:
+            requirements = intent.requirements
+        else:
+            names = {int(code): str(row["web_name"]) for code, row in self._player_rows().items()}
+            supplied: list[Requirement] = []
+            for item in payload.requirements:
+                kind = RequirementKind(item.kind)
+                who = ", ".join(names.get(int(c), str(c)) for c in item.players)
+                label = {
+                    RequirementKind.MUST_START: f"{who} must start",
+                    RequirementKind.MUST_INCLUDE: f"{who} in the squad",
+                    RequirementKind.MUST_EXCLUDE: f"never pick {who}",
+                    RequirementKind.MUST_CAPTAIN: f"captain {who}",
+                    RequirementKind.CLUB_FLOOR: f"at least {item.count} from club {item.team_id}",
+                    RequirementKind.CLUB_CEILING: f"at most {item.count} from club {item.team_id}",
+                    RequirementKind.FORMATION: f"play {item.formation}",
+                    RequirementKind.BANK_FLOOR: f"leave {(item.amount or 0) / 10:.1f}m in the bank",
+                }[kind]
+                supplied.append(
+                    Requirement(
+                        kind=kind,
+                        label=label,
+                        players=tuple(PlayerCode(int(c)) for c in item.players),
+                        team_id=None if item.team_id is None else TeamId(int(item.team_id)),
+                        count=item.count,
+                        formation=item.formation,
+                        amount=(None if item.amount is None else TenthsOfMillion(int(item.amount))),
+                        priority=item.priority,
+                    )
+                )
+            requirements = SquadRequirements(requirements=tuple(supplied))
+
+        gameweek = self._context.next_gameweek()
+        predictions = self._predict(gameweek)
+        rows = self._player_rows()
+        available = {
+            code: row for code, row in rows.items() if row.get("status") in (None, "a", "d")
+        }
+
+        # A lean the model read — "prioritise the non-elite players" — reaches
+        # the squad by re-pricing every prediction through the objective, which
+        # is the one substitution point every scoring path already reads. Left
+        # out, the lean would be a label on a page and nothing else.
+        objective = self._leaning_objective(intent.bundle.objective, parsed)
+        priced = {p.player_code: p for p in predictions}
+        if objective is not None:
+            priced = objective_valued(
+                priced,
+                objective=objective,
+                context=ObjectiveContext(
+                    ownership=self._ownership_share(),
+                    prices={
+                        PlayerCode(int(code)): TenthsOfMillion(int(row["current_price"]))
+                        for code, row in available.items()
+                    },
+                ),
+            )
+
+        candidates = [
+            SquadCandidate(
+                player_code=p.player_code,
+                position=p.position,
+                team_id=TeamId(int(available[int(p.player_code)]["team_id"])),
+                price=TenthsOfMillion(int(available[int(p.player_code)]["current_price"])),
+                prediction=priced.get(p.player_code, p),
+            )
+            for p in predictions
+            if int(p.player_code) in available
+        ]
+
+        built = build_constrained_squad(
+            candidates,
+            rules=self._context.squad_rules,
+            entry_id=EntryId(0),
+            gameweek=gameweek,
+            requirements=requirements,
+            predictions=priced,
+        )
+
+        response = self._squad_response(
+            built.squad, prices_assumed=False, selection=built.selection
+        )
+        return {
+            "objective_id": intent.bundle.objective.id,
+            "model_note": self._model_note(),
+            "gameweek": int(gameweek),
+            "formation": built.selection.formation_label,
+            "bank": int(built.squad.bank),
+            "expected_points": built.expected_points,
+            "unconstrained_points": built.unconstrained_points,
+            "total_cost": built.total_cost,
+            "feasible_as_asked": built.feasible_as_asked,
+            "players": response.players,
+            "outcomes": [
+                {
+                    "kind": outcome.requirement.kind.value,
+                    "label": outcome.requirement.label,
+                    "honoured": outcome.honoured,
+                    "cost": outcome.cost,
+                    "note": outcome.note,
+                }
+                for outcome in built.outcomes
+            ],
+            "parsed": parsed,
+        }
+
+    def _leaning_objective(self, objective: Any, parsed: dict[str, Any]) -> Any:
+        """Fold a model-read lean into the objective, or ``None`` if there is none.
+
+        Returns ``None`` rather than an unchanged objective so the caller can
+        skip re-pricing entirely — an objective that changes nothing should not
+        quietly rewrite every prediction on its way through.
+        """
+        from xg_alonso.contracts.objective import OwnershipPreference, RiskPreference
+
+        updates: dict[str, Any] = {}
+        ownership = parsed.get("ownership_preference") or ""
+        risk = parsed.get("risk_preference") or ""
+        if ownership:
+            updates["ownership_preference"] = OwnershipPreference(ownership)
+        if risk:
+            updates["risk_preference"] = RiskPreference(risk)
+        if not updates:
+            return None
+        return objective.model_copy(update=updates)
+
+    def _ownership_share(self) -> dict[PlayerCode, float]:
+        """Each player's ownership relative to the most-owned. Absent stays absent.
+
+        A player without a published share is left out rather than defaulted to
+        the average: unowned and average-owned are exactly the distinction a
+        differential objective exists to make.
+        """
+        shares: dict[PlayerCode, float] = {}
+        raw: dict[int, float] = {}
+        for code, row in self._player_rows().items():
+            value = row.get("selected_by_percent")
+            if value is None:
+                continue
+            raw[int(code)] = float(value)
+        if not raw:
+            return shares
+        top = max(raw.values())
+        if top <= 0:
+            return shares
+        for code, value in raw.items():
+            shares[PlayerCode(code)] = value / top
+        return shares
+
+    def _model_note(self) -> str:
+        """Which model scored the candidates. Named so the number is traceable."""
+        if self._models is None:
+            return "closed-form baseline"
+        return f"trained model {self._models.fingerprint()[:12]}"
+
+    # -- objective-conditioned feature discovery ---------------------------
+    #
+    # Read surfaces over what `xg discover` produced, plus the objective
+    # compiler. Running an experiment is not exposed: it fits hundreds of models
+    # and there is no job queue here, so a blocking request would time out
+    # rather than serve anybody.
+
+    def _discovery_registry(self) -> Any:
+        """The registry, or a LookupError naming what has not been run yet."""
+        from xg_alonso.discovery.registry import DiscoveryRegistry
+        from xg_alonso.storage import ParquetTableStore
+
+        root = self._config.data_root / "discovery"
+        if not root.exists():
+            raise LookupError(
+                f"no discovery registry under {root}. Run `xg discover` first — an "
+                "empty result here would be indistinguishable from 'nothing was found'."
+            )
+        return DiscoveryRegistry(ParquetTableStore(root))
+
+    def compile_objective(self, text: str, *, preset: str = "expected_points") -> Any:
+        """Parse a manager's request. Deterministic; no language model."""
+        from xg_alonso.domain.intent import build_name_index, compile_intent
+
+        names = build_name_index(
+            {
+                int(row["player_code"]): str(row["web_name"])
+                for row in self._context.players.iter_rows(named=True)
+            }
+        )
+        intent = compile_intent(text, players=names, base_preset=preset)
+        bundle = intent.bundle
+        objective = bundle.objective
+        constraints = bundle.constraints
+        return {
+            "objective_id": objective.id,
+            "primary_metric": objective.primary_metric.value,
+            "risk_preference": objective.risk_preference.value,
+            "planning_horizon": objective.planning_horizon,
+            "ownership_preference": objective.ownership_preference.value,
+            "signed_uncertainty_penalty": objective.signed_uncertainty_penalty,
+            "locked_players": [int(c) for c in constraints.locked_players],
+            "excluded_players": [int(c) for c in constraints.excluded_players],
+            "locked_positions": sorted(p.value for p in constraints.locked_position_set()),
+            "max_points_hit": constraints.max_points_hit,
+            "minimum_bank": int(constraints.minimum_bank),
+            "required_features": list(constraints.required_features),
+            "complement_targets": list(bundle.discovery.complement_targets),
+            "emphasis": list(bundle.discovery.emphasis),
+            "beliefs": [
+                {
+                    "entity_type": b.entity_type.value,
+                    "entity_id": b.entity_id,
+                    "proposition": b.proposition.value,
+                    "confidence": b.confidence,
+                    "rationale": b.rationale,
+                }
+                for b in bundle.beliefs
+            ],
+            "confidences": [
+                {
+                    "field": c.field,
+                    "confidence": c.confidence,
+                    "source": c.source.value,
+                    "evidence": c.evidence,
+                }
+                for c in intent.confidences
+            ],
+            "unparsed": list(intent.unparsed),
+            "overall_confidence": intent.overall_confidence,
+        }
+
+    def objective_presets(self) -> list[dict[str, Any]]:
+        from xg_alonso.domain.objectives import OBJECTIVE_PRESETS
+
+        return [
+            {
+                "id": preset.id,
+                "name": preset.name,
+                "primary_metric": preset.primary_metric.value,
+                "risk_preference": preset.risk_preference.value,
+                "planning_horizon": preset.planning_horizon,
+                "ownership_preference": preset.ownership_preference.value,
+            }
+            for preset in OBJECTIVE_PRESETS
+        ]
+
+    def discovered_features(self, objective_id: str) -> list[dict[str, Any]]:
+        report = self._discovery_registry().acceptance_report(objective_id)
+        return [
+            {
+                "feature": str(row["feature"]),
+                "version": str(row["version"]),
+                "hypothesis_id": str(row["hypothesis_id"]),
+                "status": str(row["status"]),
+                "complementarity": str(row["complementarity"]),
+                "utility": float(row["utility"]),
+                "incremental_value": float(row["incremental_value"]),
+                "folds": int(row["folds"]),
+                "folds_improved": int(row["folds_improved"]),
+                "stability": float(row["stability"]),
+                "missingness": float(row["missingness"]),
+                "leakage_passed": bool(row["leakage_passed"]),
+                "reason": str(row["reason"]),
+            }
+            for row in report.iter_rows(named=True)
+        ]
+
+    def hypotheses(self) -> list[dict[str, Any]]:
+        try:
+            registry = self._discovery_registry()
+        except LookupError:
+            return []
+        return [
+            {
+                "id": h.id,
+                "title": h.title,
+                "football_rationale": h.football_rationale,
+                "falsification_condition": h.falsification_condition,
+                "expected_relationship": h.expected_relationship,
+                "transformation_plan": h.transformation_plan,
+                "required_raw_fields": list(h.required_raw_fields),
+                "status": h.status.value,
+                "generation_source": h.generation_source.value,
+                "leakage_risk": h.leakage_risk.value,
+            }
+            for h in registry.hypotheses()
+        ]
+
+    def clusters(self, *, objective_id: str | None = None) -> list[dict[str, Any]]:
+        try:
+            registry = self._discovery_registry()
+        except LookupError:
+            return []
+        return [
+            {
+                "cluster_model_version": c.cluster_model_version,
+                "cluster_id": c.cluster_id,
+                "objective_id": c.objective_id,
+                "size": c.size,
+                "label": c.label,
+                "dominant_features": [[name, value] for name, value in c.dominant_features],
+            }
+            for c in registry.cluster_summaries(objective_id=objective_id)
+        ]
+
+    def cluster_history(self, player_code: int) -> list[dict[str, Any]]:
+        try:
+            registry = self._discovery_registry()
+        except LookupError:
+            return []
+        frame = registry.cluster_history(player_code)
+        if frame.is_empty():
+            return []
+        return [
+            {
+                "season": str(row.get("season", "")),
+                "gameweek": int(row.get("gameweek", 0) or 0),
+                "cluster_id": int(row["cluster_id"]),
+                "membership_probability": float(row["membership_probability"]),
+                "distance_to_centroid": float(row["distance_to_centroid"]),
+                "objective_id": row.get("objective_id"),
+            }
+            for row in frame.iter_rows(named=True)
+        ]
+
+    def _experiment_payload(self, manifest: Any) -> dict[str, Any]:
+        return {
+            "experiment_id": manifest.experiment_id,
+            "stage": manifest.stage.value,
+            "objective_id": manifest.objective_id,
+            "objective_version": manifest.objective_version,
+            "seasons": list(manifest.seasons),
+            "hypotheses_proposed": manifest.hypotheses_proposed,
+            "features_compiled": manifest.features_compiled,
+            "features_accepted": manifest.features_accepted,
+            "features_rejected": manifest.features_rejected,
+            "reproducible": manifest.reproducible,
+            "code_version": manifest.code_version,
+            "git_dirty": manifest.git_dirty,
+            "started_at": manifest.started_at,
+            "completed_at": manifest.completed_at,
+            "metrics": [[name, value] for name, value in manifest.metrics],
+        }
+
+    def experiments(self) -> list[dict[str, Any]]:
+        try:
+            registry = self._discovery_registry()
+        except LookupError:
+            return []
+        found = sorted(registry.experiments(), key=lambda m: m.started_at, reverse=True)
+        return [self._experiment_payload(m) for m in found]
+
+    def experiment(self, experiment_id: str) -> dict[str, Any] | None:
+        try:
+            registry = self._discovery_registry()
+        except LookupError:
+            return None
+        found = registry.experiment(experiment_id)
+        return None if found is None else self._experiment_payload(found)

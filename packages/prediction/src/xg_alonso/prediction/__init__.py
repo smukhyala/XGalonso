@@ -9,6 +9,7 @@ reproducible, and honest about its uncertainty, which is what the optimizer
 above it needs in order to be judged against holding.
 """
 
+from xg_alonso.prediction.availability import CERTAIN, apply_availability, availability_factor
 from xg_alonso.prediction.baseline import (
     BASELINE_NAME,
     BASELINE_VERSION,
@@ -53,6 +54,7 @@ __all__ = [
     "BASELINE_NAME",
     "BASELINE_VERSION",
     "CALIBRATION_VERSION",
+    "CERTAIN",
     "COMPONENT_LABELS",
     "DEFAULT_REFRESH_BUDGET",
     "PRICE_BAND_BIAS",
@@ -64,9 +66,11 @@ __all__ = [
     "RefreshRequest",
     "SavedModel",
     "TrainingData",
+    "apply_availability",
     "apply_form_signals",
     "apply_price_calibration",
     "attach_feature_evidence",
+    "availability_factor",
     "build_feature_evidence",
     "build_training_frame",
     "estimator_fingerprint",

@@ -55,7 +55,7 @@ from xg_alonso.pipelines.normalization import (
     normalize_element_summary,
     normalize_history_past,
 )
-from xg_alonso.storage import FileSystemBronzeStore
+from xg_alonso.storage import FileSystemBronzeStore, ParquetTableStore
 
 app = typer.Typer(
     name="xg",
@@ -157,6 +157,301 @@ def ingest(
     if pinned_scoring is None:
         _pin_rules(data_root, parsed, result.snapshots[0])
         typer.echo(f"\n  pinned the rules from this snapshot -> {_pinned_path(data_root, parsed)}")
+
+
+@app.command(name="team-news")
+def team_news_command(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    entry_id: Annotated[
+        int | None, typer.Option("--entry", help="Your team id, so your squad is checked first.")
+    ] = None,
+    squad_file: Annotated[
+        Path | None, typer.Option("--squad-file", help="Picks JSON, if the API has no squad yet.")
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", help="How many players to search.")] = 20,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show the shortlist and stop, without searching.")
+    ] = False,
+) -> None:
+    """Search for team news FPL has not published, and file it as form signals.
+
+    **This is the second-class channel, deliberately.** `xg refresh` handles
+    everything official — injuries, suspensions, chance of playing — and a
+    re-poll is authoritative. This is for what no endpoint carries: a coach
+    hinting somebody needs a rest, a returning player taking a place back, a
+    striker who has not looked himself.
+
+    Nothing found here can assert a projection. Every result becomes a form
+    signal, which multiplies expected points within a hard clamp, must carry a
+    source URL or it cannot be constructed at all, and expires. A claim with no
+    link is discarded rather than filed at lower strength.
+
+    Searches a shortlist rather than the league: your squad, then the highly
+    owned and highly projected. Players FPL has already flagged are skipped —
+    the official field is a fact, and an inference restating it would
+    double-count while looking like corroboration.
+    """
+    import json
+
+    from xg_alonso.contracts.form import SignalSet
+    from xg_alonso.interpreter import (
+        InterpreterUnavailableError,
+        search_player_news,
+        shortlist_from,
+    )
+
+    parsed = parse_season(season)
+    context = _load_context(data_root, parsed)
+    gameweek = context.next_gameweek()
+
+    held: list[int] = []
+    if entry_id is not None or squad_file is not None:
+        try:
+            state = _squad_state(context, entry_id or 0, squad_file)
+            held = [int(p.player_code) for p in state.picks]
+        except Exception as exc:
+            typer.secho(f"  (no squad loaded: {exc})", fg=typer.colors.YELLOW)
+
+    projected = {
+        int(p.player_code): p.expected_points
+        for p in _predict_all(context, gameweek, None, data_root=data_root)
+    }
+    rows = list(context.players.iter_rows(named=True))
+    shortlist = shortlist_from(rows, squad=held, expected_points=projected, limit=limit)
+
+    typer.echo(f"Shortlist ({len(shortlist)} of {len(rows)} players)")
+    for entry in shortlist[:12]:
+        typer.echo(f"  {entry.name:<18} {entry.why}")
+    if len(shortlist) > 12:
+        typer.echo(f"  ... and {len(shortlist) - 12} more")
+
+    if dry_run:
+        typer.echo("\n  (dry run — nothing searched)")
+        return
+
+    typer.echo("\n  searching ...")
+    try:
+        sweep = search_player_news(shortlist, now=utc_now())
+    except InterpreterUnavailableError as exc:
+        typer.secho(f"  {exc}", fg=typer.colors.YELLOW)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"  {sweep.summary()}\n")
+    for signal in sweep.signals:
+        colour = typer.colors.RED if signal.direction.value == "negative" else typer.colors.GREEN
+        name = context.player_names().get(signal.player_code, str(signal.player_code))
+        shift = (signal.multiplier - 1.0) * 100.0
+        typer.secho(f"  {name:<18} {shift:+.1f}%  ({signal.strength.value})", fg=colour)
+        typer.echo(f"                     {signal.summary}")
+        for source in signal.sources[:2]:
+            typer.echo(f"                     {source}")
+
+    if sweep.discarded:
+        typer.echo("\n  discarded:")
+        for who, why in sweep.discarded:
+            typer.echo(f"    {who}: {why}")
+
+    if not sweep.signals:
+        typer.echo("  nothing worth filing — the official data is the whole story today")
+        return
+
+    # A signal that lapses before the deadline it would apply to is filed and
+    # never read. That is the correct expiry behaviour — form information is
+    # perishable — but silently writing signals nothing will ever use is not,
+    # so it is said out loud along with when to run this instead.
+    deadline = context.deadline_for(gameweek)
+    stale_on_arrival = [s for s in sweep.signals if not s.is_live(deadline)]
+    if stale_on_arrival:
+        days = (deadline - utc_now()).days
+        typer.secho(
+            f"\n  {len(stale_on_arrival)} of {len(sweep.signals)} expire before the "
+            f"GW{int(gameweek)} deadline ({days} days away) and will never be applied.",
+            fg=typer.colors.YELLOW,
+        )
+        typer.echo("  Team news is a near-deadline tool; run it in the days before one.")
+
+    # Merged rather than replaced, and expiry does the pruning. Overwriting
+    # would silently discard a signal from a source this sweep did not happen to
+    # search, which is not the same as that signal having lapsed.
+    path = data_root / "signals" / "form_signals.json"
+    existing: list[Any] = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text()).get("signals", [])
+        except (OSError, ValueError):
+            existing = []
+
+    fresh = {(s.player_code, s.observed_at.isoformat()) for s in sweep.signals}
+    kept = [
+        record
+        for record in existing
+        if (record.get("player_code"), record.get("observed_at")) not in fresh
+    ]
+    merged = SignalSet(signals=tuple(sweep.signals), loaded_at=utc_now()).model_dump(mode="json")
+    merged["signals"] = [*kept, *merged["signals"]]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    typer.echo(f"\n  {len(merged['signals'])} signal(s) on file -> {path}")
+
+
+@app.command()
+def refresh(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    entry_id: Annotated[
+        int | None,
+        typer.Option("--entry", help="Your FPL team id, so squad changes rank as critical."),
+    ] = None,
+    squad_file: Annotated[
+        Path | None, typer.Option("--squad-file", help="Picks JSON, when the API has no squad yet.")
+    ] = None,
+    show_all: Annotated[
+        bool, typer.Option("--all", help="List the minor events too, not just what matters.")
+    ] = False,
+) -> None:
+    """Re-read the official payload and report what changed.
+
+    **This is the answer to "the platform did not know".** A striker picked up a
+    foot injury and FPL published `status='i'` with a dated news line against
+    him; the recommendation kept naming him because nobody re-read the source.
+    No amount of scraping fixes that — one re-poll does.
+
+    Costs exactly one request for all 564 players however much moved, so it is
+    a scheduled job rather than anything a query triggers. FPL sends no ETag,
+    but `cache-control: max-age=300` means polling faster than five minutes
+    returns CDN-cached bytes; run it on the deadline, and hourly on the days
+    before one.
+
+    Writes an append-only event log. Nothing downstream ever fetches — it reads
+    what this wrote, and the API reports how old that is rather than presenting
+    stale numbers with a confident face.
+    """
+    import json
+
+    from xg_alonso.contracts.events import Materiality
+    from xg_alonso.pipelines.ingestion import SOURCE_BOOTSTRAP, diff_bootstrap
+
+    parsed = parse_season(season)
+    run_id = f"refresh-{uuid.uuid4().hex[:12]}"
+    bronze = _bronze(data_root)
+
+    previous_ref = bronze.latest(SOURCE_BOOTSTRAP)
+    previous = json.loads(bronze.read(previous_ref)) if previous_ref else None
+
+    pinned_scoring, pinned_squad = _load_pinned_rules(data_root, parsed)
+    with FplApiClient() as client:
+        result = ingest_bootstrap(
+            client=client,
+            bronze=bronze,
+            season=parsed,
+            run_id=run_id,
+            pinned_scoring=pinned_scoring,
+            pinned_squad=pinned_squad,
+        )
+
+    current_ref = result.snapshots[0]
+    current = json.loads(bronze.read(current_ref))
+    typer.echo(
+        f"  polled bootstrap-static  {current_ref.byte_size:,} bytes  "
+        f"{current_ref.content_sha256[:12]}"
+    )
+
+    # Content-addressed bronze makes an unchanged payload free: identical bytes
+    # write nothing, so the hash comparison ends the run before a single player
+    # is examined.
+    if previous_ref is not None and previous_ref.content_sha256 == current_ref.content_sha256:
+        typer.echo("  unchanged since the last poll — nothing to do")
+        _write_events(data_root, [], checked_at=utc_now())
+        return
+
+    held: list[int] = []
+    if entry_id is not None or squad_file is not None:
+        try:
+            context = _load_context(data_root, parsed)
+            state = _squad_state(context, entry_id or 0, squad_file)
+            held = [int(p.player_code) for p in state.picks]
+        except Exception as exc:
+            typer.secho(f"  (no squad loaded: {exc})", fg=typer.colors.YELLOW)
+
+    diff = diff_bootstrap(
+        previous,
+        current,
+        detected_at=utc_now(),
+        squad=held,
+        previous_hash=previous_ref.content_sha256 if previous_ref else "",
+        current_hash=current_ref.content_sha256,
+        payload_bytes=current_ref.byte_size,
+    )
+
+    if previous is None:
+        typer.echo("  first snapshot — no baseline to compare against yet")
+        _write_events(data_root, [], checked_at=diff.compared_at)
+        return
+
+    surfaced = diff.worth_surfacing()
+    minor = [e for e in diff.events if not e.materiality.is_worth_surfacing]
+    typer.echo(f"  compared {diff.players_compared:,} players — {len(diff.events)} change(s)")
+
+    if surfaced:
+        typer.echo("")
+        for event in surfaced:
+            colour = (
+                typer.colors.RED
+                if event.materiality is Materiality.CRITICAL
+                else typer.colors.YELLOW
+            )
+            typer.secho(f"  {event.materiality.value.upper():<8} {event.headline}", fg=colour)
+            stamp = (
+                event.source_reported_at.strftime("%d %b %H:%M")
+                if event.source_reported_at
+                else "no source timestamp"
+            )
+            typer.echo(f"           {event.reason} · reported {stamp}")
+            if event.detail and event.detail not in event.headline:
+                typer.echo(f'           "{event.detail}"')
+    else:
+        typer.echo("  nothing material")
+
+    if minor:
+        if show_all:
+            typer.echo("\n  minor:")
+            for event in minor:
+                typer.echo(f"    {event.headline}  ({event.reason})")
+        else:
+            names = ", ".join(e.web_name for e in minor[:6])
+            more = f" and {len(minor) - 6} more" if len(minor) > 6 else ""
+            typer.echo(f"  minor ({len(minor)}): {names}{more}   --all to list")
+
+    path = _write_events(data_root, list(diff.events), checked_at=diff.compared_at)
+    typer.echo(f"\n  appended to {path}")
+
+
+def _write_events(data_root: Path, events: list[Any], *, checked_at: datetime) -> Path:
+    """Append events to the log and record when we last looked.
+
+    **Append-only, and the timestamp is written even when nothing changed.**
+    "We checked and nothing moved" and "we have not checked since Tuesday" are
+    entirely different states, and a log that only grows on change cannot tell
+    them apart — which is exactly the confusion that let a stale snapshot look
+    current.
+    """
+    import json
+
+    directory = data_root / "events"
+    directory.mkdir(parents=True, exist_ok=True)
+
+    log = directory / "player_events.jsonl"
+    with log.open("a", encoding="utf-8") as handle:
+        for event in events:
+            handle.write(event.model_dump_json() + "\n")
+
+    (directory / "last_checked.json").write_text(
+        json.dumps({"checked_at": checked_at.isoformat(), "events": len(events)}, indent=2),
+        encoding="utf-8",
+    )
+    return log
 
 
 def _pinned_path(data_root: Path, season: Season) -> Path:
@@ -629,6 +924,110 @@ def backfill(
         typer.echo(f"  {players_history.height:,} player-seasons -> {players_dest}")
 
 
+@app.command(name="ingest-match-events")
+def ingest_match_events_command(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    seasons: Annotated[
+        str | None,
+        typer.Option("--seasons", help="Comma-separated seasons. Defaults to the D7 range."),
+    ] = None,
+    division: Annotated[
+        str,
+        typer.Option("--division", help="E0 = Premier League, E1 = Championship."),
+    ] = "E0",
+) -> None:
+    """Ingest team-match event counts the official API does not publish.
+
+    Shots, shots on target, corners, fouls and cards, per team per match, from
+    football-data.co.uk — the free source whose robots.txt permits automated
+    access. The richer alternatives do not: Understat disallows every path and
+    FBref sits behind a bot challenge, so this is the resolution available
+    rather than the resolution wanted (see docs/match_event_data.md).
+    """
+    import io
+
+    from xg_alonso.pipelines.ingestion import (
+        BACKFILL_SEASONS,
+        REQUIRED_COLUMNS,
+        SOURCE_ARCHIVE_TEAMS,
+        SOURCE_MATCH_EVENTS,
+        fetch_archive_teams,
+        fetch_match_events_season,
+    )
+    from xg_alonso.pipelines.normalization import build_teams_history, normalize_match_events
+
+    wanted = [s.strip() for s in seasons.split(",")] if seasons else list(BACKFILL_SEASONS)
+    run_id = f"match-events-{uuid.uuid4().hex[:12]}"
+    bronze = _bronze(data_root)
+
+    # The club vocabulary is unioned across every requested season before any
+    # matching happens. A season-by-season map would fail on a club that was
+    # relegated mid-window, and failing there would look like a spelling bug.
+    club_frames: list[pl.DataFrame] = []
+    for season_name in wanted:
+        fetch_archive_teams(season_name, bronze=bronze, run_id=run_id)
+        ref = bronze.latest(f"{SOURCE_ARCHIVE_TEAMS}.{season_name}")
+        if ref is None:
+            continue
+        raw = pl.read_csv(
+            io.BytesIO(bronze.read(ref)), infer_schema_length=None, ignore_errors=True
+        )
+        club_frames.append(build_teams_history(raw, season=parse_season(season_name)))
+
+    if not club_frames:
+        typer.secho("no club list available; cannot resolve team names", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    clubs = pl.concat(club_frames, how="vertical").unique(subset=["team_code", "name"])
+    typer.echo(f"  {clubs.height} club-seasons, {clubs['team_code'].n_unique()} distinct clubs")
+
+    # E1 is Championship: most of its clubs are genuinely absent from FPL rather
+    # than mis-spelled, so an unresolved name there is expected and reported
+    # instead of fatal.
+    strict = division == "E0"
+
+    frames: list[pl.DataFrame] = []
+    for season_name in wanted:
+        typer.echo(f"  {season_name} {division} ...", nl=False)
+        try:
+            fetch_match_events_season(season_name, bronze=bronze, run_id=run_id, division=division)
+        except Exception as exc:
+            typer.secho(f" {type(exc).__name__}: {exc}", fg=typer.colors.RED)
+            continue
+
+        ref = bronze.latest(f"{SOURCE_MATCH_EVENTS}.{division}.{season_name}")
+        if ref is None:
+            typer.secho(" missing after fetch", fg=typer.colors.RED)
+            continue
+
+        report = normalize_match_events(
+            bronze.read(ref),
+            season=season_name,
+            division=division,
+            teams=clubs,
+            required_columns=REQUIRED_COLUMNS,
+            strict=strict,
+        )
+        frames.append(report.frame)
+        note = (
+            ""
+            if report.complete
+            else (f"  unmatched: {list(report.unmatched_teams)}, skipped: {report.skipped_rows}")
+        )
+        typer.echo(f" {report.matches:>4} matches -> {report.frame.height:>5,} rows{note}")
+
+    if not frames:
+        typer.secho("no seasons ingested", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    events = pl.concat(frames, how="vertical")
+    out_dir = data_root / "silver"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    destination = out_dir / "team_match_events.parquet"
+    events.write_parquet(destination)
+    typer.echo(f"\n  {events.height:,} team-match rows -> {destination}")
+
+
 @app.command()
 def backtest(
     season: Annotated[
@@ -1088,9 +1487,256 @@ def _opening_squad(players: pl.DataFrame, squad_rules, season, gameweek):  # typ
     )
 
 
+def _objective_feature_columns(
+    data_root: Path,
+    objective_id: str,
+    frame: pl.DataFrame,
+    player_stats: pl.DataFrame,
+) -> tuple[pl.DataFrame, list[str]]:
+    """Append an objective's accepted discovered features to a frame.
+
+    **This is the wire that makes discovery matter.** Without it the registry
+    records which features serve which objective and nothing downstream reads
+    it, so every objective is scored by the same fixed catalogue and a squad
+    built to chase a mini-league is identical to one built to protect a rank.
+
+    It lives in the CLI rather than in `prediction` because the import lattice
+    puts discovery *above* prediction: the prediction layer must not know that
+    feature discovery exists. Composing the two is an application concern, and
+    this is the application.
+
+    Returns the frame with the extra columns and the names that were added.
+    A feature whose program fails to compile against this frame is skipped with
+    a warning rather than aborting the run — one bad program in a registry of
+    many should not cost a manager their squad — but the skip is announced,
+    because a silently thinner feature set is a silently different model.
+    """
+    from xg_alonso.discovery.compile import CompileContext, compile_program
+    from xg_alonso.discovery.dsl import ProgramError, parse_program
+    from xg_alonso.discovery.registry import DiscoveryRegistry
+    from xg_alonso.features.generators import stage_window
+    from xg_alonso.storage.parquet_store import ParquetTableStore
+
+    directory = data_root / "discovery"
+    if not directory.exists():
+        return frame, []
+
+    registry = DiscoveryRegistry(ParquetTableStore(directory))
+    specs = registry.accepted_features(objective_id)
+    if not specs:
+        return frame, []
+
+    context = CompileContext(player_stats=player_stats, stage=stage_window)
+    added: list[str] = []
+    for spec in specs:
+        if spec.name in frame.columns:
+            continue
+        try:
+            program = parse_program(spec.name, spec.program)
+            frame = compile_program(program, frame, context)
+        except (ProgramError, ValueError, KeyError) as exc:
+            typer.secho(f"    skipped {spec.name}: {exc}", fg=typer.colors.YELLOW)
+            continue
+        added.append(spec.name)
+
+    return frame, added
+
+
+@app.command(name="plan")
+def plan_command(
+    request: Annotated[str, typer.Argument(help="What you want, in plain English.")],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: Annotated[
+        str, typer.Option("--season", help="Season in YYYY-YY form.")
+    ] = DEFAULT_SEASON,
+    model: Annotated[Path | None, typer.Option("--model", help="Trained models to use.")] = None,
+    preset: Annotated[
+        str, typer.Option("--preset", help="Objective to start from before your words modify it.")
+    ] = "expected_points",
+    show_unconstrained: Annotated[
+        bool,
+        typer.Option(
+            "--show-free", help="Also print the squad you would get with no requirements."
+        ),
+    ] = False,
+) -> None:
+    """Build a squad around requirements you type in plain English.
+
+    "I want Haaland starting, keep Saliba, play 3-5-2 and leave 0.5 in the bank"
+
+    Everything you ask for becomes a hard constraint on the solver, never a
+    penalty — so a requirement is either honoured exactly or reported as
+    impossible. When a set cannot all hold, the lowest-priority requirements are
+    dropped until one can and every dropped one is named, because "no legal
+    squad exists" is not something a manager can act on.
+
+    The parsed interpretation is printed **before** anything is built. Natural
+    language is ambiguous, and a system that acts on its own guess without
+    showing it will eventually act on a wrong one silently.
+    """
+    from xg_alonso.contracts.identifiers import EntryId, TeamId
+    from xg_alonso.domain.intent import build_name_index, compile_intent
+    from xg_alonso.optimization.squad_builder import SquadCandidate, build_constrained_squad
+
+    parsed = parse_season(season)
+    context = _load_context(data_root, parsed)
+    gameweek = context.next_gameweek()
+
+    names = context.player_names()
+    name_index = build_name_index({int(code): name for code, name in names.items()})
+    team_index: dict[str, int] = {}
+    for row in context.teams.iter_rows(named=True):
+        team_index[str(row["name"])] = int(row["team_id"])
+        if row.get("short_name"):
+            team_index[str(row["short_name"])] = int(row["team_id"])
+
+    intent = compile_intent(
+        request,
+        players=name_index,
+        teams=team_index,
+        base_preset=preset,
+        next_gameweek=int(gameweek),
+    )
+
+    typer.echo("Parsed request")
+    typer.echo(f"  objective        {intent.bundle.objective.id}")
+    if intent.requirements.requirements:
+        for requirement in intent.requirements.requirements:
+            typer.echo(f"  {requirement.kind.value:<14} {requirement.label}")
+    else:
+        typer.echo("  (no structural requirements — building the free optimum)")
+    if intent.unparsed:
+        typer.secho(f"  not understood   {list(intent.unparsed)}", fg=typer.colors.YELLOW)
+    typer.echo(f"  confidence       {intent.overall_confidence:.0%}")
+
+    # An objective-trained model is preferred when one exists, because it was
+    # fitted on the features discovery found to serve *this* goal. Falling back
+    # to the general model is correct rather than an error — it just means the
+    # squad is chosen by the catalogue alone, and the run says so.
+    from xg_alonso.prediction import load_models
+
+    objective_model_path = (
+        data_root / "models" / f"component_models.{intent.bundle.objective.id}.pkl"
+    )
+    models = None
+    model_note = "general model"
+    chosen_model = model
+    if chosen_model is None:
+        objective_model = (
+            data_root / "models" / f"component_models.{intent.bundle.objective.id}.pkl"
+        )
+        general = data_root / "models" / "component_models.pkl"
+        if objective_model.exists():
+            chosen_model = objective_model
+            model_note = f"model trained for {intent.bundle.objective.id}"
+        elif general.exists():
+            chosen_model = general
+    if chosen_model is not None:
+        models = load_models(chosen_model).models
+    else:
+        model_note = "closed-form baseline (no trained model found)"
+
+    predictions = _predict_all(
+        context,
+        gameweek,
+        models,
+        data_root=data_root,
+        objective_id=intent.bundle.objective.id if chosen_model == objective_model_path else "",
+    )
+
+    # The objective chooses the feature set. This is what makes the same
+    # requirements produce a different squad under a different goal.
+    frame_note = f"  scoring with the {model_note}"
+
+    available = {
+        int(r["player_code"]): r
+        for r in context.players.iter_rows(named=True)
+        if r.get("status") in (None, "a", "d")
+    }
+    candidates = [
+        SquadCandidate(
+            player_code=p.player_code,
+            position=p.position,
+            team_id=TeamId(int(available[int(p.player_code)]["team_id"])),
+            price=TenthsOfMillion(int(available[int(p.player_code)]["current_price"])),
+            prediction=p,
+        )
+        for p in predictions
+        if int(p.player_code) in available
+    ]
+
+    typer.echo(f"\nChoosing from {len(candidates):,} available players for GW{int(gameweek)}")
+    if frame_note:
+        typer.echo(frame_note)
+
+    built = build_constrained_squad(
+        candidates,
+        rules=context.squad_rules,
+        entry_id=EntryId(0),
+        gameweek=gameweek,
+        requirements=intent.requirements,
+    )
+
+    typer.echo(
+        f"\nSquad  {built.expected_points:.2f} pts"
+        f"  ({built.selection.formation_label}, {int(built.squad.bank) / 10:.1f}m banked)"
+    )
+    if built.total_cost > 0:
+        typer.echo(
+            f"  Your requirements cost {built.total_cost:.2f} points against the "
+            f"free optimum of {built.unconstrained_points:.2f}."
+        )
+
+    starters = ", ".join(
+        names.get(p.player_code, str(p.player_code))
+        + ("(C)" if p.is_captain else "(V)" if p.is_vice_captain else "")
+        for p in built.selection.starters
+    )
+    bench = ", ".join(names.get(p.player_code, str(p.player_code)) for p in built.selection.bench)
+    typer.echo(f"  XI     {starters}")
+    typer.echo(f"  Bench  {bench}")
+
+    if built.outcomes:
+        typer.echo("\nWhat you asked for")
+        for outcome in built.outcomes:
+            colour = typer.colors.RED if not outcome.honoured else None
+            typer.secho(f"  {outcome.summary}", fg=colour)
+
+    if not built.feasible_as_asked:
+        typer.secho(
+            "\n  Not everything could hold at once. The requirements above marked "
+            "unhonoured are the ones that had to give.",
+            fg=typer.colors.YELLOW,
+        )
+
+    if show_unconstrained:
+        free = build_constrained_squad(
+            candidates,
+            rules=context.squad_rules,
+            entry_id=EntryId(0),
+            gameweek=gameweek,
+            price_requirements=False,
+        )
+        free_xi = ", ".join(
+            names.get(p.player_code, str(p.player_code)) for p in free.selection.starters
+        )
+        typer.echo(f"\nWithout your requirements  {free.expected_points:.2f} pts")
+        typer.echo(f"  XI     {free_xi}")
+
+
 @app.command()
 def train(
     data_root: DataRoot = DEFAULT_DATA_ROOT,
+    objective: Annotated[
+        str,
+        typer.Option(
+            "--objective",
+            help=(
+                "Train on this objective's accepted discovered features as well as "
+                "the catalogue. Saves alongside the objective id so `xg plan` can find it."
+            ),
+        ),
+    ] = "",
     seasons: Annotated[
         str, typer.Option("--seasons", help="Comma-separated training seasons.")
     ] = "2024-25",
@@ -1127,10 +1773,31 @@ def train(
     data = build_training_frame(stats, seasons=wanted, min_gameweek=min_gameweek)
     typer.echo(f"    {data.rows:,} rows x {len(data.feature_columns)} features")
 
+    # Objective-conditioned training. Discovery decides which features serve
+    # which goal; this is where that decision reaches the model. Without it the
+    # registry is a filing cabinet — every objective would be scored by the same
+    # fixed catalogue and "chase a mini-league" would return the same squad as
+    # "protect my rank".
+    frame = data.frame
+    feature_columns = list(data.feature_columns)
+    if objective:
+        frame, discovered = _objective_feature_columns(data_root, objective, frame, stats)
+        if discovered:
+            feature_columns.extend(discovered)
+            typer.echo(
+                f"    + {len(discovered)} discovered for {objective}: {', '.join(discovered)}"
+            )
+        else:
+            typer.secho(
+                f"    no accepted features for {objective}; "
+                "run `xg discover` first or this is just the catalogue",
+                fg=typer.colors.YELLOW,
+            )
+
     typer.echo("  fitting component models ...")
     models = train_component_models(
-        data.frame,
-        feature_columns=data.feature_columns,
+        frame,
+        feature_columns=tuple(feature_columns),
         label_columns=data.label_columns,
     )
 
@@ -1140,7 +1807,8 @@ def train(
         trained_gameweeks=data.gameweeks,
         saved_at=utc_now(),
     )
-    destination = out or (data_root / "models" / "component_models.pkl")
+    default_name = f"component_models.{objective}.pkl" if objective else "component_models.pkl"
+    destination = out or (data_root / "models" / default_name)
     save_models(saved, destination)
 
     summary = model_summary(saved)
@@ -1287,8 +1955,23 @@ def build_squad_command(
         typer.echo(f"  saved -> {out}")
 
 
-def _predict_all(context: SliceContext, gameweek: GameweekId, models: object | None):  # type: ignore[no-untyped-def]
-    """Predict every player, via the trained models when supplied."""
+def _predict_all(  # type: ignore[no-untyped-def]
+    context: SliceContext,
+    gameweek: GameweekId,
+    models: object | None,
+    *,
+    data_root: Path | None = None,
+    objective_id: str = "",
+):
+    """Predict every player, via the trained models when supplied.
+
+    ``objective_id`` materialises that objective's accepted discovered features
+    onto the prediction frame. A model trained with them expects them, and a
+    prediction frame built from the catalogue alone would be missing columns —
+    so this is the other half of the wire that `xg train --objective` opens.
+    Both halves read the same registry through the same helper, which is what
+    keeps training and inference describing the same feature set.
+    """
     from xg_alonso.cli.pipeline import build_entities
     from xg_alonso.features.assemble import build_model_features
     from xg_alonso.features.catalogue import CATALOGUE_VERSION
@@ -1299,18 +1982,54 @@ def _predict_all(context: SliceContext, gameweek: GameweekId, models: object | N
     cutoff = context.deadline_for(gameweek)
     entities = build_entities(context, cutoff=cutoff)
 
+    def _temper(predictions: list[Any]) -> list[Any]:
+        """Apply what is known about a player beyond the model's features.
+
+        Two adjustments, in order of authority. FPL's published chance of
+        playing is the game's own statement and is applied in full; a form
+        signal is somebody's reading of a match report and is clamped. Both were
+        already available and neither reached this path — a doubtful player was
+        scored as fully fit here while the recommend path knew better, which is
+        the kind of divergence nobody can explain after the fact.
+        """
+        from xg_alonso.prediction.availability import apply_availability
+        from xg_alonso.prediction.form import apply_form_signals, load_signals
+
+        chances = {
+            PlayerCode(int(row["player_code"])): row.get("chance_of_playing_next_round")
+            for row in context.players.iter_rows(named=True)
+        }
+        tempered = apply_availability(predictions, chances)
+
+        # Availability always applies — it comes from the payload already
+        # loaded. Signals need a file, so without a data root they are simply
+        # absent rather than the whole adjustment being skipped.
+        if data_root is None:
+            return tempered
+        return apply_form_signals(
+            tempered,
+            load_signals(data_root / "signals" / "form_signals.json"),
+            at=cutoff,
+        )
+
     if models is not None:
         features = build_model_features(entities, player_stats=context.player_stats)
-        return predict_with_models(
-            features,
-            models=models,  # type: ignore[arg-type]
-            rules=context.scoring,
-            from_gameweek=gameweek,
-            data_cutoff=cutoff,
-            predicted_at=cutoff,
-            run_id="build-squad",
-            code_version="cli",
-            feature_set_version=CATALOGUE_VERSION,
+        if objective_id and data_root is not None:
+            features, _ = _objective_feature_columns(
+                data_root, objective_id, features, context.player_stats
+            )
+        return _temper(
+            predict_with_models(
+                features,
+                models=models,  # type: ignore[arg-type]
+                rules=context.scoring,
+                from_gameweek=gameweek,
+                data_cutoff=cutoff,
+                predicted_at=cutoff,
+                run_id="build-squad",
+                code_version="cli",
+                feature_set_version=CATALOGUE_VERSION,
+            )
         )
 
     features = build_slice1_features(
@@ -1318,15 +2037,17 @@ def _predict_all(context: SliceContext, gameweek: GameweekId, models: object | N
         player_stats=context.player_stats,
         team_stats=build_team_gameweek_stats(context.player_stats, context.players),
     )
-    return predict_frame(
-        features,
-        rules=context.scoring,
-        from_gameweek=gameweek,
-        data_cutoff=cutoff,
-        predicted_at=cutoff,
-        run_id="build-squad",
-        code_version="cli",
-        feature_set_version="slice1_v1",
+    return _temper(
+        predict_frame(
+            features,
+            rules=context.scoring,
+            from_gameweek=gameweek,
+            data_cutoff=cutoff,
+            predicted_at=cutoff,
+            run_id="build-squad",
+            code_version="cli",
+            feature_set_version="slice1_v1",
+        )
     )
 
 
@@ -1526,6 +2247,50 @@ def score(
         )
 
 
+def _positions_by_season(data_root: Path) -> pl.DataFrame:
+    """Each player's position in each season, for slicing a measurement.
+
+    A player can change position between seasons — FPL reclassifies wingers and
+    wing-backs regularly — so this is keyed on season as well as player. Falling
+    back to a season-agnostic map would file a 2024-25 midfielder's rows under
+    whatever he is listed as today.
+    """
+    from xg_alonso.contracts.prediction import Position
+
+    path = data_root / "silver" / "players_history.parquet"
+    if not path.exists():
+        return pl.DataFrame(
+            schema={"player_code": pl.Int64, "season": pl.Utf8, "position": pl.Utf8}
+        )
+    frame = pl.read_parquet(path)
+    if not {"player_code", "season", "position"}.issubset(frame.columns):
+        return pl.DataFrame(
+            schema={"player_code": pl.Int64, "season": pl.Utf8, "position": pl.Utf8}
+        )
+    # The archive spells goalkeeper `GK`; the contracts' `Position` enum — and
+    # therefore every prediction — spells it `GKP`. Normalised here so the two
+    # sides of the join agree. Without this the goalkeeper slice silently fails
+    # to match any prediction, its label weights fall back to the pooled ones,
+    # and the ranking it produces is cosmetic rather than positional.
+    return frame.select(
+        pl.col("player_code").cast(pl.Int64),
+        pl.col("season").cast(pl.Utf8),
+        pl.col("position").cast(pl.Utf8).replace({"GK": Position.GKP.value}).alias("position"),
+    ).unique(subset=["player_code", "season"])
+
+
+def _attach_position(rows: pl.DataFrame, positions: pl.DataFrame) -> pl.DataFrame | None:
+    """Join a position onto measurement rows, by season where one is available."""
+    if "label_season" in rows.columns:
+        return rows.join(
+            positions.rename({"season": "label_season"}),
+            on=["player_code", "label_season"],
+            how="left",
+        )
+    latest = positions.sort("season").unique(subset=["player_code"], keep="last").drop("season")
+    return rows.join(latest, on="player_code", how="left")
+
+
 @app.command()
 def importance(
     data_root: DataRoot = DEFAULT_DATA_ROOT,
@@ -1558,6 +2323,7 @@ def importance(
     """
     from xg_alonso.contracts.provenance import utc_now
     from xg_alonso.evaluation.importance import (
+        ALL_POSITIONS,
         ImportanceTable,
         label_weights_from_predictions,
         permutation_importance,
@@ -1635,19 +2401,76 @@ def importance(
         f"{len(models.models)} labels x {repeats} repeats x {len(windows)} fold(s) ..."
     )
     computed_at = utc_now()
+
+    # Measured once pooled, then once per position.
+    #
+    # The pooled slice answers "does this feature earn its place in the
+    # catalogue". The positional slices answer the question a manager actually
+    # asks, which is different for every position: minutes drives a striker's
+    # goals, but for a defender the same minutes matter through clean sheets,
+    # and a feature that ranks third overall can rank first for goalkeepers and
+    # last for forwards. Averaging those into one ranking describes none of them.
+    #
+    # A slice with too few rows is skipped rather than measured, because
+    # permutation importance on a handful of rows is noise wearing a number's
+    # clothes.
+    min_rows_for_a_slice = 150
+    slices: list[tuple[str, int, pl.DataFrame]] = [
+        (ALL_POSITIONS, fold_index, rows) for fold_index, rows in windows
+    ]
+
+    # The training frame is keyed on `player_code` and carries no position — it
+    # is a feature matrix, and position is an attribute of the player, not of
+    # the row. Joined in here rather than added to the frame, so the model still
+    # never sees it as an input.
+    #
+    # Read from `players_history`, not from the live bootstrap. The bootstrap
+    # lists only this season's squads, so joining it against measurement rows
+    # from an earlier season silently drops every player who has since left —
+    # which showed up as two positions being measured instead of four.
+    positions = _positions_by_season(data_root)
+
+    for fold_index, rows in windows:
+        if "player_code" not in rows.columns or positions.is_empty():
+            continue
+        labelled = _attach_position(rows, positions)
+        if labelled is None:
+            continue
+        for position in sorted(labelled["position"].unique().drop_nulls().to_list()):
+            subset = labelled.filter(pl.col("position") == position).drop("position")
+            if subset.height >= min_rows_for_a_slice:
+                slices.append((str(position), fold_index, subset))
+
+    measured_positions = sorted({name for name, _, _ in slices if name != ALL_POSITIONS})
+    if measured_positions:
+        typer.echo(f"  positional slices: {', '.join(measured_positions)}")
+    else:
+        typer.echo("  no positional slice had enough rows; measuring pooled only")
+
+    # Weights are sliced with the rows. Measuring defenders against the pooled
+    # definition of what points are made of would flatten their ranking toward
+    # appearance exactly as the global weighting does — the slice would be
+    # cosmetic. A clean sheet is four points to a defender and zero to a forward,
+    # and the ranking has to know that.
+    weights_for: dict[str, dict[str, float]] = {ALL_POSITIONS: weights}
+    for position in measured_positions:
+        sliced = label_weights_from_predictions(predictions, position=position)
+        weights_for[position] = sliced or weights
+
     tables = [
         permutation_importance(
             models,
             rows,
             label_columns=data.label_columns,
             families=families,
-            label_weights=weights,
+            label_weights=weights_for.get(position, weights),
             catalogue_version=CATALOGUE_VERSION,
             computed_at=computed_at,
             n_repeats=repeats,
             fold_index=fold_index,
+            position=position,
         )
-        for fold_index, rows in windows
+        for position, fold_index, rows in slices
     ]
     table = ImportanceTable(
         rows=tuple(row for measured in tables for row in measured.rows),
@@ -1785,4 +2608,423 @@ def refresh_plan_command(
         typer.echo(
             f"\n  {plan.lookups} lookups instead of {naive} "
             f"({naive / max(plan.lookups, 1):.0f}x fewer)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Objective-conditioned feature discovery
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="discover")
+def discover_command(
+    request: Annotated[
+        str,
+        typer.Argument(
+            help=(
+                "What you want, in plain English. e.g. 'I am 40 points behind in my "
+                "mini-league, keep Haaland, aggressive three-gameweek strategy, keep xG "
+                "and find complementary signals'."
+            )
+        ),
+    ],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    frame_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--frame",
+            help="Training frame from `xg build-discovery-frame`. Defaults to the gold copy.",
+        ),
+    ] = None,
+    preset: Annotated[
+        str,
+        typer.Option("--preset", help="Objective preset to start from before the text adjusts it."),
+    ] = "expected_points",
+    max_hypotheses: Annotated[
+        int, typer.Option("--max-hypotheses", help="Proposals to test this run.")
+    ] = 6,
+    holdout: Annotated[
+        str,
+        typer.Option("--holdout", help="Seasons excluded from every fold. Never optimised on."),
+    ] = "2025-26",
+    clusters: Annotated[
+        int, typer.Option("--clusters", help="Objective-conditioned clusters.")
+    ] = 5,
+    no_controls: Annotated[
+        bool,
+        typer.Option("--no-controls", help="Skip the noise and shuffled controls (much faster)."),
+    ] = False,
+    use_llm: Annotated[
+        bool,
+        typer.Option(
+            "--llm",
+            help=(
+                "Also ask a language model for hypotheses. Needs ANTHROPIC_API_KEY in the "
+                "environment or in .env. Its proposals pass exactly the same parse, "
+                "validation and leakage gates as every other."
+            ),
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show the parsed intent and stop.")
+    ] = False,
+) -> None:
+    """Compile a request, discover features that serve it, and report the verdicts.
+
+    Prints the parsed intent **before** running anything. Natural language is
+    ambiguous and a system that acts on its own guess without showing it will
+    eventually act on a wrong one silently, so the structured interpretation and
+    everything the parser did *not* understand are surfaced first.
+    """
+    from xg_alonso.contracts.discovery import ExperimentStage
+    from xg_alonso.discovery.experiment import ExperimentConfig, run_discovery
+    from xg_alonso.discovery.harness import HarnessConfig
+    from xg_alonso.discovery.registry import DiscoveryRegistry
+    from xg_alonso.domain.intent import build_name_index, compile_intent
+    from xg_alonso.features.generators import stage_window
+
+    frame_file = frame_path or (data_root / "gold" / "discovery_training.parquet")
+    if not frame_file.exists():
+        typer.secho(
+            f"No training frame at {frame_file}. Run `xg build-discovery-frame` first.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+    frame = pl.read_parquet(frame_file)
+    stats = pl.read_parquet(data_root / "silver" / "player_gameweek_stats.parquet")
+    history = pl.read_parquet(data_root / "silver" / "players_history.parquet")
+    # Indexed by full name *and* by unambiguous surname: the stored name is
+    # "Erling Haaland" and a manager types "Haaland".
+    names = build_name_index(
+        dict(
+            zip(
+                history["player_code"].to_list(),
+                history["web_name"].to_list(),
+                strict=True,
+            )
+        )
+    )
+
+    intent = compile_intent(request, players=names, base_preset=preset)
+    bundle = intent.bundle
+    objective = bundle.objective
+
+    typer.secho("\nParsed intent", bold=True)
+    typer.echo(f"  objective        {objective.id}")
+    typer.echo(f"  primary metric   {objective.primary_metric.value}")
+    typer.echo(
+        f"  risk             {objective.risk_preference.value} "
+        f"(variance term {objective.signed_uncertainty_penalty:+.2f})"
+    )
+    typer.echo(f"  horizon          {objective.planning_horizon} gameweek(s)")
+    typer.echo(f"  ownership        {objective.ownership_preference.value}")
+    if bundle.constraints.locked_players:
+        held = ", ".join(str(int(c)) for c in bundle.constraints.locked_players)
+        typer.echo(f"  locked players   {held}")
+    if bundle.constraints.locked_position_set():
+        frozen = ", ".join(sorted(p.value for p in bundle.constraints.locked_position_set()))
+        typer.echo(f"  frozen positions {frozen}")
+    typer.echo(f"  max points hit   {bundle.constraints.max_points_hit}")
+    typer.echo(f"  required features {list(bundle.constraints.required_features) or '(none)'}")
+    for belief in bundle.beliefs:
+        typer.echo(
+            f"  belief           player {belief.entity_id} "
+            f"{belief.proposition.value} @ {belief.confidence:.0%}"
+        )
+    typer.echo(f"  confidence       {intent.overall_confidence:.0%}")
+    if intent.unparsed:
+        typer.secho("  not understood:", fg=typer.colors.YELLOW)
+        for clause in intent.unparsed:
+            typer.secho(f"    - {clause}", fg=typer.colors.YELLOW)
+
+    if dry_run:
+        typer.echo("\n(dry run — nothing was executed)")
+        return
+
+    # Parquet rather than DuckDB: the composition root may not import a database
+    # driver (`.importlinter`), and the registry reads whole tables and filters
+    # in Polars, so nothing here wants SQL.
+    store = ParquetTableStore(data_root / "discovery")
+    registry = DiscoveryRegistry(store)
+
+    def on_stage(stage: ExperimentStage, detail: str) -> None:
+        typer.echo(f"  [{stage.value:<19}] {detail}")
+
+    typer.secho("\nRunning", bold=True)
+    try:
+        result = run_discovery(
+            bundle=bundle,
+            training=frame,
+            player_stats=stats,
+            stage_window=stage_window,
+            registry=registry,
+            config=ExperimentConfig(
+                harness=HarnessConfig(
+                    holdout_seasons=tuple(s.strip() for s in holdout.split(",") if s.strip()),
+                    max_folds=5,
+                ),
+                max_hypotheses=max_hypotheses,
+                cluster_k=clusters,
+                run_controls=not no_controls,
+                use_llm=use_llm,
+            ),
+            on_stage=on_stage,
+        )
+    finally:
+        pass
+
+    typer.secho("\n" + result.summary(), bold=True)
+
+    if result.weak_segments:
+        typer.secho("\nWhere the required feature set is weakest", bold=True)
+        for kind, segment, error in result.weak_segments:
+            typer.echo(f"  {kind:<10} {segment:<8} relative error {error:.3f}")
+
+    if result.rejected_programs:
+        typer.secho("\nRefused before computation", fg=typer.colors.YELLOW)
+        for name, issues in result.rejected_programs:
+            typer.echo(f"  {name}: {'; '.join(str(i) for i in issues)[:120]}")
+
+    report = registry.acceptance_report(objective.id)
+    if report.height:
+        typer.secho("\nVerdicts", bold=True)
+        for row in report.iter_rows(named=True):
+            colour = (
+                typer.colors.GREEN
+                if row["status"].startswith("accepted")
+                else typer.colors.YELLOW
+                if row["status"] in {"revise", "insufficient_data"}
+                else typer.colors.RED
+            )
+            typer.secho(
+                f"  {row['status']:<26} {row['feature']:<34} "
+                f"utility {row['utility']:+.4f}  incremental {row['incremental_value']:+.5f}  "
+                f"folds {row['folds_improved']}/{row['folds']}  stability {row['stability']:.2f}",
+                fg=colour,
+            )
+            typer.echo(f"      {row['complementarity']} — {row['reason'][:110]}")
+
+    if result.cluster_summaries:
+        typer.secho("\nObjective-conditioned clusters", bold=True)
+        for summary in result.cluster_summaries:
+            typer.echo(f"  c{summary.cluster_id} n={summary.size:<6} {summary.label}")
+
+    if result.search is not None:
+        search = result.search
+        typer.secho("\nComplementary search", bold=True)
+        typer.echo(
+            f"  baseline MAE {search.baseline.metric:.4f} -> {search.final.metric:.4f} "
+            f"({search.total_gain:+.2%}) over {search.evaluations} evaluations"
+        )
+        for step in search.steps:
+            typer.echo(f"    + {step.describe()}")
+        if search.rejected:
+            passed = ", ".join(f"{n} ({g:+.2%})" for n, g in search.rejected[:5])
+            typer.echo(f"    passed over: {passed}")
+        if search.truncated:
+            typer.secho(
+                "    (a cap stopped the search — this is not proof nothing more exists)",
+                fg=typer.colors.YELLOW,
+            )
+
+    if result.lessons:
+        typer.secho("\nLessons recorded", bold=True)
+        for lesson in result.lessons:
+            typer.echo(f"  [{lesson.hypothesis_family}] {lesson.result}")
+            if lesson.promising_direction:
+                typer.echo(f"      -> {lesson.promising_direction}")
+
+    manifest_path = data_root / "reports" / f"{result.manifest.experiment_id}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(result.manifest.model_dump_json(indent=2))
+    typer.echo(f"\nManifest written to {manifest_path}")
+    if not result.manifest.reproducible:
+        typer.secho(
+            "This run is NOT reproducible: the working tree is dirty or the commit is "
+            "unknown, so the recorded code version does not describe what ran.",
+            fg=typer.colors.YELLOW,
+        )
+
+
+@app.command(name="build-discovery-frame")
+def build_discovery_frame_command(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    seasons: Annotated[
+        str, typer.Option("--seasons", help="Comma-separated seasons to build.")
+    ] = "2023-24,2024-25",
+    min_gameweek: Annotated[
+        int, typer.Option("--min-gw", help="Skip the opening gameweeks of each season.")
+    ] = 2,
+) -> None:
+    """Build the point-in-time training frame the discovery loop runs on.
+
+    Separate from `xg discover` because it is the expensive step — the feature
+    window is recomputed per gameweek rather than once over the whole frame,
+    which is the price of a dataset that is not silently poisoned.
+    """
+    from xg_alonso.prediction.dataset import build_training_frame
+
+    wanted = [s.strip() for s in seasons.split(",") if s.strip()]
+    stats = pl.read_parquet(data_root / "silver" / "player_gameweek_stats.parquet")
+    history = pl.read_parquet(data_root / "silver" / "players_history.parquet")
+
+    typer.echo(f"Building features as of every deadline in {', '.join(wanted)}...")
+    data = build_training_frame(stats, seasons=wanted, min_gameweek=min_gameweek)
+    frame = data.frame
+
+    # The component labels carry no points total by design (D8: models predict
+    # components and the domain prices them). A discovered feature is judged on
+    # the number a manager reads, so attach it here.
+    totals = (
+        stats.filter(pl.col("season").is_in(wanted))
+        .group_by(["player_code", "season", "gameweek_id"])
+        .agg(pl.col("total_points").sum().alias("label_total_points"))
+    )
+    frame = frame.join(
+        totals,
+        left_on=["player_code", "label_season", "label_gameweek"],
+        right_on=["player_code", "season", "gameweek_id"],
+        how="left",
+    )
+
+    meta = history.select("player_code", "season", "position", "team_name").unique(
+        subset=["player_code", "season"]
+    )
+    frame = frame.join(
+        meta,
+        left_on=["player_code", "label_season"],
+        right_on=["player_code", "season"],
+        how="left",
+    ).filter(pl.col("label_total_points").is_not_null() & pl.col("position").is_not_null())
+
+    destination = data_root / "gold" / "discovery_training.parquet"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_parquet(destination)
+    typer.secho(
+        f"Wrote {frame.height:,} rows x {frame.width} columns to {destination}",
+        fg=typer.colors.GREEN,
+    )
+
+
+@app.command(name="advise")
+def advise_command(
+    request: Annotated[str, typer.Argument(help="What you want, in plain English.")],
+    entry_id: Annotated[int, typer.Option("--entry", help="Public FPL entry id.")] = 0,
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    squad_file: Annotated[
+        Path | None,
+        typer.Option("--squad-file", help="Read the squad from a picks JSON file."),
+    ] = None,
+    model_path: Annotated[
+        Path | None, typer.Option("--model", help="Use trained component models.")
+    ] = None,
+    preset: Annotated[str, typer.Option("--preset", help="Objective to start from.")] = (
+        "expected_points"
+    ),
+) -> None:
+    """Recommend a transfer under your objective, constraints and beliefs.
+
+    The difference from `xg recommend`: that command answers "which transfer
+    gains the most expected points". This one answers "which transfer best
+    serves *what you are trying to do*" — and shows what your own instructions
+    cost you, separately from what the model thinks.
+    """
+    from xg_alonso.cli.pipeline import recommend_for_objective
+    from xg_alonso.domain.intent import build_name_index, compile_intent
+    from xg_alonso.prediction.inference import load_models
+
+    context = _load_context(data_root, parse_season(season))
+    state = _squad_state(context, entry_id, squad_file)
+
+    names = build_name_index(
+        {int(r["player_code"]): str(r["web_name"]) for r in context.players.iter_rows(named=True)}
+    )
+    intent = compile_intent(
+        request,
+        players=names,
+        base_preset=preset,
+        next_gameweek=int(state.gameweek),
+        current_squad=[int(p.player_code) for p in state.picks],
+    )
+    bundle = intent.bundle
+
+    typer.secho("Your request, as understood", bold=True)
+    typer.echo(f"  objective        {bundle.objective.id}")
+    typer.echo(
+        f"  risk             {bundle.objective.risk_preference.value} "
+        f"(variance term {bundle.objective.signed_uncertainty_penalty:+.2f})"
+    )
+    typer.echo(f"  horizon          {bundle.objective.planning_horizon} gameweek(s)")
+    typer.echo(f"  ownership        {bundle.objective.ownership_preference.value}")
+    typer.echo(f"  confidence       {intent.overall_confidence:.0%}")
+    for clause in intent.unparsed:
+        typer.secho(f"  not understood:  {clause}", fg=typer.colors.YELLOW)
+
+    models = None
+    if model_path is not None:
+        models = load_models(model_path).models
+
+    run_id = f"advise-{uuid.uuid4().hex[:12]}"
+    manifest = git_manifest("advise", run_id=run_id)
+
+    result = recommend_for_objective(
+        context=context,
+        squad=state,
+        bundle=bundle,
+        entry_id=EntryId(entry_id),
+        run_id=run_id,
+        code_version=manifest.git_commit,
+        generated_at=utc_now(),
+        models=models,
+    )
+
+    for problem in result.constraint_problems:
+        typer.secho(f"  ! {problem}", fg=typer.colors.RED)
+
+    names_by_code = context.player_names()
+    prices = {
+        PlayerCode(int(r["player_code"])): int(r["current_price"])
+        for r in context.players.iter_rows(named=True)
+    }
+
+    typer.secho("\nRecommendation", bold=True)
+    typer.echo(render_recommendation(result.raw, names=names_by_code, prices=prices))
+
+    if result.constraint_report.is_binding:
+        typer.secho("\nWhat your instructions changed", bold=True)
+        for line in result.constraint_report.explain():
+            typer.echo(f"  {line}")
+
+    if result.opportunity_costs:
+        typer.secho("\nWhat holding them cost", bold=True)
+        for held, alternative, forgone in result.opportunity_costs:
+            target = names_by_code.get(alternative, "?") if alternative else "nobody"
+            typer.echo(
+                f"  keeping {names_by_code.get(held, held)} gave up {forgone:.2f} "
+                f"projected points (best alternative: {target})"
+            )
+    elif result.constraint_report.locked_players:
+        typer.echo(
+            "\n  Holding your locked players cost nothing: no affordable alternative scored higher."
+        )
+
+    if result.adjusted is not None:
+        typer.secho("\nWith your beliefs applied", bold=True)
+        for adjustment in result.belief_adjustments:
+            typer.echo(
+                f"  {names_by_code.get(adjustment.player_code, '?')}: {adjustment.explain()}"
+            )
+        if result.beliefs_changed_the_answer:
+            typer.secho("  Your beliefs changed the recommendation:", fg=typer.colors.YELLOW)
+            typer.echo(render_recommendation(result.adjusted, names=names_by_code, prices=prices))
+        else:
+            typer.echo(
+                "  Your beliefs did not change the recommendation — they were "
+                "weighed and the move stands either way."
+            )
+        typer.secho(
+            "  Shown separately on purpose: a belief is your judgement, not evidence.",
+            fg=typer.colors.BLUE,
         )

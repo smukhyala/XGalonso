@@ -24,6 +24,7 @@ __all__ = [
     "PLAYER_GAMEWEEK_STATS_SCHEMA",
     "SILVER_TABLES",
     "TEAMS_SCHEMA",
+    "TEAM_MATCH_EVENTS_SCHEMA",
 ]
 
 _UTC = pl.Datetime(time_unit="us", time_zone="UTC")
@@ -41,6 +42,27 @@ PLAYERS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "current_price": pl.Int64(),  # tenths of a million
     "status": pl.Utf8(),  # a=available, i=injured, s=suspended, u=unavailable, d=doubtful
     "chance_of_playing_next_round": pl.Int64(),
+    "chance_of_playing_this_round": pl.Int64(),
+    # Why the free-text news is carried, when `status` already encodes
+    # availability: `news_added` is an **authoritative event timestamp from the
+    # source**. It says when the club's announcement reached FPL, which is the
+    # one thing a change-detector cannot derive by diffing — a diff knows
+    # something moved, not when it moved or why. Dropping these fields was how a
+    # 9.9%-owned striker stayed in the recommended eleven with a foot injury
+    # already published against his name.
+    "news": pl.Utf8(),
+    "news_added": _UTC,
+    # Share of managers owning the player, as a percentage. Published on every
+    # element and previously dropped.
+    #
+    # It is not a nicety: an objective that seeks differentials or protects a
+    # rank is *defined* by ownership, and without this column those objectives
+    # would silently score every player identically on the term that
+    # distinguishes them. Nullable, because a preseason payload can omit it.
+    #
+    # **Not effective ownership.** EO folds in captaincy and is what actually
+    # moves rank; FPL does not publish it. Treated as a proxy everywhere.
+    "selected_by_percent": pl.Float64(),
     "available_time": _UTC,
 }
 
@@ -132,6 +154,35 @@ PLAYER_GAMEWEEK_STATS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "available_time": _UTC,
 }
 
+TEAM_MATCH_EVENTS_SCHEMA: Final[dict[str, pl.DataType]] = {
+    # One row per team per match, so a team's own row carries both what it did
+    # and what was done to it. The alternative — one row per match with home_*
+    # and away_* columns — would force every downstream feature to branch on
+    # which side a player's team was, which is where sign errors live.
+    "team_code": pl.Int64(),  # stable FPL club identity, never the per-season id
+    "opponent_team_code": pl.Int64(),
+    "season": pl.Utf8(),
+    "division": pl.Utf8(),  # E0 = Premier League, E1 = Championship. Never pool blindly.
+    "kickoff_time": _UTC,
+    "was_home": pl.Boolean(),
+    "goals_for": pl.Int64(),
+    "goals_against": pl.Int64(),
+    # The reason this table exists. The official API publishes no team-level
+    # event counts at all, so shot volume, shot quality proxy (on-target share)
+    # and set-piece volume are unreachable without an outside source.
+    "shots": pl.Int64(),
+    "shots_against": pl.Int64(),
+    "shots_on_target": pl.Int64(),
+    "shots_on_target_against": pl.Int64(),
+    "corners": pl.Int64(),
+    "corners_against": pl.Int64(),
+    "fouls_committed": pl.Int64(),
+    "fouls_suffered": pl.Int64(),
+    "yellow_cards": pl.Int64(),
+    "red_cards": pl.Int64(),
+    "available_time": _UTC,
+}
+
 #: Table name to schema. The normalization run replaces each of these wholesale.
 SILVER_TABLES: Final[dict[str, dict[str, pl.DataType]]] = {
     "players": PLAYERS_SCHEMA,
@@ -139,6 +190,7 @@ SILVER_TABLES: Final[dict[str, dict[str, pl.DataType]]] = {
     "gameweeks": GAMEWEEKS_SCHEMA,
     "fixtures": FIXTURES_SCHEMA,
     "player_gameweek_stats": PLAYER_GAMEWEEK_STATS_SCHEMA,
+    "team_match_events": TEAM_MATCH_EVENTS_SCHEMA,
 }
 
 

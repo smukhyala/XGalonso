@@ -39,8 +39,10 @@ __all__ = [
     "BACKFILL_SEASONS",
     "SOURCE_ARCHIVE_GW",
     "SOURCE_ARCHIVE_PLAYERS",
+    "SOURCE_ARCHIVE_TEAMS",
     "ArchiveFile",
     "fetch_archive_season",
+    "fetch_archive_teams",
     "seasons_with_defensive_contributions",
 ]
 
@@ -50,6 +52,7 @@ ARCHIVE_BASE_URL: Final[str] = (
 
 SOURCE_ARCHIVE_GW = "archive.merged_gw"
 SOURCE_ARCHIVE_PLAYERS = "archive.players_raw"
+SOURCE_ARCHIVE_TEAMS = "archive.teams"
 
 #: The D7 range. 2022/23 is the earliest season with expected goals in the
 #: official payload, so earlier seasons would supply history the feature set
@@ -135,6 +138,47 @@ def fetch_archive_season(
             )
             fetched.append(ArchiveFile(season=Season(season), source=source, ref=ref))
         return fetched
+    finally:
+        if owns_client:
+            http.close()
+
+
+def fetch_archive_teams(
+    season: str,
+    *,
+    bronze: BronzeSnapshotStore,
+    run_id: str,
+    client: httpx.Client | None = None,
+    timeout: float = 60.0,
+) -> ArchiveFile:
+    """Fetch one season's club list into bronze.
+
+    Kept separate from :func:`fetch_archive_season` because it answers a
+    different question: not "what happened" but "which clubs existed, and what
+    were their stable codes". Anything that has to reconcile an outside source
+    against FPL clubs needs the second without wanting the first — and needs it
+    for *relegated* clubs too, which the live bootstrap no longer lists.
+
+    Raises:
+        httpx.HTTPStatusError: if the file is unavailable.
+    """
+    owns_client = client is None
+    http = client or httpx.Client(
+        timeout=timeout,
+        follow_redirects=True,
+        headers={"User-Agent": "xg-alonso/0.1 (+research)"},
+    )
+    try:
+        response = http.get(f"{ARCHIVE_BASE_URL}/{season}/teams.csv")
+        response.raise_for_status()
+        ref = bronze.write(
+            source=f"{SOURCE_ARCHIVE_TEAMS}.{season}",
+            payload=response.content,
+            timestamps=_timestamps(utc_now()),
+            run_id=run_id,
+            http_status=response.status_code,
+        )
+        return ArchiveFile(season=Season(season), source=SOURCE_ARCHIVE_TEAMS, ref=ref)
     finally:
         if owns_client:
             http.close()

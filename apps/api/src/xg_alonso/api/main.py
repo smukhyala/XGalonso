@@ -78,6 +78,21 @@ class HealthResponse(BaseModel):
         "which means the stored snapshot is out of date."
     )
 
+    # Freshness is reported rather than hidden. A confident projection built on
+    # a three-day-old snapshot is worse than one that says how old it is: an
+    # injured striker stayed in the recommended eleven for exactly as long as
+    # nobody could see when the source was last read.
+    last_checked: datetime | None = Field(
+        default=None, description="When `xg refresh` last polled the official payload."
+    )
+    seconds_since_check: int | None = Field(
+        default=None, description="Age of that poll. Null means it has never run."
+    )
+    unseen_events: int = Field(
+        default=0,
+        description="Material changes recorded since the last poll that a reader has not been shown.",
+    )
+
 
 class HistoryNoteOut(BaseModel):
     """A checkable fact about what this player has done in this situation.
@@ -120,6 +135,65 @@ class GameweekProjectionOut(BaseModel):
     )
 
 
+class SeasonLineOut(BaseModel):
+    """One completed season, counted from played matches."""
+
+    season: str
+    appearances: int
+    minutes: int
+    goals: int
+    assists: int
+    clean_sheets: int
+    points: int
+    expected_goals: float | None = None
+    expected_assists: float | None = None
+    per_90: float | None = Field(
+        default=None,
+        description=(
+            "Goal involvements per 90, withheld below a minutes floor. Null "
+            "means the sample cannot support a rate, not that the rate is zero."
+        ),
+    )
+    points_per_appearance: float | None = None
+    sentence: str = Field(description="The line as prose, framed for the position.")
+
+
+class ScheduledFixtureOut(BaseModel):
+    """One upcoming match from the published schedule."""
+
+    gameweek: int
+    opponent: str
+    is_home: bool
+    difficulty: int | None = Field(
+        default=None,
+        description="FPL's published 1-5 rating. Null preseason, when it is unset.",
+    )
+    label: str = Field(description="e.g. 'BUR (H)'")
+
+
+class FixtureRunOut(BaseModel):
+    """The next few fixtures, characterised."""
+
+    fixtures: list[ScheduledFixtureOut] = Field(default_factory=list)
+    mean_difficulty: float | None = None
+    home_count: int = 0
+    blanks: list[int] = Field(default_factory=list)
+    doubles: list[int] = Field(default_factory=list)
+    sentence: str = ""
+
+
+class PlayerContextOut(BaseModel):
+    """Where a player is coming from and what he is walking into.
+
+    Everything here is retrieved, never modelled — a season line is a sum over
+    matches that happened and a fixture run is the published schedule. It sits
+    beside modelled numbers precisely so the two can be told apart.
+    """
+
+    seasons: list[SeasonLineOut] = Field(default_factory=list)
+    run: FixtureRunOut | None = None
+
+
 class PlayerSummary(BaseModel):
     player_code: int
     name: str
@@ -146,6 +220,13 @@ class PlayerSummary(BaseModel):
     horizon_total: float | None = Field(
         default=None,
         description="Discounted value across the horizon, comparable to a single gameweek.",
+    )
+    context: PlayerContextOut | None = Field(
+        default=None,
+        description=(
+            "Prior-season output and the upcoming fixture run. Absent on the "
+            "shallow payload, where it would be a per-player query nobody reads."
+        ),
     )
 
 
@@ -409,6 +490,25 @@ class FeatureImportanceResponse(BaseModel):
     folds_measured: int
     features_measured: int
     features_with_no_effect: int
+    position: str = Field(
+        default="ALL",
+        description="Which slice these numbers describe. ALL is the pooled measurement.",
+    )
+    positions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Slices present in the table. A table computed before positions "
+            "were measured offers ALL only."
+        ),
+    )
+    rows_measured: int = Field(
+        default=0,
+        description=(
+            "Validation rows behind this slice. Carried because a positional "
+            "slice is small, and importance measured on eighty rows should not "
+            "read the same as one measured on eight thousand."
+        ),
+    )
     catalogue_version: str
     model_fingerprint: str
     computed_at: datetime
@@ -511,6 +611,10 @@ def feature_importance(
     service: ServiceDep,
     label: Annotated[str | None, Query(description="Restrict to one component label.")] = None,
     family: Annotated[str | None, Query(description="Restrict to one catalogue family.")] = None,
+    position: Annotated[
+        str | None,
+        Query(description="GKP, DEF, MID, FWD, or ALL for the pooled slice."),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 60,
 ) -> FeatureImportanceResponse:
     """Which features actually earn their place, measured out of sample.
@@ -520,9 +624,377 @@ def feature_importance(
     indistinguishable from "no feature matters".
     """
     try:
-        return service.feature_importance(label=label, family=family, limit=limit)
+        return service.feature_importance(
+            label=label, family=family, position=position, limit=limit
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Objective-conditioned feature discovery
+#
+# Read surfaces plus one compile endpoint. Running an experiment is deliberately
+# NOT exposed over HTTP: a discovery run fits hundreds of models and takes
+# minutes, and there is no job queue in this repository (D1 keeps everything
+# local). A request that blocks for that long is not an API, it is a timeout.
+# `xg discover` runs them; these endpoints read what it produced.
+# ---------------------------------------------------------------------------
+
+
+class RequirementOut(BaseModel):
+    """One thing the manager asked for, as the UI needs to show and edit it."""
+
+    kind: str
+    label: str
+    players: list[int] = Field(default_factory=list)
+    player_names: list[str] = Field(default_factory=list)
+    team_id: int | None = None
+    count: int | None = None
+    formation: str | None = None
+    amount: int | None = None
+    priority: int = 0
+    confidence: float | None = Field(
+        default=None, description="How sure the parser was, when this came from text."
+    )
+    evidence: str = Field(default="", description="The phrase that produced it.")
+    source: str = Field(
+        default="matched",
+        description=(
+            "'matched' when a vocabulary rule produced it, 'model' when a "
+            "language model read it. Kept so a reader can tell a phrase that "
+            "was matched from a reading that was inferred."
+        ),
+    )
+
+
+class RequirementInput(BaseModel):
+    """A requirement supplied directly, bypassing the parser.
+
+    The UI sends these after a manager edits what the parser produced. Editing
+    is the point: natural language is ambiguous, so the parse is a proposal and
+    this is the accepted version.
+    """
+
+    kind: str
+    players: list[int] = Field(default_factory=list)
+    team_id: int | None = None
+    count: int | None = None
+    formation: str | None = None
+    amount: int | None = None
+    priority: int = 0
+
+
+class ParsedRequirementsResponse(BaseModel):
+    """What the parser made of a request, before anything is built."""
+
+    objective_id: str
+    requirements: list[RequirementOut] = Field(default_factory=list)
+    unparsed: list[str] = Field(default_factory=list)
+    unresolved_names: list[str] = Field(default_factory=list)
+    problems: list[str] = Field(
+        default_factory=list,
+        description="Contradictions detectable without solving, e.g. four from one club.",
+    )
+    overall_confidence: float = 0.0
+
+    interpreted: bool = Field(
+        default=False, description="Whether a language model read the request as well."
+    )
+    interpreter_note: str = Field(
+        default="",
+        description="Why the model was or was not consulted. Shown rather than swallowed.",
+    )
+    ownership_preference: str = Field(
+        default="",
+        description="A lean the model read from the request, e.g. 'differential'.",
+    )
+    risk_preference: str = ""
+    model_notes: list[str] = Field(
+        default_factory=list,
+        description="What the model understood but could not express as a requirement.",
+    )
+
+
+class RequirementOutcomeOut(BaseModel):
+    """What happened to one requirement, and what honouring it cost."""
+
+    kind: str
+    label: str
+    honoured: bool
+    cost: float | None = Field(
+        default=None,
+        description=(
+            "Expected points given up, holding the other requirements fixed. "
+            "Zero is a real answer: the optimizer wanted this anyway."
+        ),
+    )
+    note: str = ""
+
+
+class PlanRequest(BaseModel):
+    """Build a squad to a set of requirements."""
+
+    text: str = Field(default="", description="What you want, in plain English")
+    preset: str = Field(default="expected_points")
+    requirements: list[RequirementInput] | None = Field(
+        default=None,
+        description=(
+            "Explicit requirements. When present these are used *instead of* "
+            "parsing the text, so an edited set is never silently re-derived."
+        ),
+    )
+    interpret: bool = Field(default=False, description="Use the language-model reader too.")
+
+
+class PlanResponse(BaseModel):
+    """A squad built to requirements, and the price of each."""
+
+    objective_id: str
+    model_note: str = Field(description="Which model scored the candidates, and why.")
+    gameweek: int
+    formation: str
+    bank: int
+    expected_points: float
+    unconstrained_points: float
+    total_cost: float
+    feasible_as_asked: bool
+    players: list[SquadPlayer] = Field(default_factory=list)
+    outcomes: list[RequirementOutcomeOut] = Field(default_factory=list)
+    parsed: ParsedRequirementsResponse | None = None
+
+
+class CompileRequest(BaseModel):
+    """A manager's request, in their own words."""
+
+    text: str = Field(min_length=1, description="What you want, in plain English")
+    preset: str = Field(default="expected_points", description="Objective to start from")
+    interpret: bool = Field(
+        default=False,
+        description=(
+            "Also ask a language model to read what the vocabulary could not. "
+            "Needs ANTHROPIC_API_KEY; without one the deterministic parse stands "
+            "alone and the request still succeeds."
+        ),
+    )
+
+
+class ParsedField(BaseModel):
+    field: str
+    confidence: float
+    source: str
+    evidence: str
+
+
+class CompiledIntentResponse(BaseModel):
+    """The parsed interpretation, for review and editing before anything runs."""
+
+    objective_id: str
+    primary_metric: str
+    risk_preference: str
+    planning_horizon: int
+    ownership_preference: str
+    signed_uncertainty_penalty: float
+    locked_players: list[int]
+    excluded_players: list[int]
+    locked_positions: list[str]
+    max_points_hit: int
+    minimum_bank: int
+    required_features: list[str]
+    complement_targets: list[str]
+    emphasis: list[str]
+    beliefs: list[dict[str, object]]
+    confidences: list[ParsedField]
+    unparsed: list[str]
+    overall_confidence: float
+
+
+@app.post("/objectives/compile", response_model=CompiledIntentResponse)
+def compile_objective(payload: CompileRequest, service: ServiceDep) -> CompiledIntentResponse:
+    """Parse a request into an objective, constraints and beliefs.
+
+    Deterministic — no language model. Returns everything the parser did *not*
+    understand alongside what it did, so a partial interpretation is visible
+    rather than silently narrowing the question.
+    """
+    try:
+        return CompiledIntentResponse(
+            **service.compile_objective(payload.text, preset=payload.preset)
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class ObjectivePreset(BaseModel):
+    id: str
+    name: str
+    primary_metric: str
+    risk_preference: str
+    planning_horizon: int
+    ownership_preference: str
+
+
+@app.post("/requirements/parse", response_model=ParsedRequirementsResponse)
+def parse_requirements(payload: CompileRequest, service: ServiceDep) -> ParsedRequirementsResponse:
+    """Read squad requirements out of a request, without building anything.
+
+    Fast enough to call as the manager types. Nothing is solved here — the point
+    is to show the interpretation *before* acting on it, because a system that
+    acts on its own guess without showing it will eventually act on a wrong one
+    silently.
+    """
+    try:
+        return ParsedRequirementsResponse(
+            **service.parse_requirements(
+                payload.text, preset=payload.preset, interpret=payload.interpret
+            )
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/squad/plan", response_model=PlanResponse)
+def plan_squad(payload: PlanRequest, service: ServiceDep) -> PlanResponse:
+    """Build the best legal squad that honours what was asked for.
+
+    Requirements are hard bounds on the solver, so each is either honoured
+    exactly or reported as impossible — never approximated. When a set cannot
+    all hold, the lowest-priority requirements are dropped until one can and
+    every dropped one is named.
+
+    This solves a MILP and prices each requirement by re-solving without it, so
+    it is measured in seconds rather than milliseconds. It is still a request
+    rather than a job because the whole thing runs well under a timeout; the
+    minute-long work in this system is `xg discover`, which is deliberately not
+    exposed.
+    """
+    try:
+        return PlanResponse(**service.plan_squad(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/objectives", response_model=list[ObjectivePreset])
+def objectives(service: ServiceDep) -> list[ObjectivePreset]:
+    """The shipped objective presets."""
+    return [ObjectivePreset(**row) for row in service.objective_presets()]
+
+
+class DiscoveredFeature(BaseModel):
+    feature: str
+    version: str
+    hypothesis_id: str
+    status: str
+    complementarity: str
+    utility: float
+    incremental_value: float
+    folds: int
+    folds_improved: int
+    stability: float
+    missingness: float
+    leakage_passed: bool
+    reason: str
+
+
+@app.get("/features/discovered", response_model=list[DiscoveredFeature])
+def discovered_features(
+    service: ServiceDep,
+    objective_id: Annotated[str, Query(description="Which objective the verdicts are under.")],
+) -> list[DiscoveredFeature]:
+    """Every discovered feature's latest verdict, accepted and rejected alike.
+
+    Rejections are included. A report showing only winners cannot be
+    distinguished from one that never looked.
+    """
+    try:
+        return [DiscoveredFeature(**row) for row in service.discovered_features(objective_id)]
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class HypothesisResponse(BaseModel):
+    id: str
+    title: str
+    football_rationale: str
+    falsification_condition: str
+    expected_relationship: str
+    transformation_plan: str
+    required_raw_fields: list[str]
+    status: str
+    generation_source: str
+    leakage_risk: str
+
+
+@app.get("/hypotheses", response_model=list[HypothesisResponse])
+def hypotheses(service: ServiceDep) -> list[HypothesisResponse]:
+    """Every hypothesis tested, with the condition that would have refuted it."""
+    return [HypothesisResponse(**row) for row in service.hypotheses()]
+
+
+class ClusterResponse(BaseModel):
+    cluster_model_version: str
+    cluster_id: int
+    objective_id: str | None
+    size: int
+    label: str
+    dominant_features: list[list[object]]
+
+
+@app.get("/clusters", response_model=list[ClusterResponse])
+def clusters(
+    service: ServiceDep,
+    objective_id: Annotated[str | None, Query(description="Objective conditioning.")] = None,
+) -> list[ClusterResponse]:
+    """Player clusters, with the statistical basis behind each label."""
+    return [ClusterResponse(**row) for row in service.clusters(objective_id=objective_id)]
+
+
+class ClusterHistoryEntry(BaseModel):
+    season: str
+    gameweek: int
+    cluster_id: int
+    membership_probability: float
+    distance_to_centroid: float
+    objective_id: str | None
+
+
+@app.get("/players/{player_code}/cluster-history", response_model=list[ClusterHistoryEntry])
+def cluster_history(player_code: int, service: ServiceDep) -> list[ClusterHistoryEntry]:
+    """One player's cluster over time. A cluster is not an identity."""
+    return [ClusterHistoryEntry(**row) for row in service.cluster_history(player_code)]
+
+
+class ExperimentResponse(BaseModel):
+    experiment_id: str
+    stage: str
+    objective_id: str
+    objective_version: str
+    seasons: list[str]
+    hypotheses_proposed: int
+    features_compiled: int
+    features_accepted: int
+    features_rejected: int
+    reproducible: bool
+    code_version: str
+    git_dirty: bool
+    started_at: datetime
+    completed_at: datetime | None
+    metrics: list[list[object]]
+
+
+@app.get("/experiments", response_model=list[ExperimentResponse])
+def experiments(service: ServiceDep) -> list[ExperimentResponse]:
+    """Every recorded experiment, newest first."""
+    return [ExperimentResponse(**row) for row in service.experiments()]
+
+
+@app.get("/experiments/{experiment_id}", response_model=ExperimentResponse)
+def experiment(experiment_id: str, service: ServiceDep) -> ExperimentResponse:
+    """One experiment's manifest."""
+    found = service.experiment(experiment_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"no experiment {experiment_id!r}")
+    return ExperimentResponse(**found)
 
 
 def main() -> None:

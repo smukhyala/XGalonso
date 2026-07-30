@@ -22,6 +22,7 @@ from xg_alonso.contracts import (
 )
 from xg_alonso.storage import FileSystemBronzeStore
 from xg_alonso.storage.duckdb_store import DuckDBTableStore
+from xg_alonso.storage.parquet_store import ParquetTableStore
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 
@@ -173,3 +174,66 @@ class TestDuckDBTableStore:
             store.write_table("t", pl.DataFrame({"a": [1]}), run_id="r1")
         with DuckDBTableStore(db) as reopened:
             assert reopened.read_table("t")["a"].to_list() == [1]
+
+
+class TestParquetTableStore:
+    """The driver-free TableStore the composition root actually uses.
+
+    ``.importlinter`` forbids ``xg_alonso.cli`` and ``xg_alonso.api`` from
+    reaching ``duckdb``, so without this the ``TableStore`` protocol would be
+    usable only from inside the storage package.
+    """
+
+    def test_write_then_read_round_trips(self, tmp_path: Path) -> None:
+        store = ParquetTableStore(tmp_path)
+        frame = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+        store.write_table("things", frame, run_id="r1")
+        assert store.read_table("things").equals(frame)
+
+    def test_write_replaces_rather_than_appends(self, tmp_path: Path) -> None:
+        store = ParquetTableStore(tmp_path)
+        store.write_table("things", pl.DataFrame({"a": [1, 2]}), run_id="r1")
+        store.write_table("things", pl.DataFrame({"a": [9]}), run_id="r2")
+        assert store.read_table("things")["a"].to_list() == [9]
+
+    def test_append_creates_then_accumulates(self, tmp_path: Path) -> None:
+        store = ParquetTableStore(tmp_path)
+        store.append_table("log", pl.DataFrame({"a": [1]}), run_id="r1")
+        store.append_table("log", pl.DataFrame({"a": [2]}), run_id="r2")
+        assert store.read_table("log")["a"].to_list() == [1, 2]
+
+    def test_append_tolerates_a_schema_that_gained_a_column(self, tmp_path: Path) -> None:
+        """A history row genuinely lacks a field added later; that is not an error."""
+        store = ParquetTableStore(tmp_path)
+        store.append_table("log", pl.DataFrame({"a": [1]}), run_id="r1")
+        store.append_table("log", pl.DataFrame({"a": [2], "b": ["new"]}), run_id="r2")
+        out = store.read_table("log")
+        assert out.height == 2
+        assert "b" in out.columns
+
+    def test_reading_a_missing_table_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(KeyError, match="does not exist"):
+            ParquetTableStore(tmp_path).read_table("absent")
+
+    def test_a_path_traversing_name_is_rejected(self, tmp_path: Path) -> None:
+        """A table name becomes a filename, so escaping the directory is refused."""
+        store = ParquetTableStore(tmp_path)
+        for name in ("../escape", "a/b", "with space", ""):
+            with pytest.raises(ValueError, match="table name"):
+                store.table_exists(name)
+
+    def test_sql_is_refused_rather_than_faked(self, tmp_path: Path) -> None:
+        store = ParquetTableStore(tmp_path)
+        with pytest.raises(NotImplementedError, match="what a driver is for"):
+            store.query("SELECT 1")
+        with pytest.raises(NotImplementedError, match="no DDL"):
+            store.execute("CREATE TABLE t (a INT)")
+
+    def test_it_satisfies_the_table_store_protocol(self, tmp_path: Path) -> None:
+        assert isinstance(ParquetTableStore(tmp_path), TableStore)
+
+    def test_tables_are_listed(self, tmp_path: Path) -> None:
+        store = ParquetTableStore(tmp_path)
+        store.write_table("beta", pl.DataFrame({"a": [1]}), run_id="r")
+        store.write_table("alpha", pl.DataFrame({"a": [1]}), run_id="r")
+        assert store.list_tables() == ["alpha", "beta"]

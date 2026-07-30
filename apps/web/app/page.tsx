@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Alternatives } from "@/components/Alternatives";
+import { ContextPanel, LastSeasonLine } from "@/components/Context";
 import { Derivation, Horizon } from "@/components/Depth";
 import { History } from "@/components/History";
 import { LineupDiff } from "@/components/LineupDiff";
@@ -202,6 +203,12 @@ function Masthead({
         />
       </div>
 
+      <Link href="/plan" className="eyebrow transition-opacity hover:opacity-70">
+        Plan
+      </Link>
+      <Link href="/discovery" className="eyebrow transition-opacity hover:opacity-70">
+        Discovery
+      </Link>
       <Link href="/features" className="eyebrow transition-opacity hover:opacity-70">
         Feature lab →
       </Link>
@@ -317,14 +324,22 @@ function Board({ players }: { players: PlayerSummary[] }) {
           >
             <span className="tnum text-xs text-dim">{String(index + 1).padStart(2, "0")}</span>
 
-            <span className="flex items-center gap-3">
-              <span
-                aria-hidden
-                className="h-1.5 w-1.5 rounded-full"
-                style={{ background: POSITION_COLOR[player.position] }}
-              />
-              <span className="text-[15px]">{player.name}</span>
-              <span className="eyebrow hidden sm:inline">{player.position}</span>
+            <span className="flex flex-col gap-0.5">
+              <span className="flex items-center gap-3">
+                <span
+                  aria-hidden
+                  className="h-1.5 w-1.5 rounded-full"
+                  style={{ background: POSITION_COLOR[player.position] }}
+                />
+                <span className="text-[15px]">{player.name}</span>
+                <span className="eyebrow hidden sm:inline">{player.position}</span>
+              </span>
+              {/* The comparison happens here, in the collapsed list — so the
+                  season behind the projection belongs here too, not only in a
+                  panel a reader has to open one row at a time. */}
+              <span className="hidden pl-[1.125rem] sm:block">
+                <LastSeasonLine context={player.context} />
+              </span>
             </span>
 
             {/* A bar, not a number in a box — the comparison is the point. */}
@@ -350,6 +365,8 @@ function Board({ players }: { players: PlayerSummary[] }) {
 
               <div className="space-y-9">
                 <Horizon weeks={player.horizon} total={player.horizon_total} />
+
+                <ContextPanel context={player.context} />
 
                 <div>
                   <p className="eyebrow">Whether it has happened before</p>

@@ -1,0 +1,45 @@
+[project]
+name = "xg-alonso-discovery"
+version = "0.1.0"
+description = "Objective-conditioned feature discovery. The Feature Scientist, and the search it runs."
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26,<3",
+    "polars>=1.20,<2",
+    # scikit-learn is declared HERE rather than in feature_factory on purpose.
+    # feature_factory keeps one numeric dependency chain (numpy only) and its
+    # hand-written k-means exists to preserve that. Objective-conditioned
+    # clustering needs GMM and PCA, so the dependency lands in the package that
+    # actually wants it instead of being pushed down a layer where it would
+    # become load-bearing for feature generation.
+    "scikit-learn>=1.6",
+    "xg-alonso-contracts",
+    "xg-alonso-domain",
+    "xg-alonso-features",
+    "xg-alonso-prediction",
+    "xg-alonso-optimization",
+    "xg-alonso-evaluation",
+]
+
+[project.optional-dependencies]
+# The language-model proposer is optional and off by default. The deterministic
+# generator runs without it, so the core install stays free of an LLM client and
+# of any credential requirement.
+llm = [
+    "anthropic>=0.69",
+]
+
+[tool.uv.sources]
+xg-alonso-contracts = { workspace = true }
+xg-alonso-domain = { workspace = true }
+xg-alonso-features = { workspace = true }
+xg-alonso-prediction = { workspace = true }
+xg-alonso-optimization = { workspace = true }
+xg-alonso-evaluation = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xg_alonso"]

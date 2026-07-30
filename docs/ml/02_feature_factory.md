@@ -196,7 +196,7 @@ Required adapters:
 - Optional weather and travel context (out of scope for the same reason; retained here as a future adapter slot, not an MVP dependency)
 - User squad and transfer-state data, keyed by public FPL team ID only, with purchase and selling prices reconstructed from public transfer history
 
-Sourcing constraint: the official FPL API is the only permitted source. No scraping (no Understat, no FBref) and no paid providers. Any adapter above that has no official FPL equivalent is a future slot, not a build item.
+Sourcing constraint: the official FPL API, plus free public sources that permit automated access (D6 as relaxed 2026-07-29). Understat and FBref remain excluded — the first disallows every path in `robots.txt`, the second sits behind a bot challenge — so shot-level features stay unbuildable. Team-match event counts are available via `team_match_events` but are **not yet joined into the feature frame**; see `docs/match_event_data.md`. Any adapter above with no permitted source is a future slot, not a build item.
 
 Every adapter must publish:
 

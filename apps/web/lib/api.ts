@@ -40,6 +40,46 @@ export interface GameweekProjection {
   weight: number;
 }
 
+export interface SeasonLine {
+  season: string;
+  appearances: number;
+  minutes: number;
+  goals: number;
+  assists: number;
+  clean_sheets: number;
+  points: number;
+  expected_goals: number | null;
+  expected_assists: number | null;
+  /** Null means the sample cannot support a rate — not that the rate is zero. */
+  per_90: number | null;
+  points_per_appearance: number | null;
+  sentence: string;
+}
+
+export interface ScheduledFixture {
+  gameweek: number;
+  opponent: string;
+  is_home: boolean;
+  /** FPL's published 1-5 rating. Null preseason, when it is unset. */
+  difficulty: number | null;
+  label: string;
+}
+
+export interface FixtureRun {
+  fixtures: ScheduledFixture[];
+  mean_difficulty: number | null;
+  home_count: number;
+  blanks: number[];
+  doubles: number[];
+  sentence: string;
+}
+
+/** Retrieved, never modelled — this is what makes it checkable. */
+export interface PlayerContext {
+  seasons: SeasonLine[];
+  run: FixtureRun | null;
+}
+
 export interface PlayerSummary {
   player_code: number;
   name: string;
@@ -55,6 +95,7 @@ export interface PlayerSummary {
   derivation: DerivationLine[];
   horizon: GameweekProjection[];
   horizon_total: number | null;
+  context: PlayerContext | null;
 }
 
 export interface SquadPlayer extends PlayerSummary {
@@ -234,6 +275,153 @@ export interface FeatureImportance {
   per_label: Record<string, number>;
 }
 
+
+
+// --- Requirements and planning -------------------------------------------
+
+export type RequirementKind =
+  | "must_start"
+  | "must_include"
+  | "must_exclude"
+  | "must_captain"
+  | "club_floor"
+  | "club_ceiling"
+  | "formation"
+  | "bank_floor";
+
+export interface Requirement {
+  kind: RequirementKind;
+  label: string;
+  players: number[];
+  player_names: string[];
+  team_id: number | null;
+  count: number | null;
+  formation: string | null;
+  amount: number | null;
+  priority: number;
+  /** How sure the parser was. Null when supplied directly rather than parsed. */
+  confidence: number | null;
+  /** The phrase that produced it — so you can see why it thinks you asked. */
+  evidence: string;
+  /** "matched" by a vocabulary rule, or "model" if a language model read it. */
+  source: "matched" | "model";
+}
+
+/** A requirement sent back after editing. Replaces the parse, never adds to it. */
+export interface RequirementInput {
+  kind: RequirementKind;
+  players?: number[];
+  team_id?: number | null;
+  count?: number | null;
+  formation?: string | null;
+  amount?: number | null;
+  priority?: number;
+}
+
+export interface ParsedRequirements {
+  objective_id: string;
+  requirements: Requirement[];
+  unparsed: string[];
+  unresolved_names: string[];
+  /** Contradictions found without solving, e.g. four players from one club. */
+  problems: string[];
+  overall_confidence: number;
+  interpreted: boolean;
+  /** Why the model was or was not consulted. Shown, never swallowed. */
+  interpreter_note: string;
+  /** A lean read from the request, e.g. "differential". Not a requirement. */
+  ownership_preference: string;
+  risk_preference: string;
+  /** Understood but not expressible as a requirement. */
+  model_notes: string[];
+}
+
+export interface RequirementOutcome {
+  kind: RequirementKind;
+  label: string;
+  honoured: boolean;
+  /** Points given up, holding the others fixed. Zero means it cost nothing. */
+  cost: number | null;
+  note: string;
+}
+
+export interface Plan {
+  objective_id: string;
+  model_note: string;
+  gameweek: number;
+  formation: string;
+  bank: number;
+  expected_points: number;
+  unconstrained_points: number;
+  total_cost: number;
+  feasible_as_asked: boolean;
+  players: SquadPlayer[];
+  outcomes: RequirementOutcome[];
+  parsed: ParsedRequirements | null;
+}
+
+// --- Objective-conditioned discovery -------------------------------------
+
+export interface ObjectivePreset {
+  id: string;
+  name: string;
+  primary_metric: string;
+  risk_preference: string;
+  planning_horizon: number;
+  ownership_preference: string;
+}
+
+export interface DiscoveredFeature {
+  feature: string;
+  version: string;
+  hypothesis_id: string;
+  status: string;
+  complementarity: string;
+  utility: number;
+  incremental_value: number;
+  folds: number;
+  folds_improved: number;
+  stability: number;
+  missingness: number;
+  leakage_passed: boolean;
+  reason: string;
+}
+
+export interface Hypothesis {
+  id: string;
+  title: string;
+  football_rationale: string;
+  falsification_condition: string;
+  expected_relationship: string;
+  generation_source: string;
+  leakage_risk: string;
+  status: string;
+  required_raw_fields: string[];
+}
+
+export interface Cluster {
+  cluster_model_version: string;
+  cluster_id: number;
+  objective_id: string;
+  size: number;
+  label: string;
+  dominant_features: [string, number][];
+}
+
+export interface Experiment {
+  experiment_id: string;
+  objective_id: string | null;
+  stage: string | null;
+  hypotheses_proposed: number;
+  features_compiled: number;
+  features_accepted: number;
+  features_rejected: number;
+  code_version: string | null;
+  git_dirty: boolean;
+  completed_at: string | null;
+  metrics: [string, number][];
+}
+
 export interface ImportanceResponse {
   features: FeatureImportance[];
   families: Record<string, number>;
@@ -242,6 +430,12 @@ export interface ImportanceResponse {
   label_weights: Record<string, number>;
   folds_measured: number;
   features_measured: number;
+  /** Which slice these numbers describe. `ALL` is the pooled measurement. */
+  position: string;
+  /** Slices present in the table. A pre-v2 table offers `ALL` only. */
+  positions: string[];
+  /** Validation rows behind this slice. A positional slice is much smaller. */
+  rows_measured: number;
   features_with_no_effect: number;
   catalogue_version: string;
   model_fingerprint: string;
@@ -269,6 +463,21 @@ async function get<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+/** POST helper. Same error discipline as `get`: the server's detail wins. */
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`/api${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(detail.detail ?? `Request failed (${response.status})`);
+  }
+  return response.json() as Promise<T>;
+}
+
 export const api = {
   health: () => get<Health>("/health"),
   players: (limit = 20) => get<PlayerSummary[]>(`/players?limit=${limit}`),
@@ -282,9 +491,37 @@ export const api = {
       `/recommend/${entryId}${squadFile ? `?squad_file=${encodeURIComponent(squadFile)}` : ""}`,
     ),
   buildSquadExplained: () => get<SquadBuild>("/build-squad/explained"),
-  importance: (label?: string, limit = 60) =>
+  parseRequirements: (text: string, preset = "expected_points", interpret = false) =>
+    post<ParsedRequirements>("/requirements/parse", { text, preset, interpret }),
+
+  plan: (body: {
+    text: string;
+    preset?: string;
+    requirements?: RequirementInput[];
+    interpret?: boolean;
+  }) => post<Plan>("/squad/plan", body),
+
+  objectives: () => get<ObjectivePreset[]>("/objectives"),
+
+  experiments: () => get<Experiment[]>("/experiments"),
+
+  discoveredFeatures: (objectiveId: string) =>
+    get<DiscoveredFeature[]>(
+      `/features/discovered?objective_id=${encodeURIComponent(objectiveId)}`,
+    ),
+
+  hypotheses: () => get<Hypothesis[]>("/hypotheses"),
+
+  clusters: (objectiveId?: string) =>
+    get<Cluster[]>(
+      `/clusters${objectiveId ? `?objective_id=${encodeURIComponent(objectiveId)}` : ""}`,
+    ),
+
+  importance: (label?: string, limit = 60, position?: string) =>
     get<ImportanceResponse>(
-      `/features/importance?limit=${limit}${label ? `&label=${encodeURIComponent(label)}` : ""}`,
+      `/features/importance?limit=${limit}` +
+        `${label ? `&label=${encodeURIComponent(label)}` : ""}` +
+        `${position ? `&position=${encodeURIComponent(position)}` : ""}`,
     ),
 };
 

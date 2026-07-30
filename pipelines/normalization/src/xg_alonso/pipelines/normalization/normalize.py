@@ -12,7 +12,7 @@ once, here, means nothing downstream ever has to know that FPL reissues ids.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import polars as pl
@@ -55,6 +55,38 @@ def build_element_to_code_map(payload: dict[str, Any]) -> dict[int, int]:
     return {int(e["id"]): int(e["code"]) for e in payload.get("elements", [])}
 
 
+def _as_utc(value: object) -> datetime | None:
+    """Parse an ISO timestamp FPL publishes as a string.
+
+    Returns ``None`` rather than the epoch when it cannot be parsed, and always
+    carries a timezone. A naive datetime compares wrongly against the UTC data
+    every other layer produces, and the comparison that goes wrong is the
+    availability check that prevents leakage.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _as_float(value: object) -> float | None:
+    """Parse a numeric field FPL publishes as a string.
+
+    Returns ``None`` rather than zero when it cannot be parsed. Zero would assert
+    that nobody owns the player, which is a claim about the market rather than an
+    admission that the value is missing.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize_players(
     payload: dict[str, Any], *, season: Season, available_time: datetime
 ) -> pl.DataFrame:
@@ -77,6 +109,11 @@ def normalize_players(
                 "current_price": e.get("now_cost"),
                 "status": e.get("status"),
                 "chance_of_playing_next_round": e.get("chance_of_playing_next_round"),
+                "chance_of_playing_this_round": e.get("chance_of_playing_this_round"),
+                "news": e.get("news") or None,
+                "news_added": _as_utc(e.get("news_added")),
+                # Published as a string ("29.8"), so cast rather than trusted.
+                "selected_by_percent": _as_float(e.get("selected_by_percent")),
             }
             for e in elements
         ],

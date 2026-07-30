@@ -11,6 +11,9 @@ import {
 } from "@/lib/api";
 import { explainFamily, explainFeature } from "@/lib/glossary";
 
+/** The pooled slice. Mirrors `ALL_POSITIONS` in the evaluation package. */
+const ALL_POSITIONS = "ALL";
+
 /**
  * The Feature Lab: which of the catalogue's features actually earn their place.
  *
@@ -28,14 +31,20 @@ import { explainFamily, explainFeature } from "@/lib/glossary";
 export default function FeaturesPage() {
   const [data, setData] = useState<ImportanceResponse | null>(null);
   const [label, setLabel] = useState<string | null>(null);
+  const [position, setPosition] = useState<string>(ALL_POSITIONS);
+  // Held separately from `data.positions` so the selector does not vanish when a
+  // slice returns nothing and `data` goes null.
+  const [available, setAvailable] = useState<string[]>([ALL_POSITIONS]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
 
-  const load = useCallback(async (next: string | null) => {
+  const load = useCallback(async (nextLabel: string | null, nextPosition: string) => {
     setBusy(true);
     setError(null);
     try {
-      setData(await api.importance(next ?? undefined, 40));
+      const response = await api.importance(nextLabel ?? undefined, 40, nextPosition);
+      setData(response);
+      if (response.positions.length > 0) setAvailable(response.positions);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not load the table.");
       setData(null);
@@ -45,8 +54,8 @@ export default function FeaturesPage() {
   }, []);
 
   useEffect(() => {
-    void load(label);
-  }, [label, load]);
+    void load(label, position);
+  }, [label, position, load]);
 
   return (
     <main className="mx-auto max-w-6xl px-6 pb-28 sm:px-10">
@@ -74,15 +83,19 @@ export default function FeaturesPage() {
         </p>
       </header>
 
-      {error && (
-        <Empty message={error} />
+      {(error || data) && (
+        <PositionFilter active={position} available={available} onChange={setPosition} />
       )}
+
+      {error && <Empty message={error} />}
 
       {data && (
         <>
           <Summary data={data} />
 
           <Findings data={data} />
+
+          <PointsMix data={data} />
 
           <Filters
             labels={data.labels}
@@ -133,6 +146,14 @@ function Masthead() {
         </span>
         <span className="eyebrow">← back to the call</span>
       </Link>
+      <nav className="flex gap-6">
+        <Link href="/plan" className="eyebrow transition-opacity hover:opacity-70">
+          Plan
+        </Link>
+        <Link href="/discovery" className="eyebrow transition-opacity hover:opacity-70">
+          Discovery
+        </Link>
+      </nav>
     </header>
   );
 }
@@ -326,6 +347,146 @@ function Filters({
         ))}
       </div>
     </nav>
+  );
+}
+
+/**
+ * How a position reads to a person, and the order a squad is listed in.
+ *
+ * Both `GK` and `GKP` appear: the archive spells it `GK` and the live bootstrap
+ * spells it `GKP`, so a table measured across seasons can carry either. Mapping
+ * both beats normalising one away, which would make the label disagree with the
+ * value the API actually filters on.
+ */
+const POSITION_LABELS: Record<string, string> = {
+  ALL: "Every position",
+  GK: "Goalkeepers",
+  GKP: "Goalkeepers",
+  DEF: "Defenders",
+  MID: "Midfielders",
+  FWD: "Forwards",
+};
+
+const POSITION_ORDER = ["ALL", "GK", "GKP", "DEF", "MID", "FWD"];
+
+/**
+ * Which players the ranking below actually describes.
+ *
+ * This is the most consequential control on the page and it is deliberately
+ * first. A pooled ranking answers "what predicts a footballer's return", which
+ * is a question nobody asks — minutes played dominates a striker's goals, and
+ * for a defender the same minutes matter through clean sheets. The two are
+ * different rankings, and reading one while thinking about the other is the
+ * specific mistake this fixes.
+ *
+ * These are separate *measurements*, not a reweighting of pooled numbers: a
+ * defender's ranking comes from permuting features on defenders' rows.
+ */
+function PositionFilter({
+  active,
+  available,
+  onChange,
+}: {
+  active: string;
+  available: string[];
+  onChange: (position: string) => void;
+}) {
+  const ordered = POSITION_ORDER.filter((position) => available.includes(position));
+  const extras = available.filter((position) => !POSITION_ORDER.includes(position));
+  const shown = [...ordered, ...extras];
+
+  if (shown.length <= 1) {
+    return (
+      <p className="mt-12 text-[13px]" style={{ color: "var(--color-muted)" }}>
+        Measured across every position together. Re-run <code>xg importance</code> to
+        measure each position separately.
+      </p>
+    );
+  }
+
+  return (
+    <nav className="rise mt-12" aria-label="Position" style={{ animationDelay: "0.1s" }}>
+      <p className="eyebrow">Ranking for</p>
+      <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2.5">
+        {shown.map((position) => (
+          <Chip
+            key={position}
+            label={POSITION_LABELS[position] ?? position}
+            active={active === position}
+            onClick={() => onChange(position)}
+          />
+        ))}
+      </div>
+    </nav>
+  );
+}
+
+/**
+ * What this position's points are actually made of.
+ *
+ * The ranking above is weighted by how much each component moves a points
+ * total, and that mix is wildly different by position — a goalkeeper's points
+ * are twelve percent saves and one percent goals; a forward's are the reverse.
+ * Showing the mix is what makes the ranking above readable, and it is the
+ * clearest evidence that these are separate measurements rather than one
+ * ranking relabelled four times.
+ *
+ * It also explains the part that surprises people: minutes leads every
+ * position. That is not a flattening bug — a player who does not play scores
+ * nothing whatever his position, so minutes gates every other component. The
+ * position-specific answer lives in the component filter below.
+ */
+function PointsMix({ data }: { data: ImportanceResponse }) {
+  const mix = Object.entries(data.label_weights)
+    .filter(([, weight]) => weight > 0.001)
+    .sort((a, b) => b[1] - a[1]);
+
+  if (mix.length === 0) return null;
+
+  const appearance = mix
+    .filter(([name]) => name === "label_minutes" || name === "label_starts")
+    .reduce((sum, [, weight]) => sum + weight, 0);
+
+  return (
+    <section className="rise mt-12" style={{ animationDelay: "0.12s" }}>
+      <p className="eyebrow">
+        {data.position === ALL_POSITIONS
+          ? "What points are made of"
+          : `What ${(POSITION_LABELS[data.position] ?? data.position).toLowerCase()} are paid for`}
+      </p>
+
+      <div className="mt-4 flex h-2 w-full overflow-hidden" style={{ background: "var(--color-line)" }}>
+        {mix.map(([name, weight], index) => (
+          <span
+            key={name}
+            title={`${labelName(name)} — ${(weight * 100).toFixed(1)}%`}
+            style={{
+              width: `${weight * 100}%`,
+              background: "var(--color-text)",
+              opacity: 0.85 - index * 0.09,
+            }}
+          />
+        ))}
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
+        {mix.slice(0, 6).map(([name, weight]) => (
+          <span key={name} className="text-[12px]" style={{ color: "var(--color-muted)" }}>
+            {labelName(name)}{" "}
+            <span className="tnum" style={{ color: "var(--color-dim)" }}>
+              {(weight * 100).toFixed(1)}%
+            </span>
+          </span>
+        ))}
+      </div>
+
+      <p className="mt-3 max-w-2xl text-[12px] leading-relaxed" style={{ color: "var(--color-dim)" }}>
+        Minutes and starts together are {(appearance * 100).toFixed(0)}% of the mix, which is
+        why appearance features lead the ranking for every position — a player who does not
+        play scores nothing whatever he is. Pick a component below to see what separates the
+        positions.
+      </p>
+    </section>
   );
 }
 
