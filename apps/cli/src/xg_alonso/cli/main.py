@@ -159,6 +159,143 @@ def ingest(
         typer.echo(f"\n  pinned the rules from this snapshot -> {_pinned_path(data_root, parsed)}")
 
 
+@app.command(name="team-news")
+def team_news_command(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    entry_id: Annotated[
+        int | None, typer.Option("--entry", help="Your team id, so your squad is checked first.")
+    ] = None,
+    squad_file: Annotated[
+        Path | None, typer.Option("--squad-file", help="Picks JSON, if the API has no squad yet.")
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", help="How many players to search.")] = 20,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show the shortlist and stop, without searching.")
+    ] = False,
+) -> None:
+    """Search for team news FPL has not published, and file it as form signals.
+
+    **This is the second-class channel, deliberately.** `xg refresh` handles
+    everything official — injuries, suspensions, chance of playing — and a
+    re-poll is authoritative. This is for what no endpoint carries: a coach
+    hinting somebody needs a rest, a returning player taking a place back, a
+    striker who has not looked himself.
+
+    Nothing found here can assert a projection. Every result becomes a form
+    signal, which multiplies expected points within a hard clamp, must carry a
+    source URL or it cannot be constructed at all, and expires. A claim with no
+    link is discarded rather than filed at lower strength.
+
+    Searches a shortlist rather than the league: your squad, then the highly
+    owned and highly projected. Players FPL has already flagged are skipped —
+    the official field is a fact, and an inference restating it would
+    double-count while looking like corroboration.
+    """
+    import json
+
+    from xg_alonso.contracts.form import SignalSet
+    from xg_alonso.interpreter import (
+        InterpreterUnavailableError,
+        search_player_news,
+        shortlist_from,
+    )
+
+    parsed = parse_season(season)
+    context = _load_context(data_root, parsed)
+    gameweek = context.next_gameweek()
+
+    held: list[int] = []
+    if entry_id is not None or squad_file is not None:
+        try:
+            state = _squad_state(context, entry_id or 0, squad_file)
+            held = [int(p.player_code) for p in state.picks]
+        except Exception as exc:
+            typer.secho(f"  (no squad loaded: {exc})", fg=typer.colors.YELLOW)
+
+    projected = {
+        int(p.player_code): p.expected_points
+        for p in _predict_all(context, gameweek, None, data_root=data_root)
+    }
+    rows = list(context.players.iter_rows(named=True))
+    shortlist = shortlist_from(rows, squad=held, expected_points=projected, limit=limit)
+
+    typer.echo(f"Shortlist ({len(shortlist)} of {len(rows)} players)")
+    for entry in shortlist[:12]:
+        typer.echo(f"  {entry.name:<18} {entry.why}")
+    if len(shortlist) > 12:
+        typer.echo(f"  ... and {len(shortlist) - 12} more")
+
+    if dry_run:
+        typer.echo("\n  (dry run — nothing searched)")
+        return
+
+    typer.echo("\n  searching ...")
+    try:
+        sweep = search_player_news(shortlist, now=utc_now())
+    except InterpreterUnavailableError as exc:
+        typer.secho(f"  {exc}", fg=typer.colors.YELLOW)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"  {sweep.summary()}\n")
+    for signal in sweep.signals:
+        colour = typer.colors.RED if signal.direction.value == "negative" else typer.colors.GREEN
+        name = context.player_names().get(signal.player_code, str(signal.player_code))
+        shift = (signal.multiplier - 1.0) * 100.0
+        typer.secho(f"  {name:<18} {shift:+.1f}%  ({signal.strength.value})", fg=colour)
+        typer.echo(f"                     {signal.summary}")
+        for source in signal.sources[:2]:
+            typer.echo(f"                     {source}")
+
+    if sweep.discarded:
+        typer.echo("\n  discarded:")
+        for who, why in sweep.discarded:
+            typer.echo(f"    {who}: {why}")
+
+    if not sweep.signals:
+        typer.echo("  nothing worth filing — the official data is the whole story today")
+        return
+
+    # A signal that lapses before the deadline it would apply to is filed and
+    # never read. That is the correct expiry behaviour — form information is
+    # perishable — but silently writing signals nothing will ever use is not,
+    # so it is said out loud along with when to run this instead.
+    deadline = context.deadline_for(gameweek)
+    stale_on_arrival = [s for s in sweep.signals if not s.is_live(deadline)]
+    if stale_on_arrival:
+        days = (deadline - utc_now()).days
+        typer.secho(
+            f"\n  {len(stale_on_arrival)} of {len(sweep.signals)} expire before the "
+            f"GW{int(gameweek)} deadline ({days} days away) and will never be applied.",
+            fg=typer.colors.YELLOW,
+        )
+        typer.echo("  Team news is a near-deadline tool; run it in the days before one.")
+
+    # Merged rather than replaced, and expiry does the pruning. Overwriting
+    # would silently discard a signal from a source this sweep did not happen to
+    # search, which is not the same as that signal having lapsed.
+    path = data_root / "signals" / "form_signals.json"
+    existing: list[Any] = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text()).get("signals", [])
+        except (OSError, ValueError):
+            existing = []
+
+    fresh = {(s.player_code, s.observed_at.isoformat()) for s in sweep.signals}
+    kept = [
+        record
+        for record in existing
+        if (record.get("player_code"), record.get("observed_at")) not in fresh
+    ]
+    merged = SignalSet(signals=tuple(sweep.signals), loaded_at=utc_now()).model_dump(mode="json")
+    merged["signals"] = [*kept, *merged["signals"]]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    typer.echo(f"\n  {len(merged['signals'])} signal(s) on file -> {path}")
+
+
 @app.command()
 def refresh(
     data_root: DataRoot = DEFAULT_DATA_ROOT,
@@ -1845,22 +1982,54 @@ def _predict_all(  # type: ignore[no-untyped-def]
     cutoff = context.deadline_for(gameweek)
     entities = build_entities(context, cutoff=cutoff)
 
+    def _temper(predictions: list[Any]) -> list[Any]:
+        """Apply what is known about a player beyond the model's features.
+
+        Two adjustments, in order of authority. FPL's published chance of
+        playing is the game's own statement and is applied in full; a form
+        signal is somebody's reading of a match report and is clamped. Both were
+        already available and neither reached this path — a doubtful player was
+        scored as fully fit here while the recommend path knew better, which is
+        the kind of divergence nobody can explain after the fact.
+        """
+        from xg_alonso.prediction.availability import apply_availability
+        from xg_alonso.prediction.form import apply_form_signals, load_signals
+
+        chances = {
+            PlayerCode(int(row["player_code"])): row.get("chance_of_playing_next_round")
+            for row in context.players.iter_rows(named=True)
+        }
+        tempered = apply_availability(predictions, chances)
+
+        # Availability always applies — it comes from the payload already
+        # loaded. Signals need a file, so without a data root they are simply
+        # absent rather than the whole adjustment being skipped.
+        if data_root is None:
+            return tempered
+        return apply_form_signals(
+            tempered,
+            load_signals(data_root / "signals" / "form_signals.json"),
+            at=cutoff,
+        )
+
     if models is not None:
         features = build_model_features(entities, player_stats=context.player_stats)
         if objective_id and data_root is not None:
             features, _ = _objective_feature_columns(
                 data_root, objective_id, features, context.player_stats
             )
-        return predict_with_models(
-            features,
-            models=models,  # type: ignore[arg-type]
-            rules=context.scoring,
-            from_gameweek=gameweek,
-            data_cutoff=cutoff,
-            predicted_at=cutoff,
-            run_id="build-squad",
-            code_version="cli",
-            feature_set_version=CATALOGUE_VERSION,
+        return _temper(
+            predict_with_models(
+                features,
+                models=models,  # type: ignore[arg-type]
+                rules=context.scoring,
+                from_gameweek=gameweek,
+                data_cutoff=cutoff,
+                predicted_at=cutoff,
+                run_id="build-squad",
+                code_version="cli",
+                feature_set_version=CATALOGUE_VERSION,
+            )
         )
 
     features = build_slice1_features(
@@ -1868,15 +2037,17 @@ def _predict_all(  # type: ignore[no-untyped-def]
         player_stats=context.player_stats,
         team_stats=build_team_gameweek_stats(context.player_stats, context.players),
     )
-    return predict_frame(
-        features,
-        rules=context.scoring,
-        from_gameweek=gameweek,
-        data_cutoff=cutoff,
-        predicted_at=cutoff,
-        run_id="build-squad",
-        code_version="cli",
-        feature_set_version="slice1_v1",
+    return _temper(
+        predict_frame(
+            features,
+            rules=context.scoring,
+            from_gameweek=gameweek,
+            data_cutoff=cutoff,
+            predicted_at=cutoff,
+            run_id="build-squad",
+            code_version="cli",
+            feature_set_version="slice1_v1",
+        )
     )
 
 
