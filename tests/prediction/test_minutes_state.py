@@ -197,6 +197,12 @@ class TestTheHead:
         assert np.all(probabilities >= 0.0)
         assert np.allclose(probabilities.sum(axis=1), 1.0, atol=1e-9)
 
+    def test_no_scalar_mean_is_recorded_for_it(self, fitted: Any) -> None:
+        """Class indices are nominal. Their arithmetic mean is ~1.56 — a number
+        that looks like a shrinkage target and means nothing."""
+        assert "label_minutes_state" not in fitted.label_means
+        assert "label_minutes" in fitted.label_means
+
     def test_an_artifact_without_the_head_says_so(self) -> None:
         """``None``, not a uniform prior. A silently invented state distribution
         would be the single most load-bearing fabrication in the system."""

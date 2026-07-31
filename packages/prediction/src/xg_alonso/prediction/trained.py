@@ -554,6 +554,15 @@ def train_component_models(
         model = _fit(label, x_all, y_all, model_kwargs)
         if model is not None:
             result.models[label] = model
+
+        if label in _MULTICLASS_LABELS:
+            # No scalar mean is recorded. The label holds *class indices*, which
+            # are nominal — averaging them yields something like 1.56, a number
+            # that looks like a shrinkage target and means nothing. Nothing
+            # shrinks a multiclass head, and storing the value would invite a
+            # caller to try.
+            continue
+
         # Record what this component is shrunk toward. For a binary label the
         # mean is the base rate of the event, matching what the model predicts.
         result.label_means[label] = float(
