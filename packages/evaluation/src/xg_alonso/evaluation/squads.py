@@ -311,7 +311,7 @@ def template_ownership_squad(
     prior_rows = player_stats.filter(
         (pl.col("season") == season) & (pl.col("gameweek_id") == previous)
     )
-    if prior_rows.is_empty():
+    if prior_rows.is_empty() or prior_rows["selected"].null_count() == prior_rows.height:
         # No prior gameweek — `gameweek` is the season opener, or the window
         # starts before any recorded data. Every player would fill-null to zero
         # ownership, and `_greedy_fill` would then rank a 600-player field by a
@@ -322,7 +322,9 @@ def template_ownership_squad(
         raise ValueError(
             f"no gameweek {previous} ownership for {season}, so a template squad for "
             f"gameweek {gameweek} cannot be built. Ownership must be read from the "
-            "gameweek before the one being started, and there is none."
+            "gameweek before the one being started, and there is none. A frame whose "
+            "`selected` column is entirely null counts as none: filling it to zero "
+            "would rank every player identically and return an arbitrary fifteen."
         )
     owned = prior_rows.group_by("player_code").agg(pl.col("selected").max().alias("selected"))
     ranked = players.join(owned, on="player_code", how="left").with_columns(

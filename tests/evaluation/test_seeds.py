@@ -220,6 +220,33 @@ class TestRulesResolution:
         assert not resolved.exact
         assert resolved.source_season == "2026-27"
 
+    def test_nothing_pinned_says_so_instead_of_naming_a_file(self, tmp_path: Path) -> None:
+        """The same mislabelling, one branch further in.
+
+        With nothing pinned the rules can only come from the live bronze
+        snapshot. Reporting `source_season=DEFAULT_SEASON` and a caveat reading
+        "resolved from the 2026-27 pinned snapshot" would name a file that does
+        not exist — which is the defect this function was just fixed for.
+        """
+        root = _data_root_pinned_at(tmp_path)  # bronze only, nothing pinned
+        assert list((root / "pinned").glob("rules_*.json")) == []
+
+        resolved = _resolve_rules(root, parse_season("2024-25"))
+
+        assert not resolved.exact
+        assert not resolved.pinned
+        assert resolved.source_season == "2024-25"
+        assert "live bronze snapshot" in resolved.caveat
+        assert "pinned snapshot" not in resolved.caveat
+
+    def test_a_pinned_fallback_still_names_its_snapshot(self, tmp_path: Path) -> None:
+        resolved = _resolve_rules(
+            _data_root_pinned_at(tmp_path, "2026-27"), parse_season("2024-25")
+        )
+
+        assert resolved.pinned
+        assert "2026-27 pinned snapshot" in resolved.caveat
+
     def test_require_exact_refuses_the_fallback(self, tmp_path: Path) -> None:
         """Otherwise the caveat is the only thing standing between a reader and
         a number scored under the wrong season's rules."""

@@ -125,10 +125,23 @@ class RulesResolution:
     squad: Any
     source_season: str
     exact: bool
+    pinned: bool = True
+    """Whether the rules came from a pinned snapshot at all.
+
+    ``False`` means nothing was pinned and the live bronze snapshot was the
+    only source. The caveat has to distinguish the two: reporting "resolved
+    from the 2026-27 pinned snapshot" when no such file exists is the same
+    mislabelling this function was fixed for, one branch further in.
+    """
 
     @property
     def caveat(self) -> str:
         """One line for a report, empty when the rules are the season's own."""
+        if not self.pinned:
+            return (
+                "scoring rules read from the live bronze snapshot; no pinned "
+                "rules exist for any season, so they are whatever was last ingested"
+            )
         if self.exact:
             return ""
         return (
@@ -182,13 +195,16 @@ def _resolve_rules(
     scoring, squad = _load_pinned_rules(data_root, parse_season(chosen))
     if scoring is None or squad is None:
         # Nothing pinned at all — a first run. The snapshot is the only source
-        # there is, and `exact=False` says so rather than implying otherwise.
+        # there is. `source_season` must not name a pinned file that does not
+        # exist, so it reports the season the context was built for and
+        # `pinned=False` carries the rest.
         context = _load_context(data_root, season)
         return RulesResolution(
             scoring=context.scoring,
             squad=context.squad_rules,
-            source_season=chosen,
+            source_season=str(season),
             exact=False,
+            pinned=False,
         )
 
     return RulesResolution(

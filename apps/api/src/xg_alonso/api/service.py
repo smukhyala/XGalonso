@@ -970,6 +970,10 @@ class DecisionService:
                 prices={
                     PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
                     for code, row in rows.items()
+                    # A null price raises from `int(None)` and fails the whole
+                    # request; the price-aware callees leave an absent player
+                    # untouched, which is the documented behaviour.
+                    if row.get("current_price") is not None
                 },
             ),
             prices=prices,
@@ -1176,6 +1180,10 @@ class DecisionService:
                 prices={
                     PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
                     for code, row in rows.items()
+                    # A null price raises from `int(None)` and fails the whole
+                    # request; the price-aware callees leave an absent player
+                    # untouched, which is the documented behaviour.
+                    if row.get("current_price") is not None
                 },
             ),
             prices=prices,
@@ -1684,6 +1692,7 @@ class DecisionService:
                     prices={
                         PlayerCode(int(code)): TenthsOfMillion(int(row["current_price"]))
                         for code, row in available.items()
+                        if row.get("current_price") is not None
                     },
                 ),
             )

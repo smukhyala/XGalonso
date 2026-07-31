@@ -309,7 +309,10 @@ def actual_prices(
     ordering = [c for c in ("kickoff_time", "fixture_id") if c in rows.columns]
     ordered = rows.sort(ordering, nulls_last=True) if ordering else rows
     latest = ordered.group_by("player_code", maintain_order=True).agg(
-        pl.col("value").last().alias("value")
+        # `drop_nulls` before `last`: a null in the final row would otherwise
+        # win and drop the player from the map entirely, even when an earlier
+        # leg of a double gameweek carried a price.
+        pl.col("value").drop_nulls().last().alias("value")
     )
     return {
         PlayerCode(int(r["player_code"])): TenthsOfMillion(int(r["value"]))
