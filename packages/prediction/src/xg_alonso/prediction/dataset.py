@@ -24,6 +24,7 @@ from datetime import timedelta
 
 import polars as pl
 
+from xg_alonso.contracts.prediction import MinutesState
 from xg_alonso.features.assemble import build_model_features
 from xg_alonso.features.career import CAREER_FEATURES
 from xg_alonso.features.catalogue import feature_names
@@ -86,6 +87,7 @@ def build_training_frame(
     *,
     seasons: Sequence[str] | None = None,
     min_gameweek: int = 1,
+    long_play_minutes: int | None = None,
     progress: bool = False,
 ) -> TrainingData:
     """Assemble features-as-of-deadline plus same-gameweek labels.
@@ -108,6 +110,15 @@ def build_training_frame(
             Early rows are exactly where the recency features earn their place,
             so the model can now learn what a stale window is worth instead of
             being shielded from the question.
+        long_play_minutes: When given, add a ``label_minutes_state`` column
+            holding :class:`MinutesState` indices for a three-class head.
+
+            **Opt-in rather than always-on.** The threshold is a ``VERIFY``
+            constant FPL does not publish, so it has to arrive from a pinned
+            :class:`~xg_alonso.domain.scoring.ScoringRules` rather than being
+            defaulted here — defaulting it would be exactly the transcription
+            the domain layer exists to prevent. Omitting it produces the frame
+            this function has always produced, byte for byte.
         progress: Print a line per gameweek processed.
 
     Returns:
@@ -170,12 +181,29 @@ def build_training_frame(
         raise ValueError("no gameweeks produced training rows")
 
     frame = pl.concat(built, how="vertical").sort(["label_season", "label_gameweek", "player_code"])
+
+    label_columns = tuple(f"label_{c}" for c in labels)
+    if long_play_minutes is not None and "label_minutes" in frame.columns:
+        # Derived from the summed label, so a double gameweek is classified by
+        # the player's *total* minutes across both legs. That matches every
+        # other label here, which are also gameweek totals.
+        frame = frame.with_columns(
+            pl.when(pl.col("label_minutes") >= long_play_minutes)
+            .then(MinutesState.LONG.class_index)
+            .when(pl.col("label_minutes") > 0)
+            .then(MinutesState.SHORT.class_index)
+            .otherwise(MinutesState.NONE.class_index)
+            .cast(pl.Int64)
+            .alias("label_minutes_state")
+        )
+        label_columns = (*label_columns, "label_minutes_state")
+
     return TrainingData(
         frame=frame,
         feature_columns=(
             tuple(feature_names()) + OPPONENT_FEATURES + CAREER_FEATURES + RECENCY_FEATURES
         ),
-        label_columns=tuple(f"label_{c}" for c in labels),
+        label_columns=label_columns,
         gameweeks=tuple(sorted({int(g) for g in frame["label_gameweek"].unique()})),
         seasons=tuple(sorted({str(s) for s in frame["label_season"].unique()})),
     )

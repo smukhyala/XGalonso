@@ -29,6 +29,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostin
 
 from xg_alonso.contracts.folds import WalkForwardFold, walk_forward_folds
 from xg_alonso.contracts.identifiers import GameweekId
+from xg_alonso.contracts.prediction import MINUTES_STATES, MinutesState
 from xg_alonso.contracts.seeds import ROOT_SEED
 
 __all__ = [
@@ -36,8 +37,14 @@ __all__ = [
     "TRAINED_MODEL_VERSION",
     "ComponentModels",
     "FoldReport",
+    "StateFoldReport",
+    "incumbent_state_probabilities",
     "train_component_models",
 ]
+
+#: Ninety minutes. A fact about football, not an FPL rule, so it is not read
+#: from the bootstrap payload — the payload does not publish it.
+_FULL_MATCH: Final[float] = 90.0
 
 TRAINED_MODEL_NAME: Final[str] = "component_hgb"
 TRAINED_MODEL_VERSION: Final[str] = "1"
@@ -45,6 +52,22 @@ TRAINED_MODEL_VERSION: Final[str] = "1"
 #: Labels modelled as probabilities rather than counts. Everything else is a
 #: regression on a raw count.
 _BINARY_LABELS: Final[frozenset[str]] = frozenset({"label_clean_sheets", "label_starts"})
+
+#: Labels modelled as a distribution over mutually exclusive classes.
+#:
+#: **Why this is not two more binary heads.** ``inference.py::_minutes_from``
+#: currently derives ``p_appearance`` and ``p_60_plus`` algebraically from an
+#: expected-minutes regression and a start probability, because those two are
+#: fitted independently and can contradict each other — 80 expected minutes
+#: beside a 0.2 start probability is a shape the contract rejects. The
+#: reconciliation exists to satisfy the validator, not because it estimates
+#: anything, and it feeds the *appearance* term of ``assemble_points``, which is
+#: the single largest term for most players.
+#:
+#: A three-class head estimates the whole distribution at once. The classes are
+#: mutually exclusive and exhaustive by construction, so coherence is a property
+#: of the model rather than a repair applied afterwards.
+_MULTICLASS_LABELS: Final[frozenset[str]] = frozenset({"label_minutes_state"})
 
 #: Count labels, fitted with Poisson loss.
 #:
@@ -79,6 +102,51 @@ _REGRESSOR_KWARGS: Final[dict[str, Any]] = {
     "l2_regularization": 1.0,
     "random_state": ROOT_SEED,
 }
+
+
+@dataclass(frozen=True)
+class StateFoldReport:
+    """Out-of-sample calibration for the minutes-state head on one fold.
+
+    Deliberately **not** a :class:`FoldReport`. That one carries MAE against a
+    mean-predicting baseline, which is the right measure for a count and a
+    meaningless one for a distribution over three classes. Forcing this into
+    the same shape would produce a record where half the fields are undefined
+    and the two would be averaged together in every summary.
+
+    The baseline here is the *incumbent*: the probabilities
+    ``inference.py::_minutes_from`` derives today. Beating a base-rate constant
+    would prove very little — the question is whether estimating the states
+    directly is better than reconciling them from two point estimates.
+    """
+
+    fold_index: int
+    train_rows: int
+    validate_rows: int
+    log_loss: float
+    brier: float
+    baseline_log_loss: float
+    baseline_brier: float
+    state_frequencies: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """Realised class shares in the validation window, in canonical order."""
+
+    @property
+    def log_loss_gain(self) -> float:
+        """Fractional reduction in log loss against the incumbent.
+
+        Positive means the head is better. Zero when the baseline is already
+        perfect, which cannot happen on real data but can on a fixture.
+        """
+        if self.baseline_log_loss <= 0.0:
+            return 0.0
+        return (self.baseline_log_loss - self.log_loss) / self.baseline_log_loss
+
+    @property
+    def brier_gain(self) -> float:
+        """Fractional reduction in multiclass Brier score against the incumbent."""
+        if self.baseline_brier <= 0.0:
+            return 0.0
+        return (self.baseline_brier - self.brier) / self.baseline_brier
 
 
 @dataclass(frozen=True)
@@ -152,6 +220,13 @@ class ComponentModels:
 
     Applied at fit time and never stored, so "was the architecture frozen
     between pinning and running" had no answer. A freeze check needs one.
+    """
+
+    state_reports: list[StateFoldReport] = field(default_factory=list)
+    """Out-of-sample scores for the minutes-state head, if one was fitted.
+
+    Appended with a default so artifacts pickled before the head existed
+    unpickle into this class and fall through to an empty list.
     """
 
     label_means: dict[str, float] = field(default_factory=dict)
@@ -240,6 +315,10 @@ class ComponentModels:
 
         out: dict[str, np.ndarray] = {}
         for label, model in self.models.items():
+            if label in _MULTICLASS_LABELS:
+                # Not a scalar per row, so it does not belong in this mapping.
+                # `predict_minutes_state` returns it with its shape declared.
+                continue
             if label in _BINARY_LABELS:
                 raw = model.predict_proba(matrix)[:, 1]
             else:
@@ -252,6 +331,42 @@ class ComponentModels:
 
             out[label] = raw
         return out
+
+    def predict_minutes_state(self, features: pl.DataFrame) -> np.ndarray | None:
+        """Class probabilities over :data:`MINUTES_STATES`, or ``None`` if unfitted.
+
+        Returns:
+            An ``(n, 3)`` array whose columns are ``none``, ``short``, ``long``
+            in that fixed order, each row summing to 1. ``None`` when this
+            artifact predates the head — absent is honest, and a caller that
+            silently substituted a uniform prior would be inventing the single
+            most load-bearing quantity in the distribution.
+
+        Kept out of :meth:`predict` because that returns one scalar per row per
+        label, and quietly putting a two-dimensional array into it would break
+        every consumer that assumes otherwise without changing a type.
+        """
+        model = self.models.get("label_minutes_state")
+        if model is None:
+            return None
+        matrix = _matrix(features, self.feature_columns)
+        return _state_probabilities(model, matrix)
+
+
+def _state_probabilities(model: Any, matrix: np.ndarray) -> np.ndarray:
+    """Expand a classifier's ``predict_proba`` to all three states.
+
+    ``HistGradientBoostingClassifier`` emits one column per class it *saw*. An
+    early walk-forward fold can contain no ``long`` rows at all, in which case
+    the raw output has two columns and silently means something different. This
+    places each column at its canonical index and leaves the unseen states at
+    zero, so the shape is ``(n, 3)`` regardless.
+    """
+    raw = model.predict_proba(matrix)
+    out = np.zeros((raw.shape[0], len(MINUTES_STATES)), dtype=np.float64)
+    for column, class_index in enumerate(model.classes_):
+        out[:, int(class_index)] = raw[:, column]
+    return out
 
 
 def usable_features(frame: pl.DataFrame, columns: tuple[str, ...]) -> tuple[str, ...]:
@@ -380,12 +495,19 @@ def train_component_models(
         x_train = _matrix(train_rows, fold_columns)
         x_validate = _matrix(validate_rows, fold_columns)
 
+        fold_models: dict[str, Any] = {}
         for label in label_columns:
             y_train = train_rows[label].to_numpy().astype(np.float64)
             y_validate = validate_rows[label].to_numpy().astype(np.float64)
 
             model = _fit(label, x_train, y_train, model_kwargs)
             if model is None:
+                continue
+            fold_models[label] = model
+
+            if label in _MULTICLASS_LABELS:
+                # Scored separately: MAE against a mean-predicting constant is
+                # not a measure of a distribution over three classes.
                 continue
 
             if label in _BINARY_LABELS:
@@ -415,6 +537,16 @@ def train_component_models(
                 )
             )
 
+        state_report = _score_minutes_state(
+            fold_models,
+            validate_rows=validate_rows,
+            x_validate=x_validate,
+            fold=fold,
+            train_rows=train_rows.height,
+        )
+        if state_report is not None:
+            result.state_reports.append(state_report)
+
     # Refit on everything for production use.
     x_all = _matrix(indexed, feature_columns)
     for label in label_columns:
@@ -433,11 +565,118 @@ def train_component_models(
     return result
 
 
+def incumbent_state_probabilities(expected_minutes: np.ndarray, p_start: np.ndarray) -> np.ndarray:
+    """The state distribution the shipped code derives today, vectorised.
+
+    This is a deliberate, temporary duplicate of the reconciliation inside
+    ``inference.py::_minutes_from`` — including its magic numbers, which are
+    reproduced rather than cleaned up because the point is to reproduce the
+    incumbent exactly. ``inference`` cannot be imported here (it imports this
+    module), and the state head has to be scored against what it proposes to
+    replace rather than against a base-rate constant.
+
+    ``tests/prediction/test_minutes_state.py`` asserts elementwise agreement
+    with ``_minutes_from``, so the duplication cannot drift. Both disappear in
+    the task that wires the head into inference.
+
+    Returns:
+        An ``(n, 3)`` array over :data:`MINUTES_STATES`.
+    """
+    mean = np.clip(expected_minutes, 0.0, _FULL_MATCH)
+    start = np.clip(p_start, 0.0, 1.0)
+
+    p_appearance = np.maximum(mean / 70.0, 0.0)
+    p_appearance = np.where(mean < 70.0, np.minimum(1.0, p_appearance), 1.0)
+    p_appearance = np.maximum(start, p_appearance)
+
+    p_60 = np.minimum(p_appearance, start * 0.9 + np.maximum(0.0, (mean - 60.0) / 30.0) * 0.1)
+    p_60 = np.maximum(0.0, p_60)
+
+    out = np.zeros((mean.shape[0], len(MINUTES_STATES)), dtype=np.float64)
+    out[:, MinutesState.NONE.class_index] = 1.0 - p_appearance
+    out[:, MinutesState.SHORT.class_index] = p_appearance - p_60
+    out[:, MinutesState.LONG.class_index] = p_60
+    return out
+
+
+def _log_loss(probabilities: np.ndarray, truth: np.ndarray) -> float:
+    """Mean negative log probability assigned to what actually happened.
+
+    Clipped away from zero, because an unseen class carries probability exactly
+    zero after :func:`_state_probabilities` expands the column set, and one such
+    row would otherwise send the whole fold to infinity.
+    """
+    taken = probabilities[np.arange(truth.shape[0]), truth]
+    return float(-np.mean(np.log(np.clip(taken, 1e-12, 1.0))))
+
+
+def _brier(probabilities: np.ndarray, truth: np.ndarray) -> float:
+    """Multiclass Brier score — squared error against the one-hot outcome."""
+    onehot = np.zeros_like(probabilities)
+    onehot[np.arange(truth.shape[0]), truth] = 1.0
+    return float(np.mean(np.sum((probabilities - onehot) ** 2, axis=1)))
+
+
+def _score_minutes_state(
+    fold_models: dict[str, Any],
+    *,
+    validate_rows: pl.DataFrame,
+    x_validate: np.ndarray,
+    fold: WalkForwardFold,
+    train_rows: int,
+) -> StateFoldReport | None:
+    """Score the state head against the incumbent reconciliation, on one fold.
+
+    Returns ``None`` — rather than a report full of zeros — whenever anything
+    needed is missing: no state head, no state label, or no minutes/starts
+    models to build the incumbent from. A fold that could not be compared did
+    not produce a comparison.
+    """
+    model = fold_models.get("label_minutes_state")
+    minutes_model = fold_models.get("label_minutes")
+    starts_model = fold_models.get("label_starts")
+    if model is None or minutes_model is None or starts_model is None:
+        return None
+    if "label_minutes_state" not in validate_rows.columns:
+        return None
+
+    truth = validate_rows["label_minutes_state"].to_numpy().astype(np.int64)
+    predicted = _state_probabilities(model, x_validate)
+
+    incumbent = incumbent_state_probabilities(
+        np.clip(minutes_model.predict(x_validate), 0.0, None),
+        starts_model.predict_proba(x_validate)[:, 1],
+    )
+
+    counts = np.bincount(truth, minlength=len(MINUTES_STATES)).astype(np.float64)
+    shares = counts / max(1.0, float(truth.shape[0]))
+
+    return StateFoldReport(
+        fold_index=fold.fold_index,
+        train_rows=train_rows,
+        validate_rows=validate_rows.height,
+        log_loss=_log_loss(predicted, truth),
+        brier=_brier(predicted, truth),
+        baseline_log_loss=_log_loss(incumbent, truth),
+        baseline_brier=_brier(incumbent, truth),
+        state_frequencies=(float(shares[0]), float(shares[1]), float(shares[2])),
+    )
+
+
 def _fit(
     label: str, x: np.ndarray, y: np.ndarray, overrides: dict[str, Any] | None = None
 ) -> Any | None:
     """Fit one component model, or return ``None`` when the label is degenerate."""
     kwargs = {**_REGRESSOR_KWARGS, **(overrides or {})}
+    if label in _MULTICLASS_LABELS:
+        classes = y.astype(np.int64)
+        if len(np.unique(classes)) < 2:
+            # One observed state cannot be a distribution over three.
+            return None
+        multiclass: Any = HistGradientBoostingClassifier(**kwargs)
+        multiclass.fit(x, classes)
+        return multiclass
+
     if label in _BINARY_LABELS:
         binary = (y > 0).astype(np.int64)
         if len(np.unique(binary)) < 2:

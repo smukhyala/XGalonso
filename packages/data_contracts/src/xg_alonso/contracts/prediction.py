@@ -26,8 +26,10 @@ from xg_alonso.contracts.identifiers import GameweekId, PlayerCode
 from xg_alonso.contracts.provenance import PredictionProvenance
 
 __all__ = [
+    "MINUTES_STATES",
     "ComponentExpectations",
     "MinutesPrediction",
+    "MinutesState",
     "PlayerPrediction",
     "PointsBreakdown",
     "Position",
@@ -41,6 +43,73 @@ class Position(StrEnum):
     DEF = "DEF"
     MID = "MID"
     FWD = "FWD"
+
+
+class MinutesState(StrEnum):
+    """How much of a match a player was on the pitch for.
+
+    Three states, because FPL pays appearance points at exactly two thresholds
+    and because almost every other component is driven by which of them applies:
+    a player who did not feature scores nothing, a substitute can score but
+    cannot earn a clean sheet, and only a 60-minute player can.
+
+    This is the latent state the points distribution is conditioned on. Once you
+    condition on it, the dependence that minutes induce *between* components —
+    goals and assists and clean sheets all rising together because the player
+    stayed on — disappears, and the components can be composed without
+    estimating a covariance matrix.
+
+    ``NONE`` is roughly 60% of all player-gameweeks, which is why a points
+    distribution without an explicit zero atom cannot be right.
+    """
+
+    NONE = "none"
+    """Did not play a minute."""
+
+    SHORT = "short"
+    """Featured, but for less than the long-play threshold."""
+
+    LONG = "long"
+    """Reached the long-play threshold — the clean-sheet gate."""
+
+    @classmethod
+    def of(cls, minutes: int, *, long_play_minutes: int) -> MinutesState:
+        """Classify realised minutes.
+
+        Args:
+            long_play_minutes: The threshold, supplied by the caller rather than
+                assumed. ``contracts`` may not import ``domain``, and this is a
+                rule FPL does not publish — it lives in ``ScoringThresholds``
+                marked ``VERIFY``, and passing it keeps this function honest
+                about not knowing it.
+        """
+        if minutes >= long_play_minutes:
+            return cls.LONG
+        if minutes > 0:
+            return cls.SHORT
+        return cls.NONE
+
+    @property
+    def class_index(self) -> int:
+        """Position in the canonical ordering, for use as a class label.
+
+        Not named ``index``. ``StrEnum`` inherits ``str``, so ``index`` is
+        already a method that finds a substring — shadowing it with a property
+        would silently break ``MinutesState.LONG.index("o")`` and every other
+        string operation, and mypy catches the override as a type error.
+        """
+        return _STATE_ORDER.index(self)
+
+
+#: The canonical state ordering. Fixed once, because it is the column order of
+#: every ``predict_proba`` output and of every dispersion table keyed by state.
+_STATE_ORDER: tuple[MinutesState, ...] = (
+    MinutesState.NONE,
+    MinutesState.SHORT,
+    MinutesState.LONG,
+)
+
+MINUTES_STATES: tuple[MinutesState, ...] = _STATE_ORDER
 
 
 class _Frozen(BaseModel):
