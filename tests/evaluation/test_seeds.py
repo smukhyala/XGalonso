@@ -9,10 +9,22 @@ it — naming a constant is a refactor, renumbering it is an experiment.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 
+import pytest
+import typer
+
+from xg_alonso.cli.main import _resolve_rules
+from xg_alonso.contracts.identifiers import parse_season
+from xg_alonso.contracts.provenance import SourceTimestamps, TimeSource
 from xg_alonso.contracts.seeds import ROOT_SEED, SeedLedger, derive_seed
+from xg_alonso.pipelines.ingestion.bootstrap import SOURCE_BOOTSTRAP
+from xg_alonso.storage.bronze import FileSystemBronzeStore
 
 
 class TestTheRootIsPinned:
@@ -76,30 +88,105 @@ class TestTheLedgerRecordsWhatWasDrawn:
         assert ledger.for_label("absent") is None
 
 
+def _data_root_pinned_at(tmp_path: Path, *seasons: str) -> Path:
+    """A data root holding pinned rules for exactly ``seasons``.
+
+    Built rather than borrowed. These tests previously read the developer's
+    own ``.data`` directory, which made them depend on unversioned local state
+    and on the process's working directory — so they passed on a machine that
+    had run ``xg ingest`` and failed everywhere else, including CI. Constructing
+    the input is also the only way to test the *fallback ordering*, which needs
+    more than one pinned season and the real directory has only ever had one.
+    """
+    fixture = (
+        Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
+    )
+    payload = json.loads(fixture.read_text())
+    raw = json.dumps(payload).encode("utf-8")
+
+    pinned = tmp_path / "pinned"
+    pinned.mkdir(parents=True, exist_ok=True)
+    for season in seasons:
+        (pinned / f"rules_{season}.json").write_text(
+            json.dumps(
+                {
+                    "fetched_at": "2026-07-27T00:00:00+00:00",
+                    "payload": payload,
+                    "source_sha256": hashlib.sha256(raw).hexdigest(),
+                }
+            )
+        )
+
+    # `_resolve_rules` builds a full slice context, which reads the bootstrap
+    # payload back out of bronze rather than off the network.
+    moment = datetime(2026, 7, 27, tzinfo=UTC)
+    FileSystemBronzeStore(tmp_path / "bronze").write(
+        source=SOURCE_BOOTSTRAP,
+        payload=raw,
+        timestamps=SourceTimestamps(
+            event_time=moment,
+            observed_time=moment,
+            available_time=moment,
+            processed_time=moment,
+            time_source=TimeSource.HTTP_DATE_MINUS_AGE,
+        ),
+        run_id="test-rules-resolution",
+    )
+    return tmp_path
+
+
 class TestRulesResolution:
-    def test_a_past_season_reports_that_its_rules_are_not_exact(self) -> None:
-        """`.data/pinned` holds only the current season, and now says so."""
-        from pathlib import Path
+    """Three call sites reached for `DEFAULT_SEASON` and none of them said so,
+    scoring a 2024-25 backtest under 2026-27 rules. The fix was not to invent a
+    historical snapshot but to record which one was actually used."""
 
-        from xg_alonso.cli.main import _resolve_rules
-        from xg_alonso.contracts.identifiers import parse_season
-
-        resolved = _resolve_rules(Path(".data"), parse_season("2024-25"))
-
-        assert not resolved.exact
-        assert resolved.source_season != "2024-25"
-        assert "no snapshot exists" in resolved.caveat
-
-    def test_the_current_season_resolves_exactly_and_carries_no_caveat(self) -> None:
-        from pathlib import Path
-
-        from xg_alonso.cli.main import _resolve_rules
-        from xg_alonso.contracts.identifiers import parse_season
-
-        resolved = _resolve_rules(Path(".data"), parse_season("2026-27"))
+    def test_an_exact_match_carries_no_caveat(self, tmp_path: Path) -> None:
+        resolved = _resolve_rules(
+            _data_root_pinned_at(tmp_path, "2026-27"), parse_season("2026-27")
+        )
 
         assert resolved.exact
+        assert resolved.source_season == "2026-27"
         assert resolved.caveat == ""
+
+    def test_a_season_with_no_snapshot_reports_that_it_is_not_exact(self, tmp_path: Path) -> None:
+        resolved = _resolve_rules(
+            _data_root_pinned_at(tmp_path, "2026-27"), parse_season("2024-25")
+        )
+
+        assert not resolved.exact
+        assert resolved.source_season == "2026-27"
+        assert "no snapshot exists" in resolved.caveat
+
+    def test_it_prefers_the_newest_season_not_later_than_the_one_asked_for(
+        self, tmp_path: Path
+    ) -> None:
+        """The ordering that matters, and that a single-season directory could
+        never exercise: given 2022-23 and 2026-27, a 2024-25 evaluation must
+        fall *back* to 2022-23 rather than forward to rules that did not exist
+        yet."""
+        root = _data_root_pinned_at(tmp_path, "2022-23", "2026-27")
+
+        resolved = _resolve_rules(root, parse_season("2024-25"))
+
+        assert not resolved.exact
+        assert resolved.source_season == "2022-23"
+
+    def test_it_falls_forward_only_when_nothing_earlier_exists(self, tmp_path: Path) -> None:
+        root = _data_root_pinned_at(tmp_path, "2026-27")
+
+        resolved = _resolve_rules(root, parse_season("2022-23"))
+
+        assert not resolved.exact
+        assert resolved.source_season == "2026-27"
+
+    def test_require_exact_refuses_the_fallback(self, tmp_path: Path) -> None:
+        """Otherwise the caveat is the only thing standing between a reader and
+        a number scored under the wrong season's rules."""
+        root = _data_root_pinned_at(tmp_path, "2026-27")
+
+        with pytest.raises(typer.BadParameter, match="no pinned rules for 2024-25"):
+            _resolve_rules(root, parse_season("2024-25"), require_exact=True)
 
 
 class TestFreezeProvenanceIsRecorded:
