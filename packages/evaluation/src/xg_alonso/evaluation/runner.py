@@ -71,8 +71,19 @@ class RunKey:
         The unit of analysis for every paired comparison — see
         :mod:`xg_alonso.evaluation.statistics`. Replicates of one policy share
         a condition, which is what lets them be averaged before pairing.
+
+        ``end_gameweek`` is part of it. Two windows may name the same season and
+        the same start with different ends — a GW6-25 walk beside a GW6-38 walk
+        — and without it those two share a condition, so a twenty-week result
+        and a thirty-three-week result are averaged together as replicates of
+        one starting position and then paired against another policy as a
+        single number.
+
+        ``policy_seed`` deliberately does *not* include it: two walks from the
+        same start should make the same draws for as long as they overlap, so
+        the shorter is a prefix of the longer rather than an unrelated sample.
         """
-        return f"{self.season}|{self.start_gameweek}|{self.squad_id}"
+        return f"{self.season}|{self.start_gameweek}|{self.end_gameweek}|{self.squad_id}"
 
     @property
     def run_id(self) -> str:
