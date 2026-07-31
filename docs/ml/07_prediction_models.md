@@ -169,6 +169,48 @@ Output:
 Expected minutes is the load-bearing model. Every other component is conditioned on it, so its
 errors propagate everywhere and it is evaluated first when the component path regresses.
 
+#### 4.1.1 Minutes state — `Implemented, measured, not yet wired`
+
+The two outputs above are fitted **independently**, so they can contradict each other: 80 expected
+minutes beside a 0.2 start probability is a shape `MinutesPrediction` rejects. `inference.py::
+_minutes_from` therefore reconciles them algebraically —
+
+```
+p_appearance = max(p_start, min(1, expected_minutes / 70))
+p_60_plus    = min(p_appearance, p_start * 0.9 + max(0, (expected_minutes - 60) / 30) * 0.1)
+```
+
+— and those probabilities feed the *appearance* term of `assemble_points`, which is the largest
+single term for most players. The reconciliation exists to satisfy a validator, not because it
+estimates anything.
+
+`MinutesState` replaces it with a three-class head over `{none, short, long}` — did not play,
+played under the long-play threshold, reached it. The classes are mutually exclusive and
+exhaustive by construction, so coherence is a property of the model rather than a repair applied
+afterwards. Measured population shares across four seasons: **59.6% / 12.8% / 27.7%**.
+
+Measured out of fold against the incumbent reconciliation on the real training frame (52,259 rows,
+128 features, 15 walk-forward folds, production hyperparameters):
+
+| metric | head | incumbent | gain |
+|---|---|---|---|
+| log loss | 0.470 | 0.774 | **−38.9%** |
+| multiclass Brier | 0.262 | 0.291 | **−10.0%** |
+| folds won | | | **15 / 15** |
+
+The comparison is deliberately against the incumbent rather than a base-rate constant: the
+question is whether estimating the states beats reconciling them, not whether either beats
+nothing.
+
+**Why this is the state everything else conditions on.** Minutes drive every component
+simultaneously — goals, assists and clean sheets all rise together because the player stayed on
+the pitch. Conditioning on the state makes that dependence vanish, so components can be composed
+into a points distribution without estimating a covariance matrix. The `none` state also supplies
+the zero atom that ~60% of player-gameweeks sit in, which no continuous distribution can represent.
+
+Not yet wired into `_minutes_from`. Wiring is a separate change; this one measured whether it is
+warranted.
+
 ### 4.2 Component Models
 
 Each component below is a separate head, trained on rule-version-independent labels and
@@ -225,6 +267,38 @@ Outputs:
 Every stored points prediction records the scoring-rules version and the FPL payload snapshot
 that produced it, so any historical prediction can be reproduced or re-converted under a
 different rules version without retraining.
+
+#### 4.3.1 Realised points — the inverse conversion
+
+`assemble_points` maps *expected* counts to *expected* points and is linear, because expectation
+is linear. That linearity is an approximation in exactly two places, and the function's own
+docstring says so: goals conceded deducts a point per completed **pair**, and saves pay a point
+per completed **triple**, so dividing a mean by two or three is exact only when the count happens
+to divide evenly.
+
+`domain/realisation.py` is the other half — realised points from realised counts, applying
+`floor(conceded / 2)`, `floor(saves / 3)` and the defensive-contribution threshold test exactly.
+
+It exists because nothing downstream can score a **distribution** over outcomes without a function
+that prices one realisation. The composition engine convolves component PMFs through this map, the
+calibration report scores forecasts against it, and the gap between its mean and
+`assemble_points`' total is precisely the linearisation error — which becomes a measured quantity
+rather than a caveat in a docstring.
+
+**Verified against reality: 113,270 of 113,270 rows reconstruct `total_points` exactly, across all
+four seasons.** That check simultaneously validates every `VERIFY`-marked field in
+`ScoringThresholds` (§3). FPL publishes the point *values* but none of the divisors or thresholds,
+so no drift check can catch a change to `saves_per_point` — a wrong value there would surface only
+as a mismatch somewhere in 113,270 rows, and this is the only verification available for them.
+
+One consequence worth recording: the 2026-27 pinned rules reconstruct **2022-23 as well**, so the
+scoring values these components depend on have not moved across the archive.
+
+`defensive_contribution` is modelled as `int | None`, where `None` means *the rule did not exist
+for this row*. FPL introduced it in 2025/26, so the column is null for all 83,513 rows of the three
+earlier seasons — the one case where contributing zero is semantically correct rather than a
+coerced missing value. A test asserts the nulls are exactly season-aligned, so absence cannot
+quietly become a per-row measurement.
 
 ### 4.4 Price Movement — `Deferred (D11)`
 

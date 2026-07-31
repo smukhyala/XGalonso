@@ -131,6 +131,7 @@ flowchart LR
 | [05_player_clustering.md](ml/05_player_clustering.md) | Deferred (Post-MVP) | Archetype clustering for priors and similarity |
 | [06_embeddings.md](ml/06_embeddings.md) | Deferred (Post-MVP) | Representation learning |
 | [07_prediction_models.md](ml/07_prediction_models.md) | Draft | Minutes, components, points, price, fair value |
+| [model_artifacts.md](ml/model_artifacts.md) | Implemented | Manifests, compatibility gating, safe inspection, current inventory |
 | `08_continual_learning.md` | Planned | Per-gameweek retraining and champion/challenger |
 | `09_evaluation.md` | Planned | Walk-forward protocol and metrics |
 
