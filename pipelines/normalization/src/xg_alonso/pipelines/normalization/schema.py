@@ -24,7 +24,6 @@ __all__ = [
     "PLAYER_GAMEWEEK_STATS_SCHEMA",
     "SILVER_TABLES",
     "TEAMS_SCHEMA",
-    "TEAM_MATCH_EVENTS_SCHEMA",
 ]
 
 _UTC = pl.Datetime(time_unit="us", time_zone="UTC")
@@ -154,35 +153,6 @@ PLAYER_GAMEWEEK_STATS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "available_time": _UTC,
 }
 
-TEAM_MATCH_EVENTS_SCHEMA: Final[dict[str, pl.DataType]] = {
-    # One row per team per match, so a team's own row carries both what it did
-    # and what was done to it. The alternative — one row per match with home_*
-    # and away_* columns — would force every downstream feature to branch on
-    # which side a player's team was, which is where sign errors live.
-    "team_code": pl.Int64(),  # stable FPL club identity, never the per-season id
-    "opponent_team_code": pl.Int64(),
-    "season": pl.Utf8(),
-    "division": pl.Utf8(),  # E0 = Premier League, E1 = Championship. Never pool blindly.
-    "kickoff_time": _UTC,
-    "was_home": pl.Boolean(),
-    "goals_for": pl.Int64(),
-    "goals_against": pl.Int64(),
-    # The reason this table exists. The official API publishes no team-level
-    # event counts at all, so shot volume, shot quality proxy (on-target share)
-    # and set-piece volume are unreachable without an outside source.
-    "shots": pl.Int64(),
-    "shots_against": pl.Int64(),
-    "shots_on_target": pl.Int64(),
-    "shots_on_target_against": pl.Int64(),
-    "corners": pl.Int64(),
-    "corners_against": pl.Int64(),
-    "fouls_committed": pl.Int64(),
-    "fouls_suffered": pl.Int64(),
-    "yellow_cards": pl.Int64(),
-    "red_cards": pl.Int64(),
-    "available_time": _UTC,
-}
-
 #: Table name to schema. The normalization run replaces each of these wholesale.
 SILVER_TABLES: Final[dict[str, dict[str, pl.DataType]]] = {
     "players": PLAYERS_SCHEMA,
@@ -190,7 +160,6 @@ SILVER_TABLES: Final[dict[str, dict[str, pl.DataType]]] = {
     "gameweeks": GAMEWEEKS_SCHEMA,
     "fixtures": FIXTURES_SCHEMA,
     "player_gameweek_stats": PLAYER_GAMEWEEK_STATS_SCHEMA,
-    "team_match_events": TEAM_MATCH_EVENTS_SCHEMA,
 }
 
 

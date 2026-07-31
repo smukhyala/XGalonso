@@ -6,7 +6,9 @@ tested for the ways they can *flatter* the system, not only for arithmetic.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -27,6 +29,7 @@ from xg_alonso.contracts.recommendation import (
     TransferRecommendation,
 )
 from xg_alonso.contracts.squad import SquadPick, SquadState
+from xg_alonso.domain.rules import SquadRules
 from xg_alonso.evaluation import (
     BacktestResult,
     GameweekOutcome,
@@ -38,6 +41,18 @@ from xg_alonso.evaluation import (
 from xg_alonso.pipelines.normalization import PLAYER_GAMEWEEK_STATS_SCHEMA, conform
 
 NOW = datetime(2025, 8, 15, 12, 0, tzinfo=UTC)
+
+
+def _rules() -> SquadRules:
+    """Rules from the pinned snapshot, so a cap is never a literal in a test."""
+    payload = json.loads(
+        (
+            Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
+        ).read_text()
+    )
+    return SquadRules.from_bootstrap(payload, version="2026-27", source_sha256="b" * 64)
+
+
 SEASON = Season("2025-26")
 
 
@@ -207,6 +222,7 @@ class TestApplyTransfer:
             prices={PlayerCode(999): TenthsOfMillion(55)},
             positions={PlayerCode(999): outgoing.position.value},
             teams={PlayerCode(999): 20},
+            rules=_rules(),
         )
         assert after.by_code(PlayerCode(999)) is not None
         assert after.by_code(outgoing.player_code) is None
@@ -239,18 +255,20 @@ class TestApplyTransfer:
             run_id="t",
             optimizer_config_hash="h",
         )
-        after = apply_transfer(squad, hold, prices={}, positions={}, teams={})
+        after = apply_transfer(squad, hold, prices={}, positions={}, teams={}, rules=_rules())
         assert after.free_transfers == 2
 
-    def test_free_transfers_cap_at_five(self) -> None:
-        squad = _squad().model_copy(update={"free_transfers": 5})
+    def test_free_transfers_cap_at_the_rule(self) -> None:
+        """The cap comes from the payload, not from a literal 5."""
+        rules = _rules()
+        squad = _squad().model_copy(update={"free_transfers": rules.max_free_transfers})
         hold = TransferRecommendation(
             entry_id=EntryId(1),
             gameweek=GameweekId(5),
             package=TransferPackage(
                 moves=(),
                 transfers_used=0,
-                free_transfers_available=5,
+                free_transfers_available=rules.max_free_transfers,
                 hit_cost=0,
                 bank_before=TenthsOfMillion(10),
                 bank_after=TenthsOfMillion(10),
@@ -268,7 +286,8 @@ class TestApplyTransfer:
             run_id="t",
             optimizer_config_hash="h",
         )
-        assert apply_transfer(squad, hold, prices={}, positions={}, teams={}).free_transfers == 5
+        after = apply_transfer(squad, hold, prices={}, positions={}, teams={}, rules=rules)
+        assert after.free_transfers == rules.max_free_transfers
 
     def test_selling_a_player_not_owned_fails(self) -> None:
         with pytest.raises(KeyError, match="not in the squad"):
@@ -278,6 +297,7 @@ class TestApplyTransfer:
                 prices={PlayerCode(888): TenthsOfMillion(55)},
                 positions={PlayerCode(888): "MID"},
                 teams={PlayerCode(888): 20},
+                rules=_rules(),
             )
 
 

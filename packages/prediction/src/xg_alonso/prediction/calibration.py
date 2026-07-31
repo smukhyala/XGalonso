@@ -33,7 +33,7 @@ we do not know.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -41,6 +41,7 @@ from xg_alonso.contracts.identifiers import PlayerCode, TenthsOfMillion
 from xg_alonso.contracts.prediction import PlayerPrediction
 
 __all__ = [
+    "CALIBRATION_MEASURED_ON",
     "CALIBRATION_VERSION",
     "PRICE_BAND_BIAS",
     "PriceBandCorrection",
@@ -49,6 +50,15 @@ __all__ = [
 ]
 
 CALIBRATION_VERSION: Final[str] = "price_bias_v1"
+
+CALIBRATION_MEASURED_ON: Final[tuple[str, ...]] = ("2025-26",)
+"""Seasons `PRICE_BAND_BIAS` was measured on.
+
+In code rather than in a docstring because a freeze check has to read it.
+A calibration fitted on the season it is later evaluated over is
+train-on-test wearing a different name, and the only defence is a machine
+comparing this tuple against the evaluation windows.
+"""
 
 
 @dataclass(frozen=True)
@@ -118,7 +128,7 @@ def correction_for(price: int) -> PriceBandCorrection | None:
 
 def apply_price_calibration(
     predictions: Sequence[PlayerPrediction],
-    prices: dict[PlayerCode, TenthsOfMillion],
+    prices: Mapping[PlayerCode, TenthsOfMillion],
 ) -> list[PlayerPrediction]:
     """Add back each band's measured under-projection, and widen where blind.
 

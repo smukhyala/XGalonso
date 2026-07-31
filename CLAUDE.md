@@ -22,7 +22,7 @@ contradicts one of them, the decision wins. Do not relitigate them while impleme
 | D3 | Public FPL team ID only; no authentication. Prices reconstructed from public transfer history |
 | D4 | CLI first, then FastAPI, then Next.js. No frontend in the MVP |
 | D5 | No chips in the MVP. Chip *state* is modelled; chip *logic* is not built |
-| D6 | Zero budget, no paid providers. Official FPL API first; **relaxed 2026-07-29** to permit fetching free public data the API does not publish, and only from origins whose `robots.txt` permits it — enforced in code, not by convention. See `docs/match_event_data.md` |
+| D6 | Official FPL API only, zero budget. No scraping, no paid providers |
 | D7 | Historical backfill from 2022/23 — the earliest season with xG in the API |
 | D8 | Component-based points modelling, converted through versioned scoring rules |
 | D9 | Useful by GW1 of 2026/27, refined in-season |
@@ -30,28 +30,6 @@ contradicts one of them, the decision wins. Do not relitigate them while impleme
 | D11 | Price model deferred — no current-season price data exists at GW1 |
 | D12 | 300-700 quality candidate features, **not** thousands |
 
-
-### D6, as relaxed
-
-The relaxation is narrower than "scraping is allowed". It permits fetching free
-public data the official API does not publish, subject to a gate:
-
-- `pipelines/ingestion/robots.py` refuses any URL the origin's `robots.txt`
-  disallows, and treats an unreachable `robots.txt` as a complete disallow
-  (RFC 9309). A source that says no is not fetched.
-- Understat — the richest event source, and the one the brief pointed at —
-  publishes `User-agent: * / Disallow: /` and is therefore **not used**. FBref
-  sits behind a bot challenge and is **not used**: passing it would mean evading
-  a control, not satisfying one.
-- The source in use is football-data.co.uk, which publishes
-  `User-agent: * / Disallow:`. It supplies team-match event counts, not
-  shot-level data, so shot-location features remain unbuildable and no feature
-  may claim that lineage.
-- Every outbound request identifies itself and honours the declared
-  `Crawl-delay`, with a one-second floor.
-
-Anything beyond this — a new source, a new origin — is a new decision, not a
-consequence of this one.
 
 ---
 

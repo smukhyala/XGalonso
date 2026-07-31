@@ -26,11 +26,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import product
+from typing import Final
 
 from xg_alonso.contracts.identifiers import PlayerCode
 from xg_alonso.contracts.prediction import PlayerPrediction, Position
 from xg_alonso.contracts.squad import SquadPick
 from xg_alonso.domain.rules import SquadRules
+from xg_alonso.domain.scoring import ScoringThresholds
 
 __all__ = [
     "CAPTAIN_MULTIPLIER",
@@ -40,10 +42,18 @@ __all__ = [
     "starting_xi_points",
 ]
 
-#: FPL doubles the captain's score. The vice-captain only substitutes in when
-#: the captain does not play, which needs an autosub simulator to model — so it
-#: is recorded but not scored, and that understates every squad identically.
-CAPTAIN_MULTIPLIER = 2
+#: FPL doubles the captain's score.
+#:
+#: Sourced from `ScoringThresholds` rather than typed here, so it obeys the same
+#: no-literals rule as every other scoring constant. It is a `VERIFY` field
+#: rather than a read one: `game_config` publishes only
+#: `chips[].overrides.pick_multiplier`, and only for the triple-captain chip.
+#:
+#: The name is kept so the ten call sites and `tests/optimization/test_lineup.py`
+#: are untouched. Vice-captaincy is now modelled — see `domain.autosubs` — but
+#: `best_starting_xi` still selects against predictions, where nobody has yet
+#: failed to play, so the armband it assigns is the captain's.
+CAPTAIN_MULTIPLIER: Final[int] = ScoringThresholds().captain_multiplier
 
 
 @dataclass(frozen=True)

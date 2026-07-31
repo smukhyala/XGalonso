@@ -75,9 +75,10 @@ from xg_alonso.optimization.objective import ObjectiveContext, objective_valued
 from xg_alonso.pipelines.ingestion import SOURCE_BOOTSTRAP, SOURCE_FIXTURES, FplApiClient
 from xg_alonso.pipelines.normalization import PLAYER_GAMEWEEK_STATS_SCHEMA, empty_frame
 from xg_alonso.prediction import load_models, predict_with_models
+from xg_alonso.prediction.adjustments import adjust_predictions
 from xg_alonso.prediction.baseline import predict_frame
-from xg_alonso.prediction.calibration import apply_price_calibration
-from xg_alonso.prediction.form import apply_form_signals, form_reason, load_signals
+from xg_alonso.prediction.form import form_reason, load_signals
+from xg_alonso.prediction.gameweek import collapse_by_player
 from xg_alonso.storage import FileSystemBronzeStore
 
 if TYPE_CHECKING:
@@ -225,24 +226,24 @@ class DecisionService:
                 feature_set_version=SLICE1_FEATURE_SET_VERSION,
             )
 
-        # Correct the model's measured under-projection of expensive players
-        # before anything downstream reads a number. Left uncorrected it makes
-        # the optimizer bank money rather than upgrade, because the players a
-        # budget would be spent on are exactly the ones scored too low.
+        # Every adjustment, in the one settled order. Applied here rather than
+        # in each endpoint so `/players`, `/squad` and `/build-squad` cannot
+        # disagree about the same player — and routed through
+        # `prediction.adjustments` so this surface cannot disagree with the two
+        # CLI paths either, which is the wider version of the same failure this
+        # module's header already records once.
         rows = self._player_rows()
-        prices = {
-            PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
-            for code, row in rows.items()
-        }
-        predictions = apply_price_calibration(predictions, prices)
-
-        # Outside information, applied here rather than in each endpoint so that
-        # `/players`, `/squad` and `/build-squad` cannot disagree with each
-        # other about the same player — the failure mode this module's header
-        # already records once.
-        predictions = apply_form_signals(
+        predictions = adjust_predictions(
             predictions,
-            load_signals(self._config.data_root / "signals" / "form_signals.json"),
+            prices={
+                PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
+                for code, row in rows.items()
+            },
+            chances={
+                PlayerCode(code): row.get("chance_of_playing_next_round")
+                for code, row in rows.items()
+            },
+            signals=load_signals(self._config.data_root / "signals" / "form_signals.json"),
             at=cutoff,
         )
 
@@ -556,7 +557,7 @@ class DecisionService:
         # horizon for six hundred players to display twelve would be most of a
         # second spent on numbers nobody sees.
         rows_by_code = {int(code): row for code, row in rows.items()}
-        predictions = {int(p.player_code): p for p in self._predict(gameweek)}
+        predictions = {int(c): v for c, v in collapse_by_player(self._predict(gameweek)).items()}
         return [
             self._summary(predictions[s.player_code], rows_by_code[s.player_code], with_depth=True)
             if s.player_code in predictions and s.player_code in rows_by_code
@@ -606,7 +607,7 @@ class DecisionService:
         from xg_alonso.api.main import SquadPlayer, SquadResponse
 
         gameweek = squad.gameweek
-        by_code = {p.player_code: p for p in self._predict(gameweek)}
+        by_code = collapse_by_player(self._predict(gameweek))
         rows = self._player_rows()
         if selection is None:
             selection = best_starting_xi(squad.picks, by_code, self._context.squad_rules)
@@ -1135,7 +1136,7 @@ class DecisionService:
             for p in predictions
             if int(p.player_code) in available
         ]
-        by_code = {p.player_code: p for p in predictions}
+        by_code = collapse_by_player(predictions)
 
         squad, selection = build_squad(
             candidates,
@@ -1413,7 +1414,7 @@ class DecisionService:
             rules=self._context.squad_rules,
             entry_id=EntryId(0),
             gameweek=gameweek,
-            predictions={p.player_code: p for p in predictions},
+            predictions=collapse_by_player(predictions),
         )
         return self._squad_response(squad, prices_assumed=False)
 
@@ -1665,7 +1666,7 @@ class DecisionService:
         # is the one substitution point every scoring path already reads. Left
         # out, the lean would be a label on a page and nothing else.
         objective = self._leaning_objective(intent.bundle.objective, parsed)
-        priced = {p.player_code: p for p in predictions}
+        priced = collapse_by_player(predictions)
         if objective is not None:
             priced = objective_valued(
                 priced,

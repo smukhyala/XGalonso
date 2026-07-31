@@ -202,5 +202,6 @@ markers = [
     "golden: golden-fixture comparison tests",
     "e2e: end-to-end slice tests",
     "network: requires live network access (excluded by default in CI)",
+    "dataset: requires the local .data silver tables (skipped when absent)",
 ]
 filterwarnings = ["error"]

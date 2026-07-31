@@ -338,6 +338,17 @@ class UtilityBreakdown:
     turnover_penalty: float = 0.0
     leakage_penalty: float = 0.0
 
+    unmeasured: tuple[str, ...] = ()
+    """Terms this caller could not supply a value for.
+
+    A term left at its default contributes exactly zero, which in a breakdown
+    is indistinguishable from a term that was measured and found to be zero.
+    The two mean very different things — "decision quality did not improve" is
+    a result, "decision quality was never measured" is a gap — so a caller that
+    cannot supply a term names it here and :meth:`contributions` omits it
+    rather than reporting a zero that reads like evidence.
+    """
+
     @property
     def total(self) -> float:
         return (
@@ -353,7 +364,11 @@ class UtilityBreakdown:
         )
 
     def contributions(self) -> tuple[tuple[str, float], ...]:
-        """Named terms, largest absolute contribution first."""
+        """Named terms, largest absolute contribution first.
+
+        Terms named in :attr:`unmeasured` are omitted, so a breakdown never
+        presents an unmeasured term as a measured zero.
+        """
         terms = (
             ("predictive_gain", self.predictive_gain),
             ("decision_gain", self.decision_gain),
@@ -365,11 +380,20 @@ class UtilityBreakdown:
             ("turnover_penalty", -self.turnover_penalty),
             ("leakage_penalty", -self.leakage_penalty),
         )
-        return tuple(sorted(terms, key=lambda pair: -abs(pair[1])))
+        skip = {name.removesuffix("_penalty") for name in self.unmeasured} | set(self.unmeasured)
+        kept = tuple(
+            pair
+            for pair in terms
+            if pair[0] not in skip and pair[0].removesuffix("_penalty") not in skip
+        )
+        return tuple(sorted(kept, key=lambda pair: -abs(pair[1])))
 
     def explain(self) -> str:
         parts = [f"{name} {value:+.4f}" for name, value in self.contributions() if value]
-        return f"utility {self.total:+.4f} = " + " ".join(parts) if parts else "utility 0"
+        text = f"utility {self.total:+.4f} = " + " ".join(parts) if parts else "utility 0"
+        if self.unmeasured:
+            text += f" (not measured: {', '.join(sorted(self.unmeasured))})"
+        return text
 
 
 def feature_utility(
@@ -384,6 +408,7 @@ def feature_utility(
     missingness: float = 0.0,
     turnover: float = 0.0,
     leakage_risk: float = 0.0,
+    unmeasured: Sequence[str] = (),
 ) -> UtilityBreakdown:
     """Score one candidate feature under one objective's weights.
 
@@ -402,6 +427,10 @@ def feature_utility(
         leakage_risk: In [0, 1]. Any non-zero value should normally sink the
             candidate — the default leakage weight is an order of magnitude
             above the others precisely so it does.
+        unmeasured: Names of terms this caller could not supply. They are
+            excluded from the reported breakdown rather than shown as zero,
+            because an unmeasured term and a measured zero are different
+            claims and only one of them is evidence.
 
     Complexity is charged on ``log1p(nodes)`` rather than linearly. The
     difference between a two-node and a four-node program is a real jump in
@@ -418,4 +447,5 @@ def feature_utility(
         missingness_penalty=weights.missingness * max(0.0, min(1.0, missingness)),
         turnover_penalty=weights.turnover * max(0.0, min(1.0, turnover)),
         leakage_penalty=weights.leakage * max(0.0, min(1.0, leakage_risk)),
+        unmeasured=tuple(unmeasured),
     )

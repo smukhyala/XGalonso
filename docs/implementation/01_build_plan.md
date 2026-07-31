@@ -121,7 +121,7 @@ byte-identical output. The `game_config` drift check runs and passes. Preseason 
 zero strength fields, the 1–5 versus 1000–1400 scale split, a 404 on pre-deadline picks, and an
 empty transfers array are all handled as expected states rather than errors.
 
-Official FPL API, plus free public sources whose `robots.txt` permits automated access (D6 as relaxed 2026-07-29). No paid providers.
+Official FPL API only (D6). No scraping, no paid providers.
 
 ### 3.5 Phase 4 — Canonical tables
 

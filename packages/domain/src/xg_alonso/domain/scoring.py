@@ -17,6 +17,8 @@ instead of blurred.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from typing import Any, Final
 
@@ -28,6 +30,7 @@ __all__ = [
     "ScoringRules",
     "ScoringThresholds",
     "assemble_points",
+    "rules_snapshot_hash",
 ]
 
 
@@ -71,6 +74,16 @@ class ScoringThresholds(BaseModel):
             "(the defender actions plus ball recoveries)."
         ),
     )
+    captain_multiplier: int = Field(
+        default=2,
+        gt=1,
+        description=(
+            "VERIFY: FPL doubles the captain. game_config publishes only "
+            "chips[].overrides.pick_multiplier, and only for the triple-captain "
+            "chip, so the base multiplier is asserted here rather than read."
+        ),
+    )
+
     long_play_minutes: int = Field(
         default=60,
         gt=0,
@@ -252,3 +265,30 @@ def assemble_points(
         defensive_contribution=defensive_contribution,
         bonus=bonus,
     )
+
+
+def rules_snapshot_hash(scoring: ScoringRules, squad: object) -> str:
+    """A digest of what the rules *say*, not of the payload they arrived in.
+
+    Deliberately **not** ``ScoringRules.source_sha256``. That is the hash of the
+    entire ``bootstrap-static`` payload — the same payload whose
+    ``elements[].now_cost`` changes every day — so gating artifacts on it would
+    mark every model rules-drifted within twenty-four hours of training.
+    ``_pin_rules`` already stores only ``game_config`` and ``element_types`` for
+    exactly this reason, while recording the whole-payload hash beside it.
+
+    ``thresholds`` is included. It is the block FPL does not publish, so no
+    drift check can catch a change to ``saves_per_point`` — and a change there
+    re-prices every prediction. It is the field most in need of a hash and the
+    least able to be verified any other way.
+
+    ``fetched_at`` is excluded: re-pinning identical rules must not invalidate
+    a model.
+    """
+    payload = {
+        "scoring": scoring.model_dump(mode="json", exclude={"source_sha256", "fetched_at"}),
+        "squad": squad.model_dump(mode="json", exclude={"source_sha256"}),  # type: ignore[attr-defined]
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()

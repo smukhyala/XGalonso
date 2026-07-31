@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -55,6 +56,7 @@ from xg_alonso.pipelines.normalization import (
     normalize_element_summary,
     normalize_history_past,
 )
+from xg_alonso.prediction.gameweek import collapse_by_player
 from xg_alonso.storage import FileSystemBronzeStore, ParquetTableStore
 
 app = typer.Typer(
@@ -112,6 +114,67 @@ def _load_context(data_root: Path, season: Season) -> SliceContext:
         season=season,
         snapshot_sha256=bootstrap_ref.content_sha256,
         available_time=bootstrap_ref.timestamps.available_time,
+    )
+
+
+@dataclass(frozen=True)
+class RulesResolution:
+    """Which season's rules were used, and whether they were the right ones."""
+
+    scoring: Any
+    squad: Any
+    source_season: str
+    exact: bool
+
+    @property
+    def caveat(self) -> str:
+        """One line for a report, empty when the rules are the season's own."""
+        if self.exact:
+            return ""
+        return (
+            f"scoring rules resolved from the {self.source_season} pinned snapshot; "
+            "no snapshot exists for the evaluated season"
+        )
+
+
+def _resolve_rules(
+    data_root: Path, season: Season, *, require_exact: bool = False
+) -> RulesResolution:
+    """Rules for ``season``, preferring its own pinned snapshot.
+
+    `.data/pinned` holds only the current season, so a 2024-25 backtest was
+    being scored under 2026-27 rules — three call sites reached for
+    `DEFAULT_SEASON` and none of them said so. There is no historical snapshot
+    to load, so the honest fix is not to pretend otherwise: fall back to the
+    newest pinned season no later than the one asked for, fall back further to
+    the newest available, and **record which**, so `rules_are_exact` reaches
+    the report rather than the reader's imagination.
+
+    Args:
+        require_exact: Refuse the fallback instead of recording it.
+    """
+    pinned = sorted(
+        p.stem.removeprefix("rules_") for p in (data_root / "pinned").glob("rules_*.json")
+    )
+    wanted = str(season)
+
+    if wanted in pinned:
+        context = _load_context(data_root, season)
+        return RulesResolution(
+            scoring=context.scoring, squad=context.squad_rules, source_season=wanted, exact=True
+        )
+
+    if require_exact:
+        raise typer.BadParameter(
+            f"no pinned rules for {wanted}. Available: {pinned or 'none'}. "
+            "Run `xg ingest` for that season, or drop --require-exact-rules."
+        )
+
+    earlier = [s for s in pinned if s <= wanted]
+    chosen = earlier[-1] if earlier else (pinned[-1] if pinned else DEFAULT_SEASON)
+    context = _load_context(data_root, parse_season(chosen))
+    return RulesResolution(
+        scoring=context.scoring, squad=context.squad_rules, source_season=chosen, exact=False
     )
 
 
@@ -924,108 +987,394 @@ def backfill(
         typer.echo(f"  {players_history.height:,} player-seasons -> {players_dest}")
 
 
-@app.command(name="ingest-match-events")
-def ingest_match_events_command(
-    data_root: DataRoot = DEFAULT_DATA_ROOT,
-    seasons: Annotated[
-        str | None,
-        typer.Option("--seasons", help="Comma-separated seasons. Defaults to the D7 range."),
-    ] = None,
-    division: Annotated[
-        str,
-        typer.Option("--division", help="E0 = Premier League, E1 = Championship."),
-    ] = "E0",
-) -> None:
-    """Ingest team-match event counts the official API does not publish.
+models_app = typer.Typer(
+    name="models",
+    help="Inspect, verify and audit saved model artifacts.",
+    no_args_is_help=True,
+)
+app.add_typer(models_app)
 
-    Shots, shots on target, corners, fouls and cards, per team per match, from
-    football-data.co.uk — the free source whose robots.txt permits automated
-    access. The richer alternatives do not: Understat disallows every path and
-    FBref sits behind a bot challenge, so this is the resolution available
-    rather than the resolution wanted (see docs/match_event_data.md).
+
+def _manifest_for(saved: Any, path: Path, data_root: Path, season: Season) -> Any:
+    """Assemble a manifest from every layer that owns part of it.
+
+    `contracts` carries provenance and never computes it, so the catalogue hash
+    comes from `features`, the rules hash from `domain` and the data hash from
+    `storage`. This is the one place all three are in scope.
     """
-    import io
+    import platform
 
-    from xg_alonso.pipelines.ingestion import (
-        BACKFILL_SEASONS,
-        REQUIRED_COLUMNS,
-        SOURCE_ARCHIVE_TEAMS,
-        SOURCE_MATCH_EVENTS,
-        fetch_archive_teams,
-        fetch_match_events_season,
+    from xg_alonso.contracts.artifacts import (
+        ArtifactManifest,
+        ComponentMetrics,
+        RuntimeVersions,
     )
-    from xg_alonso.pipelines.normalization import build_teams_history, normalize_match_events
+    from xg_alonso.domain.scoring import rules_snapshot_hash
+    from xg_alonso.features.catalogue import CATALOGUE_VERSION
+    from xg_alonso.features.schema import catalogue_hash
+    from xg_alonso.prediction.trained import TRAINED_MODEL_NAME, TRAINED_MODEL_VERSION
+    from xg_alonso.storage.training_manifest import training_data_manifest_hash
 
-    wanted = [s.strip() for s in seasons.split(",")] if seasons else list(BACKFILL_SEASONS)
-    run_id = f"match-events-{uuid.uuid4().hex[:12]}"
-    bronze = _bronze(data_root)
+    resolved = _resolve_rules(data_root, season)
+    skill = saved.models.skill_by_label()
+    bias = saved.models.mean_bias_by_label()
+    degenerate = set(saved.models.degenerate_labels())
 
-    # The club vocabulary is unioned across every requested season before any
-    # matching happens. A season-by-season map would fail on a club that was
-    # relegated mid-window, and failing there would look like a spelling bug.
-    club_frames: list[pl.DataFrame] = []
-    for season_name in wanted:
-        fetch_archive_teams(season_name, bronze=bronze, run_id=run_id)
-        ref = bronze.latest(f"{SOURCE_ARCHIVE_TEAMS}.{season_name}")
-        if ref is None:
+    data_hash = ""
+    silver = data_root / "silver" / "player_gameweek_stats.parquet"
+    if silver.exists():
+        data_hash, _ = training_data_manifest_hash(silver_path=silver)
+
+    return ArtifactManifest(
+        model_type=TRAINED_MODEL_NAME,
+        model_name=path.stem,
+        model_version=TRAINED_MODEL_VERSION,
+        created_at=saved.saved_at,
+        code_version=_git_commit(),
+        runtime=RuntimeVersions(python=platform.python_version()),
+        feature_catalogue_version=CATALOGUE_VERSION,
+        feature_catalogue_hash=catalogue_hash(),
+        feature_names=tuple(saved.models.feature_columns),
+        feature_count=len(saved.models.feature_columns),
+        dropped_features=tuple(getattr(saved.models, "dropped_features", ()) or ()),
+        rules_snapshot_hash=rules_snapshot_hash(resolved.scoring, resolved.squad),
+        scoring_rules_version=resolved.scoring.version,
+        training_data_manifest_hash=data_hash,
+        training_seasons=tuple(saved.trained_seasons),
+        training_gameweeks=tuple(saved.trained_gameweeks),
+        training_rows=saved.models.trained_on_rows,
+        component_metrics=tuple(
+            ComponentMetrics(
+                label=label,
+                mean_skill=round(value, 6),
+                mean_bias=round(bias.get(label, 0.0), 6),
+                degenerate=label in degenerate,
+                label_mean=round(saved.models.label_means.get(label, 0.0), 6),
+                folds=len(saved.models.folds),
+            )
+            for label, value in sorted(skill.items())
+        ),
+        label_columns=tuple(sorted(saved.models.models)),
+        model_fingerprint=saved.models.fingerprint(),
+    )
+
+
+def _git_commit() -> str:
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10, check=True
+        ).stdout.strip()
+    except Exception:
+        return ""
+
+
+@models_app.command("list")
+def models_list(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    show_all: Annotated[
+        bool, typer.Option("--all", help="Include artifacts that cannot be used.")
+    ] = False,
+) -> None:
+    """Every artifact and whether it can be used with the active build."""
+    from xg_alonso.prediction.artifacts import ActiveSchema, read_manifest
+
+    active = ActiveSchema.from_catalogue()
+    paths = sorted((data_root / "models").glob("*.pkl"))
+    if not paths:
+        typer.echo(f"  no artifacts under {data_root / 'models'}")
+        return
+
+    typer.echo(
+        f"  active schema: {len(active.feature_names)} features, {active.catalogue_version}\n"
+    )
+    for path in paths:
+        verdict = _verify_one(path, active)
+        usable = verdict.compatible
+        if not usable and not show_all:
+            typer.secho(f"  {path.name:<58} {verdict.status}", fg=typer.colors.RED)
             continue
-        raw = pl.read_csv(
-            io.BytesIO(bronze.read(ref)), infer_schema_length=None, ignore_errors=True
-        )
-        club_frames.append(build_teams_history(raw, season=parse_season(season_name)))
+        colour = typer.colors.GREEN if usable else typer.colors.RED
+        manifest = read_manifest(path)
+        detail = "" if manifest else "  (no manifest)"
+        typer.secho(f"  {path.name:<58} {verdict.status}{detail}", fg=colour)
 
-    if not club_frames:
-        typer.secho("no club list available; cannot resolve team names", fg=typer.colors.RED)
+
+def _verify_one(path: Path, active: Any) -> Any:
+    """Check one artifact without letting a refusal stop the listing."""
+    from xg_alonso.prediction.artifacts import (
+        ArtifactCompatibilityError,
+        check_compatibility,
+        payload_digest,
+        read_manifest,
+    )
+    from xg_alonso.prediction.inference import load_models
+
+    try:
+        manifest = read_manifest(path)
+    except ArtifactCompatibilityError as exc:
+        return exc.compatibility
+
+    try:
+        saved = load_models(path, on_incompatible="ignore")
+        columns: Any = saved.models.feature_columns
+    except Exception:
+        columns = None
+
+    return check_compatibility(
+        manifest,
+        active=active,
+        artifact_path=path,
+        artifact_feature_columns=columns,
+        payload_sha256=payload_digest(path) if manifest else None,
+    )
+
+
+@models_app.command("verify")
+def models_verify(
+    artifact: Annotated[Path, typer.Argument(help="Path to a .pkl artifact.")],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+) -> None:
+    """Explain in full whether one artifact can be used, and why not."""
+    from xg_alonso.prediction.artifacts import ActiveSchema
+
+    if not artifact.exists():
+        raise typer.BadParameter(f"no artifact at {artifact}")
+
+    verdict = _verify_one(artifact, ActiveSchema.from_catalogue())
+    typer.echo(verdict.explain())
+    if verdict.schema_diff is not None:
+        diff = verdict.schema_diff
+        typer.echo(
+            f"\n  needs {len(diff.expected_order)} features; "
+            f"{len(diff.missing)} unavailable, {len(diff.unexpected)} unused"
+        )
+    if not verdict.compatible:
         raise typer.Exit(1)
 
-    clubs = pl.concat(club_frames, how="vertical").unique(subset=["team_code", "name"])
-    typer.echo(f"  {clubs.height} club-seasons, {clubs['team_code'].n_unique()} distinct clubs")
 
-    # E1 is Championship: most of its clubs are genuinely absent from FPL rather
-    # than mis-spelled, so an unresolved name there is expected and reported
-    # instead of fatal.
-    strict = division == "E0"
+@models_app.command("backfill-manifest")
+def models_backfill_manifest(
+    artifact: Annotated[Path, typer.Argument(help="Path to a .pkl artifact.")],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+) -> None:
+    """Write a manifest for an artifact saved before manifests existed.
 
-    frames: list[pl.DataFrame] = []
-    for season_name in wanted:
-        typer.echo(f"  {season_name} {division} ...", nl=False)
-        try:
-            fetch_match_events_season(season_name, bronze=bronze, run_id=run_id, division=division)
-        except Exception as exc:
-            typer.secho(f" {type(exc).__name__}: {exc}", fg=typer.colors.RED)
-            continue
+    A backfilled manifest is a *description*, never a certificate. Fields that
+    cannot be recovered — the git commit it was trained at, the data hash if
+    the silver table has since changed — are left empty rather than guessed,
+    and the compatibility check treats an empty hash as unknown rather than as
+    a pass.
+    """
+    from xg_alonso.prediction.artifacts import payload_digest, write_manifest
+    from xg_alonso.prediction.inference import load_models, replace_manifest
 
-        ref = bronze.latest(f"{SOURCE_MATCH_EVENTS}.{division}.{season_name}")
-        if ref is None:
-            typer.secho(" missing after fetch", fg=typer.colors.RED)
-            continue
+    if not artifact.exists():
+        raise typer.BadParameter(f"no artifact at {artifact}")
 
-        report = normalize_match_events(
-            bronze.read(ref),
-            season=season_name,
-            division=division,
-            teams=clubs,
-            required_columns=REQUIRED_COLUMNS,
-            strict=strict,
-        )
-        frames.append(report.frame)
-        note = (
-            ""
-            if report.complete
-            else (f"  unmatched: {list(report.unmatched_teams)}, skipped: {report.skipped_rows}")
-        )
-        typer.echo(f" {report.matches:>4} matches -> {report.frame.height:>5,} rows{note}")
+    saved = load_models(artifact, on_incompatible="ignore")
+    manifest = _manifest_for(saved, artifact, data_root, parse_season(season))
+    manifest = replace_manifest(
+        manifest,
+        artifact_version="artifact_manifest_v1",
+        payload_sha256=payload_digest(artifact),
+        payload_bytes=artifact.stat().st_size,
+    )
+    written = write_manifest(artifact, manifest)
+    typer.echo(
+        f"  {artifact.name}: {manifest.feature_count} features, "
+        f"trained on {', '.join(manifest.training_seasons) or 'unknown'}"
+    )
+    typer.echo(f"  wrote {written}")
 
-    if not frames:
-        typer.secho("no seasons ingested", fg=typer.colors.RED)
-        raise typer.Exit(1)
 
-    events = pl.concat(frames, how="vertical")
-    out_dir = data_root / "silver"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    destination = out_dir / "team_match_events.parquet"
-    events.write_parquet(destination)
-    typer.echo(f"\n  {events.height:,} team-match rows -> {destination}")
+@models_app.command("audit")
+def models_audit(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Write manifests. Off by default.")
+    ] = False,
+) -> None:
+    """Classify every artifact, and optionally give each one a manifest.
+
+    Dry by default. `.data` is gitignored, so a mistake here has no safety net,
+    and the expensive error is destroying provenance rather than failing to
+    write it.
+    """
+    from xg_alonso.prediction.artifacts import ActiveSchema
+
+    active = ActiveSchema.from_catalogue()
+    paths = sorted((data_root / "models").glob("*.pkl"))
+    if not paths:
+        typer.echo(f"  no artifacts under {data_root / 'models'}")
+        return
+
+    mode = "APPLY" if apply else "dry run — nothing will be written"
+    typer.echo(f"  auditing {len(paths)} artifact(s) [{mode}]\n")
+
+    counts: dict[str, int] = {}
+    for path in paths:
+        verdict = _verify_one(path, active)
+        counts[str(verdict.status)] = counts.get(str(verdict.status), 0) + 1
+        colour = typer.colors.GREEN if verdict.compatible else typer.colors.RED
+        typer.secho(f"  {path.name:<58} {verdict.status}", fg=colour)
+        for finding in verdict.blocking:
+            typer.secho(f"      {finding.reason}: {finding.detail[:100]}", fg=typer.colors.RED)
+
+        if apply and verdict.compatible:
+            models_backfill_manifest(path, data_root=data_root, season=season)
+
+    typer.echo("")
+    for status, count in sorted(counts.items()):
+        typer.echo(f"  {count:>3}  {status}")
+    if not apply:
+        typer.echo("\n  re-run with --apply to write manifests")
+
+
+evaluate_app = typer.Typer(
+    name="evaluate",
+    help="Multi-season, multi-squad policy evaluation.",
+    no_args_is_help=True,
+)
+app.add_typer(evaluate_app)
+
+
+@evaluate_app.command("check")
+def evaluate_check(
+    preset: Annotated[str, typer.Option("--preset", help="smoke, legacy or full.")] = "smoke",
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    model_path: Annotated[
+        Path | None, typer.Option("--model", help="Artifact to freeze-check.")
+    ] = None,
+) -> None:
+    """Run the freeze assertions and stop.
+
+    These guard failures that produce *better*-looking numbers — a model
+    trained on the season it is evaluated over does not crash, it wins — so
+    they are worth running before an experiment rather than after it.
+    """
+    from xg_alonso.contracts.evaluation import PRESETS
+    from xg_alonso.evaluation.frozen import FreezeViolation, assert_frozen
+    from xg_alonso.prediction import load_models
+
+    config = PRESETS.get(preset)
+    if config is None:
+        raise typer.BadParameter(f"unknown preset {preset!r}; expected one of {sorted(PRESETS)}")
+
+    models: dict[str, Any] = {spec.name: None for spec in config.models}
+    if model_path is not None:
+        saved = load_models(model_path)
+        for spec in config.models:
+            if spec.artifact_path is not None or spec.name != "closed_form":
+                models[spec.name] = saved
+
+    typer.echo(f"  {config.experiment_id}")
+    typer.echo(f"  seasons: {', '.join(config.evaluation_seasons)}")
+    try:
+        checks = assert_frozen(config, models=models)
+    except FreezeViolation as exc:
+        typer.secho(f"\n  FROZEN CHECK FAILED\n  {exc}", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo("")
+    for check in checks:
+        colour = typer.colors.GREEN if check.passed else typer.colors.YELLOW
+        typer.secho(f"  {check.row()}", fg=colour)
+    typer.echo(f"\n  {sum(c.passed for c in checks)}/{len(checks)} checks passed")
+
+
+@evaluate_app.command("plan")
+def evaluate_plan(
+    preset: Annotated[str, typer.Option("--preset", help="smoke, legacy or full.")] = "smoke",
+    squads: Annotated[int, typer.Option("--squads", help="How many starting squads.")] = 1,
+) -> None:
+    """Show what an experiment would run, without running any of it.
+
+    The unit list is pure and total, so the cost of a grid is knowable before
+    committing to it.
+    """
+    from xg_alonso.contracts.evaluation import PRESETS
+    from xg_alonso.evaluation.runner import plan_units
+
+    config = PRESETS.get(preset)
+    if config is None:
+        raise typer.BadParameter(f"unknown preset {preset!r}; expected one of {sorted(PRESETS)}")
+
+    units = plan_units(config, [f"squad-{i}" for i in range(squads)])
+    by_policy: dict[str, int] = {}
+    for unit in units:
+        by_policy[unit.policy] = by_policy.get(unit.policy, 0) + 1
+
+    typer.echo(f"  {config.experiment_id}")
+    typer.echo(f"  seasons     {', '.join(config.evaluation_seasons)}")
+    typer.echo(f"  conditions  {len({u.condition for u in units})}")
+    typer.echo(f"  units       {len(units)}\n")
+    for policy, count in sorted(by_policy.items(), key=lambda kv: -kv[1]):
+        note = "  (replicated: stochastic)" if count > len(units) // len(by_policy) else ""
+        typer.echo(f"    {policy:<18}{count:>5}{note}")
+
+
+@evaluate_app.command("status")
+def evaluate_status(
+    experiment_id: Annotated[str, typer.Argument(help="Experiment directory name.")],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+) -> None:
+    """How far along an experiment is, from its run files alone."""
+    directory = data_root / "experiments" / experiment_id
+    if not directory.exists():
+        raise typer.BadParameter(f"no experiment at {directory}")
+
+    manifest_path = directory / "manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        typer.echo(f"  {manifest['experiment_id']}")
+        typer.echo(f"  {manifest['runs_completed']}/{manifest['runs_planned']} runs")
+        typer.echo(f"  reproducible: {'yes' if manifest['reproducible'] else 'no'}")
+        for item in manifest.get("limitations", []):
+            typer.echo(f"    ! {item}")
+    else:
+        completed = len(list((directory / "runs").glob("*.json")))
+        typer.echo(f"  {completed} run(s) recorded, no manifest yet")
+
+
+@evaluate_app.command("report")
+def evaluate_report(
+    experiment_id: Annotated[str, typer.Argument(help="Experiment directory name.")],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+) -> None:
+    """Re-render every artifact from the run files.
+
+    Nothing accumulates: the aggregate, the comparisons and the summary are
+    recomputed each time, so a resumed experiment cannot emit a
+    half-aggregated report that reads as complete.
+    """
+    from xg_alonso.contracts.evaluation import ExperimentConfig
+    from xg_alonso.evaluation.experiment_report import (
+        build_report,
+        generate_limitations,
+        load_runs,
+        write_report,
+    )
+
+    directory = data_root / "experiments" / experiment_id
+    config_path = directory / "config.json"
+    if not config_path.exists():
+        raise typer.BadParameter(f"no config at {config_path}")
+
+    config = ExperimentConfig.model_validate_json(config_path.read_text())
+    runs = load_runs(directory)
+    if not runs:
+        raise typer.BadParameter(f"no completed runs under {directory}")
+
+    limitations = generate_limitations(config, runs)
+    report = build_report(config, runs, limitations=limitations)
+    written = write_report(directory, report)
+
+    typer.echo((directory / "summary.md").read_text())
+    typer.echo(f"  wrote {', '.join(sorted(written))} -> {directory}")
 
 
 @app.command()
@@ -1110,8 +1459,13 @@ def backtest(
         PlayerCode(int(r["player_code"])): str(r["web_name"]) for r in players.iter_rows(named=True)
     }
 
-    squad_rules = _load_context(data_root, parse_season(DEFAULT_SEASON)).squad_rules
-    scoring = _load_context(data_root, parse_season(DEFAULT_SEASON)).scoring
+    # One resolution rather than two full context rebuilds, and it records
+    # which season's rules these actually are.
+    resolved = _resolve_rules(data_root, parsed)
+    squad_rules = resolved.squad
+    scoring = resolved.scoring
+    if not resolved.exact:
+        typer.secho(f"  note: {resolved.caveat}", fg=typer.colors.YELLOW)
 
     trained = None
     if model_path is not None:
@@ -1169,7 +1523,7 @@ def backtest(
             code_version="backtest",
             feature_set_version="slice1_v1",
         )
-        by_code = {p.player_code: p for p in predictions}
+        by_code = collapse_by_player(predictions)
         candidates = [
             Candidate(
                 player_code=p.player_code,
@@ -1240,7 +1594,7 @@ def backtest(
             feature_set_version=CATALOGUE_VERSION,
             shrink_by_skill=shrink,
         )
-        by_code = {p.player_code: p for p in predictions}
+        by_code = collapse_by_player(predictions)
         candidates = [
             Candidate(
                 player_code=p.player_code,
@@ -1871,7 +2225,7 @@ def build_squad_command(
         models = load_models(model_path).models
 
     predictions = _predict_all(context, gameweek, models)
-    by_code = {p.player_code: p for p in predictions}
+    by_code = collapse_by_player(predictions)
 
     available = {
         int(r["player_code"]): r
@@ -1985,31 +2339,35 @@ def _predict_all(  # type: ignore[no-untyped-def]
     def _temper(predictions: list[Any]) -> list[Any]:
         """Apply what is known about a player beyond the model's features.
 
-        Two adjustments, in order of authority. FPL's published chance of
-        playing is the game's own statement and is applied in full; a form
-        signal is somebody's reading of a match report and is clamped. Both were
-        already available and neither reached this path — a doubtful player was
-        scored as fully fit here while the recommend path knew better, which is
-        the kind of divergence nobody can explain after the fact.
-        """
-        from xg_alonso.prediction.availability import apply_availability
-        from xg_alonso.prediction.form import apply_form_signals, load_signals
+        Delegates to `prediction.adjustments` so this path, `xg recommend` and
+        the API apply the same adjustments in the same order. They previously
+        did not, and the divergence was invisible: the same team id produced
+        three different projections depending on which surface was asked.
 
+        Price calibration and availability come from the payload already loaded,
+        so they always apply. Signals need a file, so without a data root they
+        are simply absent rather than the whole adjustment being skipped.
+        """
+        from xg_alonso.prediction.adjustments import adjust_predictions
+        from xg_alonso.prediction.form import load_signals
+
+        rows = list(context.players.iter_rows(named=True))
+        prices = {
+            PlayerCode(int(row["player_code"])): TenthsOfMillion(int(row["current_price"]))
+            for row in rows
+            if row.get("current_price") is not None
+        }
         chances = {
             PlayerCode(int(row["player_code"])): row.get("chance_of_playing_next_round")
-            for row in context.players.iter_rows(named=True)
+            for row in rows
         }
-        tempered = apply_availability(predictions, chances)
-
-        # Availability always applies — it comes from the payload already
-        # loaded. Signals need a file, so without a data root they are simply
-        # absent rather than the whole adjustment being skipped.
-        if data_root is None:
-            return tempered
-        return apply_form_signals(
-            tempered,
-            load_signals(data_root / "signals" / "form_signals.json"),
-            at=cutoff,
+        signals = (
+            load_signals(data_root / "signals" / "form_signals.json")
+            if data_root is not None
+            else None
+        )
+        return adjust_predictions(
+            predictions, prices=prices, chances=chances, signals=signals, at=cutoff
         )
 
     if models is not None:
@@ -2113,7 +2471,10 @@ def score(
     deadlines = gameweek_deadlines(all_stats).filter(pl.col("season") == str(parsed))
     deadline_by_gw = {int(r["gameweek_id"]): r["deadline"] for r in deadlines.iter_rows(named=True)}
 
-    scoring = _load_context(data_root, parse_season(DEFAULT_SEASON)).scoring
+    resolved = _resolve_rules(data_root, parsed)
+    scoring = resolved.scoring
+    if not resolved.exact:
+        typer.secho(f"  note: {resolved.caveat}", fg=typer.colors.YELLOW)
 
     trained = None
     if model_path is not None:

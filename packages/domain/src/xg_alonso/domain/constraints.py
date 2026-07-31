@@ -14,8 +14,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 
-from pydantic import BaseModel, ConfigDict
-
+from xg_alonso.contracts.constraints import SquadViolation
 from xg_alonso.contracts.identifiers import TeamId, TenthsOfMillion
 from xg_alonso.contracts.prediction import Position
 from xg_alonso.contracts.squad import SquadPick, SquadState
@@ -28,14 +27,9 @@ __all__ = [
     "is_legal_squad",
 ]
 
-
-class SquadViolation(BaseModel):
-    """One broken rule, with enough detail to explain it without re-deriving it."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    rule: str
-    detail: str
+# `SquadViolation` lives in `contracts` because a simulation *carries* one and
+# `contracts` may not import `domain`. Re-exported here, where it is produced,
+# so every existing import keeps resolving and there is still exactly one type.
 
 
 def check_squad(
@@ -43,8 +37,21 @@ def check_squad(
     *,
     rules: SquadRules,
     bank: TenthsOfMillion = TenthsOfMillion(0),
+    budget: TenthsOfMillion | None = None,
 ) -> list[SquadViolation]:
-    """Every way a 15-player squad breaks the rules. Empty means legal."""
+    """Every way a 15-player squad breaks the rules. Empty means legal.
+
+    Args:
+        budget: The ceiling this squad's value is checked against. Defaults to
+            ``rules.total_budget``, which is the *purchase* cap.
+
+    **Why the budget is a parameter.** FPL's spend limit binds when a squad is
+    assembled, not forever. A squad whose players appreciate is worth more than
+    it cost and is entirely legal — so checking every existing squad against the
+    opening budget would flag every successful season as illegal. A simulator
+    walking a season passes the squad's own starting value instead. The default
+    preserves the original behaviour, so no existing caller changes.
+    """
     violations: list[SquadViolation] = []
 
     if len(picks) != rules.squad_size:
@@ -91,12 +98,13 @@ def check_squad(
                 )
             )
 
+    ceiling = rules.total_budget if budget is None else budget
     total = sum(p.selling_price for p in picks) + bank
-    if total > rules.total_budget:
+    if total > ceiling:
         violations.append(
             SquadViolation(
                 rule="budget",
-                detail=f"squad value plus bank is {total}, budget is {rules.total_budget}",
+                detail=f"squad value plus bank is {total}, budget is {ceiling}",
             )
         )
 

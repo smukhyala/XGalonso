@@ -401,3 +401,136 @@ class TestGroupPrimitivesDoNotPoolAcrossCutoffs:
                 prior_strength=3.0,
                 output_name="rate",
             )
+
+
+#: A program over a column that genuinely moves week to week.
+#:
+#: ``make_history`` holds ``minutes`` at ``min(90, 30 * player)`` — constant
+#: across gameweeks — so a rolling mean over it is identical no matter which
+#: rows are visible. A negative control built on it passes while proving
+#: nothing, which is the failure the conftest docstring warns about. Only
+#: ``total_points`` and its scaled siblings vary with the week.
+_TIME_VARYING_PROGRAM = FeatureProgram(
+    name="p_rolling", root=Rolling(child=Source(column="total_points"), window=5)
+)
+
+
+class TestTheDiscoveryLoopProvesEachProgram:
+    """``run_discovery`` must *measure* leakage, not assert it.
+
+    ``FeatureEvaluation.leakage_passed`` was previously the literal ``True``,
+    while the adapter written to drive the harness over a DSL program
+    (``compile.program_builder``) was never called. Since
+    ``acceptance.decide`` treats that flag as its first fatal gate, the registry
+    recorded a check that had never run *and* let it decide.
+    """
+
+    @staticmethod
+    def _mixed_cutoff_entities() -> pl.DataFrame:
+        """Entities spanning two cutoffs, which is what the proof needs.
+
+        ``make_entities`` shares one cutoff across every row, so nothing in the
+        history falls *after* it and there is no future to rebuild with.
+        """
+        return pl.concat([make_entities(days=40), make_entities(days=200)], how="vertical")
+
+    def test_a_clean_program_is_proven_safe(self) -> None:
+        from xg_alonso.discovery.experiment import (
+            POINT_IN_TIME_HARNESS,
+            STATIC_VALIDATION,
+            _prove_point_in_time,
+        )
+
+        context = CompileContext(player_stats=make_history(), stage=stage_window)
+        proof = _prove_point_in_time(
+            _TIME_VARYING_PROGRAM,
+            entities=self._mixed_cutoff_entities(),
+            context=context,
+        )
+
+        assert proof.passed
+        assert proof.checks == (STATIC_VALIDATION, POINT_IN_TIME_HARNESS)
+
+    def test_the_proof_catches_a_program_that_reads_the_future(self) -> None:
+        """The negative control. Without it, "proven safe" proves nothing.
+
+        The leak is injected through the window stager rather than the program,
+        because the DSL is deliberately incapable of expressing one. A stager
+        that ignores the cutoff is exactly the bug the harness exists to catch.
+        """
+        from xg_alonso.discovery.experiment import (
+            POINT_IN_TIME_HARNESS,
+            STATIC_VALIDATION,
+            _prove_point_in_time,
+        )
+
+        def leaky_stage(
+            entities: pl.DataFrame, source: pl.DataFrame, **kwargs: object
+        ) -> pl.DataFrame:
+            time_col = str(kwargs["prediction_time_col"])
+            available = str(kwargs["available_time_col"])
+            wide_open = entities.with_columns(pl.lit(source[available].max()).alias(time_col))
+            return stage_window(wide_open, source, **kwargs)  # type: ignore[arg-type]
+
+        context = CompileContext(player_stats=make_history(), stage=leaky_stage)
+        proof = _prove_point_in_time(
+            _TIME_VARYING_PROGRAM,
+            entities=self._mixed_cutoff_entities(),
+            context=context,
+        )
+
+        assert not proof.passed, (
+            "a stager that ignores the prediction cutoff was reported as clean, "
+            "so the discovery loop's leakage proof has no detecting power"
+        )
+        assert proof.checks == (STATIC_VALIDATION, POINT_IN_TIME_HARNESS)
+        assert "p_rolling" in proof.detail
+
+    def test_a_frame_the_harness_cannot_run_on_is_unproven_not_clean(self) -> None:
+        """One cutoff means no future records, which proves nothing at all."""
+        from xg_alonso.discovery.experiment import (
+            POINT_IN_TIME_HARNESS,
+            STATIC_VALIDATION,
+            _prove_point_in_time,
+        )
+
+        context = CompileContext(player_stats=make_history(), stage=stage_window)
+        proof = _prove_point_in_time(
+            _TIME_VARYING_PROGRAM,
+            entities=make_entities(),  # a single shared cutoff
+            context=context,
+        )
+
+        assert not proof.passed
+        assert proof.checks == (STATIC_VALIDATION,)
+        assert POINT_IN_TIME_HARNESS not in proof.checks
+        assert "could not run" in proof.detail
+
+    def test_an_unproven_program_takes_the_full_leakage_penalty(self) -> None:
+        """The flag has to reach the score, or measuring it changes nothing."""
+        from xg_alonso.contracts.objective import UtilityWeights
+        from xg_alonso.discovery.utility import feature_utility
+
+        weights = UtilityWeights()
+        clean = feature_utility(weights=weights, predictive_gain=0.1, leakage_risk=0.0)
+        unproven = feature_utility(weights=weights, predictive_gain=0.1, leakage_risk=1.0)
+
+        assert unproven.leakage_penalty > 0.0
+        assert unproven.total < clean.total
+
+    def test_unmeasured_terms_are_not_reported_as_measured_zeros(self) -> None:
+        """A term nobody measured must not read as a term that came out zero."""
+        from xg_alonso.contracts.objective import UtilityWeights
+        from xg_alonso.discovery.utility import feature_utility
+
+        breakdown = feature_utility(
+            weights=UtilityWeights(),
+            predictive_gain=0.1,
+            unmeasured=("decision_gain", "turnover_penalty"),
+        )
+        reported = {name for name, _ in breakdown.contributions()}
+
+        assert "decision_gain" not in reported
+        assert "turnover_penalty" not in reported
+        assert "predictive_gain" in reported
+        assert "not measured" in breakdown.explain()

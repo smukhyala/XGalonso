@@ -249,19 +249,6 @@ Further reading:
 - [Player Embeddings and Clusters](docs/player_embeddings_and_clusters.md)
 - [Backtesting and Leakage](docs/backtesting_and_leakage.md)
 - [Experiment Reproducibility](docs/experiment_reproducibility.md)
-- [Match Event Data](docs/match_event_data.md)
-
-### Team-match event data
-
-D6 was relaxed on 2026-07-29 to permit fetching free public data the official API does not publish.
-`xg ingest-match-events` adds per-team shots, shots on target, corners, fouls and cards for every
-match since 2022/23 — counts no FPL endpoint carries.
-
-The relaxation is gated rather than open. Every fetch passes a `robots.txt` check that treats an
-unreachable file as a complete disallow, so Understat (`Disallow: /`) and FBref (bot challenge)
-are refused in code, not by convention. The cost is recorded honestly: the permitted source gives
-team-match totals, so **shot-level features remain unbuildable**. The table is populated but not
-yet joined into the discovery frame.
 
 ---
 

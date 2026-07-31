@@ -117,8 +117,8 @@ forbidden_modules =
 # than asserted in a docstring: these modules may speak the shared contracts
 # vocabulary and nothing else about this domain.
 #
-# The FPL bindings live in xg_alonso.discovery.fpl and .experiment, which are
-# deliberately absent from the source list below and may import anything.
+# The FPL bindings live in xg_alonso.discovery.experiment, which is deliberately
+# absent from the source list below and may import anything.
 # ---------------------------------------------------------------------------
 
 [importlinter:contract:discovery-core-is-generic]
@@ -137,3 +137,39 @@ forbidden_modules =
     xg_alonso.prediction
     xg_alonso.optimization
     xg_alonso.evaluation
+
+# ---------------------------------------------------------------------------
+# The research surface is quarantined from the deterministic core.
+#
+# `discovery` proposes features and `interpreter` reads free text, both
+# optionally through a language model and over the network. Neither may sit
+# under a prediction, an optimization or an evaluation: a recommendation has to
+# be reproducible from stored snapshots alone, and a core that imported either
+# could stop being so without any test noticing.
+#
+# The layers contract already places `discovery` above the core, but it puts
+# `interpreter` *below* `features` — so without this gate `prediction` could
+# import the LLM client and nothing would object.
+#
+# Apps are deliberately absent from the source list. `cli` and `api` are where
+# a research tool is wired up as a command or an endpoint, which is what an app
+# layer is for. The claim being enforced is that the core does not depend on
+# research, not that research is unreachable.
+# ---------------------------------------------------------------------------
+
+[importlinter:contract:research-surface-is-quarantined]
+name = the deterministic core does not depend on discovery or the interpreter
+type = forbidden
+source_modules =
+    xg_alonso.contracts
+    xg_alonso.domain
+    xg_alonso.storage
+    xg_alonso.features
+    xg_alonso.prediction
+    xg_alonso.optimization
+    xg_alonso.explanations
+    xg_alonso.evaluation
+    xg_alonso.pipelines
+forbidden_modules =
+    xg_alonso.discovery
+    xg_alonso.interpreter

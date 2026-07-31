@@ -55,7 +55,7 @@ class TransferPackage(BaseModel):
 
     moves: tuple[TransferMove, ...]
     transfers_used: int = Field(ge=0)
-    free_transfers_available: int = Field(ge=0, le=5)
+    free_transfers_available: int = Field(ge=0)
     hit_cost: int = Field(ge=0, description="Points deducted: 4 per transfer beyond the free ones")
     bank_before: TenthsOfMillion = Field(ge=0)
     bank_after: TenthsOfMillion = Field(ge=0)
@@ -67,10 +67,25 @@ class TransferPackage(BaseModel):
                 f"transfers_used ({self.transfers_used}) must equal the number of "
                 f"moves ({len(self.moves)})"
             )
+        # The *shape* of the charge, not its value. `contracts` may not import
+        # `domain`, so it cannot read `hit_cost_per_transfer` — and a literal 4
+        # here contradicted the pinned snapshot that already publishes it.
+        # `domain.transfers.check_transfer_package` checks the exact amount.
+        #
+        # Every message below contains the literal token `hit_cost`, and that is
+        # load-bearing: `pytest.raises(match="hit_cost")` searches the *rendered*
+        # pydantic error, and pydantic truncates the input_value dict before the
+        # field name appears. A message phrased without the token would not
+        # match, however precisely it described the fault.
         paid = max(0, self.transfers_used - self.free_transfers_available)
-        if self.hit_cost != paid * 4:
+        if paid == 0 and self.hit_cost != 0:
+            raise ValueError(f"hit_cost {self.hit_cost} charged when every transfer was free")
+        if paid > 0 and self.hit_cost == 0:
+            raise ValueError(f"hit_cost 0 disagrees with {paid} paid transfer(s)")
+        if paid > 0 and self.hit_cost % paid != 0:
             raise ValueError(
-                f"hit_cost {self.hit_cost} disagrees with {paid} paid transfers at 4 points each"
+                f"hit_cost {self.hit_cost} is not a whole per-transfer charge "
+                f"across {paid} paid transfer(s)"
             )
         net = sum(m.net_cost for m in self.moves)
         if self.bank_after != self.bank_before - net:

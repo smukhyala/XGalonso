@@ -70,3 +70,6 @@ node_modules/
 # Incremental TypeScript build cache. Machine-local, regenerated on every build.
 *.tsbuildinfo
 next-env.d.ts
+
+# Claude Code session state and agent worktrees
+.claude/

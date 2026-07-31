@@ -54,7 +54,7 @@ wins and the document is scheduled for correction.
 | D3 | Public FPL team ID only; no authentication. Prices reconstructed from public transfer history |
 | D4 | CLI first, then FastAPI, then Next.js. No frontend in the MVP |
 | D5 | No chips in the MVP. Chip *state* is modelled; chip *logic* is not built |
-| D6 | Zero budget, no paid providers. Official FPL API first; **relaxed 2026-07-29** to permit fetching free public data the API does not publish, and only from origins whose `robots.txt` permits it. See `match_event_data.md` |
+| D6 | Official FPL API only, zero budget. No scraping, no paid providers |
 | D7 | Historical backfill from 2022/23 — the earliest season with xG in the API |
 | D8 | Component-based points modelling, converted through versioned scoring rules |
 | D9 | Useful by GW1 of 2026/27, refined in-season |
@@ -131,6 +131,7 @@ flowchart LR
 | [05_player_clustering.md](ml/05_player_clustering.md) | Deferred (Post-MVP) | Archetype clustering for priors and similarity |
 | [06_embeddings.md](ml/06_embeddings.md) | Deferred (Post-MVP) | Representation learning |
 | [07_prediction_models.md](ml/07_prediction_models.md) | Draft | Minutes, components, points, price, fair value |
+| [model_artifacts.md](ml/model_artifacts.md) | Implemented | Manifests, compatibility gating, safe inspection, current inventory |
 | `08_continual_learning.md` | Planned | Per-gameweek retraining and champion/challenger |
 | `09_evaluation.md` | Planned | Walk-forward protocol and metrics |
 
@@ -178,6 +179,39 @@ The optimizer is the product; predictions are inputs to it.
 | Document | Status | Purpose |
 |---|---|---|
 | [01_knowledge_lab.md](research/01_knowledge_lab.md) | Deferred (Post-MVP) | Accumulated hypotheses, experiments, outcomes |
+
+### The research surface, and what it may not touch
+
+`packages/discovery` (objective-conditioned feature search) and
+`packages/interpreter` (reading a manager's request, sweeping team news) are
+**offline research tools, not part of the recommendation path**. The
+`research-surface-is-quarantined` contract in `.importlinter` enforces it: no
+package from `contracts` through `evaluation`, nor `pipelines`, may import
+either. `cli` and `api` may, because wiring a research tool up as a command or
+an endpoint is what an app layer is for.
+
+The claim being enforced is that a recommendation stays reproducible from
+stored snapshots alone. The layers contract alone would not give that — it
+places `interpreter` *below* `features`, so without the explicit gate
+`prediction` could import the LLM client and nothing would object.
+
+**LLM use is optional and never on the critical path.** The `anthropic` client
+is an extra (`uv sync --extra llm`), reached from exactly three places:
+discovery hypothesis proposal, request interpretation, and the team-news sweep.
+Each is opt-in per invocation, and a missing SDK or key raises a typed
+unavailability error that the deterministic path handles. A default install
+gains no new dependency and needs no credential. Where a model is used it emits
+*data* — a JSON expression tree parsed by the DSL, or a list of names resolved
+locally — never code, and a proposal that fails to parse is dropped rather than
+repaired.
+
+**Form signals are a bounded human channel.** `.data/signals/form_signals.json`
+scales a projection by at most ±15%, requires a source URL, expires, and is
+evaluated against the *deadline* rather than the wall clock so a backtest sees
+only what was live then. It is the weakest evidence in the stack and is applied
+last, after price calibration and FPL's own published chance of playing — see
+`prediction/adjustments.py`, which is the one place any of those three is
+applied.
 
 ---
 
