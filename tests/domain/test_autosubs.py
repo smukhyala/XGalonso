@@ -247,7 +247,7 @@ class TestScenario4GoalkeeperAutosub:
 class TestScenario11BenchPlayerDidNotPlay:
     def test_the_first_available_substitute_comes_on(self, rules: SquadRules) -> None:
         xi = _xi((1, 3, 5, 2))
-        vacancy = [p for p in xi if p.position is Position.MID][0]
+        vacancy = next(p for p in xi if p.position is Position.MID)
         bench = _bench([Position.MID, Position.MID])
         minutes = _all_played(xi) | _all_played(bench)
         minutes[vacancy.player_code] = 0
@@ -264,7 +264,7 @@ class TestScenario12MultipleAutosubPaths:
 
     def test_a_defender_covers_a_midfielder(self, rules: SquadRules) -> None:
         xi = _xi((1, 3, 5, 2))
-        vacancy = [p for p in xi if p.position is Position.MID][0]
+        vacancy = next(p for p in xi if p.position is Position.MID)
         bench = _bench([Position.DEF, Position.MID, Position.FWD])
         minutes = _all_played(xi) | _all_played(bench)
         minutes[vacancy.player_code] = 0
@@ -279,7 +279,7 @@ class TestScenario12MultipleAutosubPaths:
 
     def test_the_result_does_not_depend_on_starter_order(self, rules: SquadRules) -> None:
         xi = _xi((1, 3, 5, 2))
-        vacancy = [p for p in xi if p.position is Position.MID][0]
+        vacancy = next(p for p in xi if p.position is Position.MID)
         bench = _bench([Position.DEF, Position.MID, Position.FWD])
         minutes = _all_played(xi) | _all_played(bench)
         minutes[vacancy.player_code] = 0

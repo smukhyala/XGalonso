@@ -20,7 +20,6 @@ complete.
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -279,7 +278,7 @@ def write_report(directory: Path, report: ExperimentReport) -> dict[str, Path]:
         path = directory / name
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(text)
-        os.replace(tmp, path)
+        tmp.replace(path)
         return path
 
     written["aggregate"] = _atomic(

@@ -25,7 +25,6 @@ un-resumable. Identity here is what was run, not when.
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -222,7 +221,7 @@ def write_run(directory: Path, record: RunRecord) -> Path:
     path = runs / f"{record.key.run_id}.json"
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record.to_dict(), indent=2, sort_keys=True))
-    os.replace(tmp, path)
+    tmp.replace(path)
     return path
 
 
@@ -289,7 +288,7 @@ def write_manifest(
     path = directory / "manifest.json"
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    os.replace(tmp, path)
+    tmp.replace(path)
     return path
 
 

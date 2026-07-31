@@ -90,7 +90,9 @@ class StartingSquad:
     """Best legal XI under the predictions available at this squad's deadline."""
     ex_ante_percentile: float | None = None
     """Where that sits among a comparison pool. ``None`` when none was drawn."""
-    spend: TenthsOfMillion = TenthsOfMillion(0)
+    # RUF009 guards against mutable or expensive dataclass defaults. `TenthsOfMillion`
+    # is a NewType, so this call is the identity at runtime and is neither.
+    spend: TenthsOfMillion = TenthsOfMillion(0)  # noqa: RUF009
     provenance: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
