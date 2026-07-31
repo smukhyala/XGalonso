@@ -37,8 +37,21 @@ def check_squad(
     *,
     rules: SquadRules,
     bank: TenthsOfMillion = TenthsOfMillion(0),
+    budget: TenthsOfMillion | None = None,
 ) -> list[SquadViolation]:
-    """Every way a 15-player squad breaks the rules. Empty means legal."""
+    """Every way a 15-player squad breaks the rules. Empty means legal.
+
+    Args:
+        budget: The ceiling this squad's value is checked against. Defaults to
+            ``rules.total_budget``, which is the *purchase* cap.
+
+    **Why the budget is a parameter.** FPL's spend limit binds when a squad is
+    assembled, not forever. A squad whose players appreciate is worth more than
+    it cost and is entirely legal — so checking every existing squad against the
+    opening budget would flag every successful season as illegal. A simulator
+    walking a season passes the squad's own starting value instead. The default
+    preserves the original behaviour, so no existing caller changes.
+    """
     violations: list[SquadViolation] = []
 
     if len(picks) != rules.squad_size:
@@ -85,12 +98,13 @@ def check_squad(
                 )
             )
 
+    ceiling = rules.total_budget if budget is None else budget
     total = sum(p.selling_price for p in picks) + bank
-    if total > rules.total_budget:
+    if total > ceiling:
         violations.append(
             SquadViolation(
                 rule="budget",
-                detail=f"squad value plus bank is {total}, budget is {rules.total_budget}",
+                detail=f"squad value plus bank is {total}, budget is {ceiling}",
             )
         )
 

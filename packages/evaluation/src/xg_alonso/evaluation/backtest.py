@@ -19,16 +19,25 @@ is derived from real kickoff times rather than assumed.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 
 import polars as pl
 
-from xg_alonso.contracts.identifiers import GameweekId, PlayerCode, Season, TenthsOfMillion
-from xg_alonso.contracts.prediction import PlayerPrediction
-from xg_alonso.contracts.recommendation import TransferRecommendation
+from xg_alonso.contracts.constraints import SquadViolation
+from xg_alonso.contracts.identifiers import (
+    GameweekId,
+    PlayerCode,
+    Season,
+    TeamId,
+    TenthsOfMillion,
+)
+from xg_alonso.contracts.prediction import PlayerPrediction, Position
+from xg_alonso.contracts.recommendation import TransferMove, TransferRecommendation
 from xg_alonso.contracts.squad import SquadPick, SquadState
+from xg_alonso.domain.constraints import check_squad
+from xg_alonso.domain.pricing import selling_price
 from xg_alonso.domain.rules import SquadRules
 from xg_alonso.domain.transfers import accrue, settle_gameweek
 from xg_alonso.optimization.lineup import best_starting_xi
@@ -36,9 +45,15 @@ from xg_alonso.optimization.lineup import best_starting_xi
 __all__ = [
     "BacktestResult",
     "GameweekOutcome",
+    "actual_fixture_counts",
+    "actual_minutes",
     "actual_points",
+    "actual_prices",
     "apply_transfer",
     "gameweek_deadlines",
+    "price_at_deadline",
+    "refusals",
+    "reprice_squad",
     "score_squad",
     "walk_forward",
 ]
@@ -210,6 +225,115 @@ def actual_points(
     }
 
 
+def actual_minutes(
+    player_stats: pl.DataFrame, *, season: Season, gameweek: GameweekId
+) -> dict[PlayerCode, int]:
+    """Minutes each player played in one gameweek.
+
+    Summed across fixtures, not maximised: a player who played 20 minutes in one
+    leg of a double and none in the other *did* play, and must not be
+    substituted. The mirror of :func:`actual_points`, and the input the autosub
+    simulator needs.
+    """
+    rows = player_stats.filter(
+        (pl.col("season") == str(season)) & (pl.col("gameweek_id") == int(gameweek))
+    )
+    if rows.is_empty():
+        return {}
+    totals = rows.group_by("player_code").agg(pl.col("minutes").sum().alias("minutes"))
+    return {
+        PlayerCode(int(r["player_code"])): int(r["minutes"] or 0)
+        for r in totals.iter_rows(named=True)
+    }
+
+
+def actual_fixture_counts(
+    player_stats: pl.DataFrame, *, season: Season, gameweek: GameweekId
+) -> dict[PlayerCode, int]:
+    """How many fixtures each player's club had. Zero is a blank, two a double."""
+    rows = player_stats.filter(
+        (pl.col("season") == str(season)) & (pl.col("gameweek_id") == int(gameweek))
+    )
+    if rows.is_empty():
+        return {}
+    counts = rows.group_by("player_code").agg(pl.len().alias("fixtures"))
+    return {
+        PlayerCode(int(r["player_code"])): int(r["fixtures"]) for r in counts.iter_rows(named=True)
+    }
+
+
+def actual_prices(
+    player_stats: pl.DataFrame, *, season: Season, gameweek: GameweekId
+) -> dict[PlayerCode, TenthsOfMillion]:
+    """Listed price at a gameweek, from the ``value`` column.
+
+    **Lagged by the caller, not here.** ``value`` for gameweek *N* is recorded
+    alongside gameweek *N*'s result, which is after its deadline. Gameweek
+    *N-1*'s value is provably knowable at *N*'s deadline; *N*'s may not be. See
+    :func:`price_at_deadline`.
+
+    Without this the walk used one static price map for the whole season, so no
+    price ever moved and squad value was a constant by construction.
+    """
+    rows = player_stats.filter(
+        (pl.col("season") == str(season)) & (pl.col("gameweek_id") == int(gameweek))
+    )
+    if rows.is_empty():
+        return {}
+    latest = rows.group_by("player_code").agg(pl.col("value").last().alias("value"))
+    return {
+        PlayerCode(int(r["player_code"])): TenthsOfMillion(int(r["value"]))
+        for r in latest.iter_rows(named=True)
+        if r["value"] is not None
+    }
+
+
+def price_at_deadline(
+    player_stats: pl.DataFrame, *, season: Season, gameweek: GameweekId
+) -> dict[PlayerCode, TenthsOfMillion]:
+    """Prices a manager could have seen at this gameweek's deadline.
+
+    The previous gameweek's listed value. At gameweek 1 there is no previous
+    week, so the map is empty and the caller keeps whatever opening prices it
+    already had.
+    """
+    if int(gameweek) <= 1:
+        return {}
+    return actual_prices(player_stats, season=season, gameweek=GameweekId(int(gameweek) - 1))
+
+
+def reprice_squad(
+    squad: SquadState, *, prices: Mapping[PlayerCode, TenthsOfMillion], rules: SquadRules
+) -> SquadState:
+    """Update every pick's current and selling price to today's market.
+
+    Runs *before* the recommendation, because prices move before the deadline
+    and a manager decides against the prices they can see. Selling price is
+    recomputed through :func:`~xg_alonso.domain.pricing.selling_price`, so the
+    sell-on fee and its round-down are applied in exactly one place.
+
+    A player absent from ``prices`` keeps the price he had, which is the honest
+    reading of a missing row: not that he became free, but that nothing new was
+    published about him.
+    """
+    repriced = []
+    for pick in squad.picks:
+        current = prices.get(pick.player_code, pick.current_price)
+        repriced.append(
+            pick.model_copy(
+                update={
+                    "current_price": current,
+                    "selling_price": selling_price(
+                        purchase_price=pick.purchase_price,
+                        current_price=current,
+                        rules=rules,
+                    ),
+                }
+            )
+        )
+    return squad.model_copy(update={"picks": tuple(repriced)})
+
+
 def score_squad(
     squad: SquadState,
     points: dict[PlayerCode, int],
@@ -265,9 +389,6 @@ def apply_transfer(
     now accrues its `+1` like any other, instead of sliding toward a permanent
     hit as `max(0, ft - 1)` did.
     """
-    from xg_alonso.contracts.identifiers import TeamId
-    from xg_alonso.contracts.prediction import Position
-
     if recommendation.package.is_hold:
         return squad.model_copy(
             update={"free_transfers": accrue(squad.free_transfers, rules=rules)}
@@ -283,7 +404,11 @@ def apply_transfer(
         position=Position(positions[move.player_in]),
         team_id=TeamId(teams[move.player_in]),
         purchase_price=move.purchase_price,
-        current_price=prices[move.player_in],
+        # At the moment of purchase these are the same number by definition.
+        # Reading `current_price` from a static map let the two diverge, and a
+        # `SquadPick` whose selling price sits outside its own price band is a
+        # contract violation waiting for the next reprice.
+        current_price=move.purchase_price,
         selling_price=move.purchase_price,
         squad_slot=outgoing.squad_slot,
         is_captain=outgoing.is_captain,
@@ -291,6 +416,26 @@ def apply_transfer(
     )
 
     picks = tuple(incoming if p.player_code == move.player_out else p for p in squad.picks)
+    bank_after = recommendation.package.bank_after
+
+    # Legality is checked before the move is committed, never after. A backtest
+    # that silently applied an unaffordable or quota-breaking transfer was
+    # measuring a policy the game would have refused to run.
+    violations = _refusals(
+        picks,
+        outgoing=outgoing,
+        move=move,
+        bank_before=squad.bank,
+        bank_after=bank_after,
+        rules=rules,
+    )
+    if violations:
+        # The transfer never happened, so the allowance accrues as it would in
+        # any quiet week.
+        return squad.model_copy(
+            update={"free_transfers": accrue(squad.free_transfers, rules=rules)}
+        )
+
     ledger = settle_gameweek(
         free_transfers=squad.free_transfers,
         transfers_made=len(recommendation.package.moves),
@@ -299,10 +444,88 @@ def apply_transfer(
     return squad.model_copy(
         update={
             "picks": picks,
-            "bank": recommendation.package.bank_after,
+            "bank": bank_after,
             "free_transfers": ledger.free_transfers_after,
         }
     )
+
+
+def refusals(
+    squad: SquadState,
+    recommendation: TransferRecommendation,
+    *,
+    positions: Mapping[PlayerCode, str],
+    teams: Mapping[PlayerCode, int],
+    rules: SquadRules,
+) -> list[SquadViolation]:
+    """Why this recommendation would be refused, or an empty list.
+
+    Exposed alongside :func:`apply_transfer` so a caller can report *why* a
+    move did not happen. ``apply_transfer`` itself returns the unchanged squad,
+    because a refused transfer and a hold produce the same squad — but they are
+    not the same event, and a simulator needs to say which.
+    """
+    if recommendation.package.is_hold:
+        return []
+    move = recommendation.package.moves[0]
+    outgoing = squad.by_code(move.player_out)
+    if outgoing is None:
+        return [SquadViolation(rule="not_owned", detail=f"{move.player_out} is not in the squad")]
+    incoming = SquadPick(
+        player_code=move.player_in,
+        position=Position(positions[move.player_in]),
+        team_id=TeamId(teams[move.player_in]),
+        purchase_price=move.purchase_price,
+        current_price=move.purchase_price,
+        selling_price=move.purchase_price,
+        squad_slot=outgoing.squad_slot,
+    )
+    picks = tuple(incoming if p.player_code == move.player_out else p for p in squad.picks)
+    return _refusals(
+        picks,
+        outgoing=outgoing,
+        move=move,
+        bank_before=squad.bank,
+        bank_after=recommendation.package.bank_after,
+        rules=rules,
+    )
+
+
+def _refusals(
+    picks: tuple[SquadPick, ...],
+    *,
+    outgoing: SquadPick,
+    move: TransferMove,
+    bank_before: TenthsOfMillion,
+    bank_after: TenthsOfMillion,
+    rules: SquadRules,
+) -> list[SquadViolation]:
+    """Affordability, then squad legality. Both before anything is committed."""
+    violations: list[SquadViolation] = []
+
+    # `TransferPackage` already refuses a negative `bank_after`, so a *self-
+    # consistent* package cannot describe an unaffordable move. What it cannot
+    # check is whether its `bank_before` matches the squad it is applied to — a
+    # recommendation computed against a stale bank passes its own validator and
+    # is still unaffordable in fact. That is what this compares.
+    affordable = TenthsOfMillion(outgoing.selling_price + bank_before)
+    if move.purchase_price > affordable:
+        violations.append(
+            SquadViolation(
+                rule="budget",
+                detail=(
+                    f"{move.player_in} costs {move.purchase_price} but selling "
+                    f"{move.player_out} for {outgoing.selling_price} plus a bank of "
+                    f"{bank_before} affords only {affordable}"
+                ),
+            )
+        )
+
+    # The squad's own value is the ceiling: an appreciating squad is legal, and
+    # the opening budget stopped applying the moment it was assembled.
+    budget = TenthsOfMillion(sum(p.selling_price for p in picks) + bank_after)
+    violations.extend(check_squad(picks, rules=rules, bank=bank_after, budget=budget))
+    return violations
 
 
 RecommendFn = Callable[
