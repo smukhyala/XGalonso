@@ -71,6 +71,16 @@ class ScoringThresholds(BaseModel):
             "(the defender actions plus ball recoveries)."
         ),
     )
+    captain_multiplier: int = Field(
+        default=2,
+        gt=1,
+        description=(
+            "VERIFY: FPL doubles the captain. game_config publishes only "
+            "chips[].overrides.pick_multiplier, and only for the triple-captain "
+            "chip, so the base multiplier is asserted here rather than read."
+        ),
+    )
+
     long_play_minutes: int = Field(
         default=60,
         gt=0,

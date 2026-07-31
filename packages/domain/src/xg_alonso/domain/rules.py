@@ -62,6 +62,14 @@ class SquadRules(BaseModel):
         ge=0, description="Free transfers carried beyond the standard one"
     )
     transfers_cap: int = Field(gt=0, description="Maximum transfers in a single gameweek")
+    vice_captain_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether the vice-captain inherits the armband. Published as "
+            "sys_vice_captain_enabled and previously unread, so the code assumed "
+            "what the payload already states."
+        ),
+    )
     hit_cost_per_transfer: int = Field(
         default=4, gt=0, description="VERIFY: points deducted per transfer beyond the free ones"
     )
@@ -134,5 +142,8 @@ class SquadRules(BaseModel):
             sell_at_purchase_price=bool(rules["element_sell_at_purchase_price"]),
             max_extra_free_transfers=int(rules["max_extra_free_transfers"]),
             transfers_cap=int(rules["transfers_cap"]),
+            # Published, and previously unread. Defaults to True when absent so a
+            # snapshot that predates the field behaves as the game always has.
+            vice_captain_enabled=bool(rules.get("sys_vice_captain_enabled", True)),
             positions=tuple(sorted(positions, key=lambda p: list(Position).index(p.position))),
         )

@@ -74,6 +74,7 @@ _SQUAD_FIELDS: tuple[str, ...] = (
     "sell_on_fee",
     "sell_at_purchase_price",
     "max_extra_free_transfers",
+    "vice_captain_enabled",
     "transfers_cap",
     "positions",
 )

@@ -14,8 +14,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 
-from pydantic import BaseModel, ConfigDict
-
+from xg_alonso.contracts.constraints import SquadViolation
 from xg_alonso.contracts.identifiers import TeamId, TenthsOfMillion
 from xg_alonso.contracts.prediction import Position
 from xg_alonso.contracts.squad import SquadPick, SquadState
@@ -28,14 +27,9 @@ __all__ = [
     "is_legal_squad",
 ]
 
-
-class SquadViolation(BaseModel):
-    """One broken rule, with enough detail to explain it without re-deriving it."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    rule: str
-    detail: str
+# `SquadViolation` lives in `contracts` because a simulation *carries* one and
+# `contracts` may not import `domain`. Re-exported here, where it is produced,
+# so every existing import keeps resolving and there is still exactly one type.
 
 
 def check_squad(

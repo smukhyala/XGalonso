@@ -20,6 +20,7 @@ Two further modules describe the objective-conditioned discovery layer:
   evaluations, clusters and experiment manifests
 """
 
+from xg_alonso.contracts.constraints import SquadViolation
 from xg_alonso.contracts.discovery import (
     AcceptanceStatus,
     ClusterSummary,
@@ -115,6 +116,23 @@ from xg_alonso.contracts.recommendation import (
     TransferPackage,
     TransferRecommendation,
 )
+from xg_alonso.contracts.schedule import (
+    GameweekSlate,
+    TeamFixture,
+    blanking_teams,
+    doubling_teams,
+)
+from xg_alonso.contracts.simulation import (
+    AutosubResult,
+    Captaincy,
+    CaptainSource,
+    GameweekSimulation,
+    SeasonSimulation,
+    SkippedSubstitution,
+    SkipReason,
+    Substitution,
+    SubstitutionReason,
+)
 from xg_alonso.contracts.squad import ChipState, ChipStatus, SquadPick, SquadState
 from xg_alonso.contracts.storage import BronzeSnapshotStore, SnapshotRef, TableStore
 
@@ -125,10 +143,13 @@ __all__ = [
     "FOUR_TIMESTAMP_FIELDS",
     "REASON_TEMPLATES",
     "AcceptanceStatus",
+    "AutosubResult",
     "BaselineComparison",
     "BeliefEntity",
     "BeliefProposition",
     "BronzeSnapshotStore",
+    "CaptainSource",
+    "Captaincy",
     "ChipIntent",
     "ChipState",
     "ChipStatus",
@@ -153,6 +174,8 @@ __all__ = [
     "FormSignal",
     "FormStrength",
     "GameweekId",
+    "GameweekSimulation",
+    "GameweekSlate",
     "GenerationSource",
     "HypothesisStatus",
     "LeakageRisk",
@@ -179,15 +202,22 @@ __all__ = [
     "RiskPreference",
     "RunManifest",
     "Season",
+    "SeasonSimulation",
     "SignalSet",
+    "SkipReason",
+    "SkippedSubstitution",
     "SnapshotRef",
     "SourceTimestamps",
     "SquadArea",
     "SquadPick",
     "SquadState",
+    "SquadViolation",
     "SubgroupResult",
+    "Substitution",
+    "SubstitutionReason",
     "TableStore",
     "TeamCode",
+    "TeamFixture",
     "TeamId",
     "TeamQuota",
     "TenthsOfMillion",
@@ -199,6 +229,8 @@ __all__ = [
     "UtilityWeights",
     "ValidationStatus",
     "WalkForwardFold",
+    "blanking_teams",
+    "doubling_teams",
     "format_money",
     "panel_feature_names",
     "parse_season",
