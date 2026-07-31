@@ -34,7 +34,7 @@ import json
 import subprocess
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Final
 
 import numpy as np
@@ -66,9 +66,10 @@ from xg_alonso.discovery.compile import (
     CompileContext,
     ValidationIssue,
     compile_program,
+    program_builder,
     validate_program,
 )
-from xg_alonso.discovery.dsl import GroupKey, ProgramError
+from xg_alonso.discovery.dsl import FeatureProgram, GroupKey, ProgramError
 from xg_alonso.discovery.harness import (
     HarnessConfig,
     PredictionCache,
@@ -86,6 +87,7 @@ from xg_alonso.discovery.hypotheses import (
 from xg_alonso.discovery.registry import DiscoveryRegistry
 from xg_alonso.discovery.search import SearchResult, greedy_forward
 from xg_alonso.discovery.utility import feature_utility, stability_score
+from xg_alonso.features.leakage import find_leakage
 
 __all__ = [
     "DiscoveryResult",
@@ -112,6 +114,133 @@ FORBIDDEN_COLUMNS: Final[tuple[str, ...]] = (
     "label_starts",
     "label_yellow_cards",
 )
+
+#: The check names a program can earn. ``static_validation`` is the schema and
+#: level check in :func:`~xg_alonso.discovery.compile.validate_program`;
+#: ``point_in_time_harness`` is the real rebuild-with-future-data comparison in
+#: :mod:`xg_alonso.features.leakage`. A program only ever carries a name it
+#: actually passed — the two are recorded separately so "we checked" and "we
+#: could not check" never render identically.
+STATIC_VALIDATION: Final[str] = "static_validation"
+POINT_IN_TIME_HARNESS: Final[str] = "point_in_time_harness"
+
+#: How many entity rows the leakage proof runs over. The harness compiles the
+#: program twice, so the whole frame would double the cost of every candidate.
+#: Rows are taken deterministically (earliest cutoffs first), never sampled.
+_LEAKAGE_ENTITY_ROWS: Final[int] = 400
+
+
+@dataclass(frozen=True)
+class LeakageProof:
+    """The outcome of trying to prove one program point-in-time safe.
+
+    ``passed`` is only ever ``True`` when the harness ran *and* found nothing.
+    A program the harness could not be run against is not clean — it is
+    unproven, and :attr:`detail` says which.
+    """
+
+    checks: tuple[str, ...]
+    passed: bool
+    detail: str = ""
+
+
+def _split_for_leakage(
+    entities: pl.DataFrame, player_stats: pl.DataFrame
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame] | None:
+    """Carve entities, visible source and future records around one cutoff.
+
+    Returns ``None`` when no cutoff leaves all three non-empty, which is the
+    honest answer for a frame too thin to prove anything with.
+    """
+    if (
+        "prediction_timestamp" not in entities.columns
+        or "available_time" not in player_stats.columns
+    ):
+        return None
+
+    cutoffs = entities["prediction_timestamp"].drop_nulls().unique().sort()
+    available = player_stats["available_time"].drop_nulls()
+    if cutoffs.is_empty() or available.is_empty():
+        return None
+
+    # Only a cutoff with records on *both* sides can prove anything: records at
+    # or before it are the visible source, records after it are the future the
+    # rebuild appends. A cutoff at or beyond the last record leaves no future
+    # set, and `find_leakage` rightly refuses that case as proving nothing.
+    earliest, latest = available.min(), available.max()
+    usable = [c for c in cutoffs if earliest <= c < latest]
+    if not usable:
+        return None
+
+    # The middle usable cutoff, so both sides carry a reasonable share of the
+    # history rather than one row against everything else.
+    cutoff = usable[len(usable) // 2]
+
+    rows = (
+        entities.filter(pl.col("prediction_timestamp") <= cutoff)
+        .sort("prediction_timestamp")
+        .head(_LEAKAGE_ENTITY_ROWS)
+    )
+    source = player_stats.filter(pl.col("available_time") <= cutoff)
+    future = player_stats.filter(pl.col("available_time") > cutoff)
+
+    if rows.is_empty() or source.is_empty() or future.is_empty():
+        return None
+    return rows, source, future
+
+
+def _prove_point_in_time(
+    program: FeatureProgram, *, entities: pl.DataFrame, context: CompileContext
+) -> LeakageProof:
+    """Run the shipped leakage harness over one compiled program.
+
+    This is what makes ``leakage_passed`` a measurement. It was previously a
+    literal ``True``, so the registry recorded a check that had never run —
+    and :func:`~xg_alonso.discovery.acceptance.decide` gates on that value, so
+    the claim was load-bearing as well as false.
+    """
+    split = _split_for_leakage(entities, context.player_stats)
+    if split is None:
+        return LeakageProof(
+            checks=(STATIC_VALIDATION,),
+            passed=False,
+            detail=(
+                "the point-in-time harness could not run: the frame has too few "
+                "distinct cutoffs, or no records fall after one. Unproven, not clean."
+            ),
+        )
+
+    rows, source, future = split
+
+    def ctx_factory(stats: pl.DataFrame) -> CompileContext:
+        return replace(context, player_stats=stats)
+
+    builder = program_builder(program, ctx_factory)
+    try:
+        leaked = find_leakage(
+            builder,
+            entities=rows,
+            source=source,
+            future_records=future,
+            compare_columns=[program.name],
+        )
+    except (ProgramError, ValueError, KeyError, TypeError) as exc:
+        return LeakageProof(
+            checks=(STATIC_VALIDATION,),
+            passed=False,
+            detail=f"the leakage harness could not evaluate this program: {str(exc)[:200]}",
+        )
+
+    if leaked:
+        return LeakageProof(
+            checks=(STATIC_VALIDATION, POINT_IN_TIME_HARNESS),
+            passed=False,
+            detail=(
+                f"adding records that were not yet available changed {leaked}; "
+                "the program reads the future"
+            ),
+        )
+    return LeakageProof(checks=(STATIC_VALIDATION, POINT_IN_TIME_HARNESS), passed=True)
 
 
 @dataclass
@@ -371,6 +500,7 @@ def run_discovery(
 
     computed: list[tuple[SeededHypothesis, str]] = []
     rejected_programs: list[tuple[str, list[ValidationIssue]]] = []
+    proofs: dict[str, LeakageProof] = {}
     seen_versions = set(known_versions)
 
     for proposal in proposals:
@@ -386,6 +516,19 @@ def run_discovery(
             rejected_programs.append((program.name, issues))
             continue
         seen_versions.add(program.version())
+
+        # Prove it point-in-time safe *before* computing it into the frame. A
+        # leaky program that reaches the backtest scores brilliantly, and the
+        # acceptance policy would then be deciding on a number that means
+        # nothing. Running the harness first costs one extra compile over a
+        # bounded slice and removes that whole class of outcome.
+        proof = _prove_point_in_time(program, entities=working, context=context)
+        proofs[program.name] = proof
+        if not proof.passed:
+            announce(
+                ExperimentStage.VALIDATING,
+                f"{program.name}: {proof.detail}",
+            )
 
         try:
             working = compile_program(program, working, context)
@@ -430,6 +573,14 @@ def run_discovery(
             cluster_model=cluster_model,
             experiment_id=experiment_id,
             cache=prediction_cache,
+            proof=proofs.get(
+                name,
+                LeakageProof(
+                    checks=(),
+                    passed=False,
+                    detail="no leakage proof was recorded for this program",
+                ),
+            ),
         )
         evaluations.append(evaluation)
         specs.append(spec)
@@ -594,6 +745,7 @@ def _evaluate_one(
     settings: ExperimentConfig,
     cluster_model: ClusterModel | None,
     experiment_id: str,
+    proof: LeakageProof,
     cache: PredictionCache | None = None,
 ) -> tuple[FeatureEvaluation, DiscoveredFeatureSpec]:
     """Measure, control, segment and judge one candidate."""
@@ -652,14 +804,20 @@ def _evaluate_one(
     breakdown = feature_utility(
         weights=objective.objective_weights,
         predictive_gain=incremental,
-        decision_gain=0.0,
         objective_gain=incremental if beat_controls else 0.0,
         folds=folds,
         complementarity_gain=max(0.0, incremental - max(control_gain, shuffled_gain)),
         complexity=program.node_count(),
         missingness=missingness,
-        turnover=0.0,
-        leakage_risk=0.0,
+        # A program the harness could not clear carries full leakage risk. The
+        # leakage weight is an order of magnitude above the others precisely so
+        # that this sinks the candidate — which is the behaviour that was missing
+        # while `leakage_passed` was hardcoded to True.
+        leakage_risk=0.0 if proof.passed else 1.0,
+        # Decision quality needs a policy backtest and turnover needs a ranking
+        # across runs; neither exists in this loop. Named rather than passed as
+        # zero, so the breakdown cannot present them as measured and unhelpful.
+        unmeasured=("decision_gain", "turnover_penalty"),
     )
 
     draft = FeatureEvaluation(
@@ -680,8 +838,8 @@ def _evaluate_one(
         incremental_value=round(incremental, 6),
         stability=round(stability, 6),
         missingness=round(missingness, 6),
-        leakage_checks=("static_validation", "point_in_time_harness"),
-        leakage_passed=True,
+        leakage_checks=proof.checks,
+        leakage_passed=proof.passed,
         subgroup_results=tuple(by_position),
         cluster_results=tuple(by_cluster),
         utility=round(breakdown.total, 6),
