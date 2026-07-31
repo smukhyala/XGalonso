@@ -54,7 +54,7 @@ wins and the document is scheduled for correction.
 | D3 | Public FPL team ID only; no authentication. Prices reconstructed from public transfer history |
 | D4 | CLI first, then FastAPI, then Next.js. No frontend in the MVP |
 | D5 | No chips in the MVP. Chip *state* is modelled; chip *logic* is not built |
-| D6 | Zero budget, no paid providers. Official FPL API first; **relaxed 2026-07-29** to permit fetching free public data the API does not publish, and only from origins whose `robots.txt` permits it. See `match_event_data.md` |
+| D6 | Official FPL API only, zero budget. No scraping, no paid providers |
 | D7 | Historical backfill from 2022/23 — the earliest season with xG in the API |
 | D8 | Component-based points modelling, converted through versioned scoring rules |
 | D9 | Useful by GW1 of 2026/27, refined in-season |

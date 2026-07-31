@@ -17,14 +17,7 @@
 XG Alonso ingests primarily from the **official Fantasy Premier League API**. Binding decision D6
 sets the rule: zero budget and no paid providers.
 
-**D6 was relaxed on 2026-07-29** to permit fetching free public data the official API does not
-publish — specifically team-level match event counts, which no FPL endpoint carries. The relaxation
-is gated, not open: `pipelines/ingestion/robots.py` refuses any origin whose `robots.txt` disallows
-us, and treats an unreachable `robots.txt` as a complete disallow. Understat and FBref remain **out
-of scope** as a result — Understat disallows every path, FBref sits behind a bot challenge — as do
-odds feeds and availability aggregators. See [Match event data](../match_event_data.md).
-
-Adding a new origin is a new decision, not a consequence of this one.
+*Match-event ingestion under a relaxed D6 was implemented and then withdrawn; the code is preserved at commit `4843601` should the decision ever be revisited.*
 
 The base URL for every endpoint in this document is:
 
