@@ -40,7 +40,7 @@ from xg_alonso.domain.constraints import check_squad
 from xg_alonso.domain.pricing import selling_price
 from xg_alonso.domain.rules import SquadRules
 from xg_alonso.domain.transfers import accrue, settle_gameweek
-from xg_alonso.optimization.lineup import best_starting_xi
+from xg_alonso.evaluation.simulator import simulate_squad
 
 __all__ = [
     "BacktestResult",
@@ -340,6 +340,7 @@ def score_squad(
     *,
     predictions: dict[PlayerCode, PlayerPrediction] | None = None,
     rules: SquadRules | None = None,
+    minutes: Mapping[PlayerCode, int] | None = None,
 ) -> int:
     """Score a squad against actual results.
 
@@ -353,23 +354,23 @@ def score_squad(
     slots, which is what the earlier version did unconditionally — and which
     scored a fixed eleven with whatever sat in slot 1 as captain.
 
-    Autosubs are not modelled: a benched player never replaces a starter who
-    fails to play. That understates every squad identically, so a comparison
-    between policies stays fair.
-    """
-    if predictions is not None and rules is not None:
-        selection = best_starting_xi(squad.picks, predictions, rules)
-        starters = selection.starters
-        captain = selection.captain
-    else:
-        starters = squad.starters
-        captain = next((p.player_code for p in squad.picks if p.is_captain), None)
+    Supplying ``minutes`` enables the game's own mechanics: substitutes come on
+    for starters who did not play, and the vice-captain inherits the armband
+    when the captain does not. Omitting it reproduces the outcome-blind
+    behaviour exactly — no substitutions, and the captain doubled whether or not
+    he played — which is what every caller got before autosubs were modelled.
 
-    total = 0
-    for pick in starters:
-        scored = points.get(pick.player_code, 0)
-        total += scored * (2 if pick.player_code == captain else 1)
-    return total
+    The decomposed result is available from
+    :func:`~xg_alonso.evaluation.simulator.simulate_squad`; this returns only
+    the total.
+    """
+    return simulate_squad(
+        squad,
+        points,
+        predictions=predictions,
+        rules=rules,
+        minutes=minutes,
+    ).total
 
 
 def apply_transfer(
@@ -564,6 +565,11 @@ def walk_forward(
         if not outcomes:
             continue
 
+        # Both squads are scored through the identical path, with the identical
+        # minutes, so autosubs and vice-captaincy help the policy and the
+        # baseline on the same terms.
+        played = actual_minutes(player_stats, season=season, gameweek=gameweek)
+
         recommendation, predictions = recommend_fn(acting, gameweek, season)
 
         # Score with the squad as it stands *for* this gameweek — the transfer
@@ -582,9 +588,15 @@ def walk_forward(
                 season=season,
                 gameweek=gameweek,
                 policy_points=score_squad(
-                    acting_after, outcomes, predictions=predictions, rules=rules
+                    acting_after,
+                    outcomes,
+                    predictions=predictions,
+                    rules=rules,
+                    minutes=played,
                 ),
-                hold_points=score_squad(holding, outcomes, predictions=predictions, rules=rules),
+                hold_points=score_squad(
+                    holding, outcomes, predictions=predictions, rules=rules, minutes=played
+                ),
                 hit_cost=recommendation.package.hit_cost,
                 transfer_made=not recommendation.package.is_hold,
                 player_out=(
