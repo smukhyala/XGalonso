@@ -179,6 +179,39 @@ The optimizer is the product; predictions are inputs to it.
 |---|---|---|
 | [01_knowledge_lab.md](research/01_knowledge_lab.md) | Deferred (Post-MVP) | Accumulated hypotheses, experiments, outcomes |
 
+### The research surface, and what it may not touch
+
+`packages/discovery` (objective-conditioned feature search) and
+`packages/interpreter` (reading a manager's request, sweeping team news) are
+**offline research tools, not part of the recommendation path**. The
+`research-surface-is-quarantined` contract in `.importlinter` enforces it: no
+package from `contracts` through `evaluation`, nor `pipelines`, may import
+either. `cli` and `api` may, because wiring a research tool up as a command or
+an endpoint is what an app layer is for.
+
+The claim being enforced is that a recommendation stays reproducible from
+stored snapshots alone. The layers contract alone would not give that — it
+places `interpreter` *below* `features`, so without the explicit gate
+`prediction` could import the LLM client and nothing would object.
+
+**LLM use is optional and never on the critical path.** The `anthropic` client
+is an extra (`uv sync --extra llm`), reached from exactly three places:
+discovery hypothesis proposal, request interpretation, and the team-news sweep.
+Each is opt-in per invocation, and a missing SDK or key raises a typed
+unavailability error that the deterministic path handles. A default install
+gains no new dependency and needs no credential. Where a model is used it emits
+*data* — a JSON expression tree parsed by the DSL, or a list of names resolved
+locally — never code, and a proposal that fails to parse is dropped rather than
+repaired.
+
+**Form signals are a bounded human channel.** `.data/signals/form_signals.json`
+scales a projection by at most ±15%, requires a source URL, expires, and is
+evaluated against the *deadline* rather than the wall clock so a backtest sees
+only what was live then. It is the weakest evidence in the stack and is applied
+last, after price calibration and FPL's own published chance of playing — see
+`prediction/adjustments.py`, which is the one place any of those three is
+applied.
+
 ---
 
 ## Conventions
