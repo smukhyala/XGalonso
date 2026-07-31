@@ -97,7 +97,14 @@ class SquadState(BaseModel):
     gameweek: GameweekId
     picks: tuple[SquadPick, ...]
     bank: TenthsOfMillion = Field(ge=0, description="Uncommitted money")
-    free_transfers: int = Field(ge=0, le=5, description="Caps at 5: 1 plus 4 carried")
+    free_transfers: int = Field(
+        ge=0,
+        description=(
+            "Allowance carried into this gameweek. The cap is a game rule and "
+            "lives in SquadRules.max_free_transfers, which is derived from the "
+            "pinned snapshot; a literal here contradicted it."
+        ),
+    )
     chips: ChipState = Field(default_factory=ChipState)
 
     @model_validator(mode="after")

@@ -44,6 +44,7 @@ from xg_alonso.contracts.recommendation import (
 )
 from xg_alonso.contracts.squad import SquadPick, SquadState
 from xg_alonso.domain.rules import SquadRules
+from xg_alonso.domain.transfers import settle_gameweek
 from xg_alonso.explanations.reasons import (
     PopulationStats,
     build_no_move_reasons,
@@ -246,7 +247,11 @@ def rank_single_transfers(
     """
     owned = {pick.player_code for pick in squad.picks}
     counts = _club_counts(squad.picks)
-    hit_cost = 0 if squad.free_transfers >= 1 else rules.hit_cost_per_transfer
+    # Through the ledger, so the single-transfer case and the multi-transfer
+    # package it will become share one implementation of the charge.
+    hit_cost = settle_gameweek(
+        free_transfers=squad.free_transfers, transfers_made=1, rules=rules
+    ).hit_cost
 
     # The bar every candidate must clear: what this squad scores untouched.
     hold_points = starting_xi_points(squad.picks, predictions, rules)

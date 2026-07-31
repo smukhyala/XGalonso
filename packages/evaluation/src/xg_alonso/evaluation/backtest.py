@@ -30,6 +30,7 @@ from xg_alonso.contracts.prediction import PlayerPrediction
 from xg_alonso.contracts.recommendation import TransferRecommendation
 from xg_alonso.contracts.squad import SquadPick, SquadState
 from xg_alonso.domain.rules import SquadRules
+from xg_alonso.domain.transfers import accrue, settle_gameweek
 from xg_alonso.optimization.lineup import best_starting_xi
 
 __all__ = [
@@ -254,18 +255,23 @@ def apply_transfer(
     prices: dict[PlayerCode, TenthsOfMillion],
     positions: dict[PlayerCode, str],
     teams: dict[PlayerCode, int],
+    rules: SquadRules,
 ) -> SquadState:
     """Return the squad that results from acting on a recommendation.
 
-    A hold returns the squad unchanged. Free transfers accumulate up to the cap
-    when nothing is done, which is what makes rolling a real alternative rather
-    than a wasted week.
+    A hold returns the squad unchanged. The allowance is settled through
+    `domain.transfers`, so the cap and the per-transfer charge come from the
+    pinned snapshot rather than from a literal here — and a transferring week
+    now accrues its `+1` like any other, instead of sliding toward a permanent
+    hit as `max(0, ft - 1)` did.
     """
     from xg_alonso.contracts.identifiers import TeamId
     from xg_alonso.contracts.prediction import Position
 
     if recommendation.package.is_hold:
-        return squad.model_copy(update={"free_transfers": min(5, squad.free_transfers + 1)})
+        return squad.model_copy(
+            update={"free_transfers": accrue(squad.free_transfers, rules=rules)}
+        )
 
     move = recommendation.package.moves[0]
     outgoing = squad.by_code(move.player_out)
@@ -285,11 +291,16 @@ def apply_transfer(
     )
 
     picks = tuple(incoming if p.player_code == move.player_out else p for p in squad.picks)
+    ledger = settle_gameweek(
+        free_transfers=squad.free_transfers,
+        transfers_made=len(recommendation.package.moves),
+        rules=rules,
+    )
     return squad.model_copy(
         update={
             "picks": picks,
             "bank": recommendation.package.bank_after,
-            "free_transfers": max(0, squad.free_transfers - 1),
+            "free_transfers": ledger.free_transfers_after,
         }
     )
 
@@ -311,7 +322,7 @@ def walk_forward(
     prices: dict[PlayerCode, TenthsOfMillion],
     positions: dict[PlayerCode, str],
     teams: dict[PlayerCode, int],
-    rules: SquadRules | None = None,
+    rules: SquadRules,
 ) -> BacktestResult:
     """Walk a season, comparing an acting policy against never transferring.
 
@@ -335,7 +346,7 @@ def walk_forward(
         # Score with the squad as it stands *for* this gameweek — the transfer
         # is made before the deadline, so the incoming player plays this week.
         acting_after = apply_transfer(
-            acting, recommendation, prices=prices, positions=positions, teams=teams
+            acting, recommendation, prices=prices, positions=positions, teams=teams, rules=rules
         )
 
         move = recommendation.package.moves[0] if recommendation.package.moves else None
@@ -368,6 +379,8 @@ def walk_forward(
             )
         )
         acting = acting_after
-        holding = holding.model_copy(update={"free_transfers": min(5, holding.free_transfers + 1)})
+        holding = holding.model_copy(
+            update={"free_transfers": accrue(holding.free_transfers, rules=rules)}
+        )
 
     return result
