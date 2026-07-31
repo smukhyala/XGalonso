@@ -276,11 +276,23 @@ def template_ownership_squad(
     what happened.
     """
     previous = int(gameweek) - 1
-    owned = (
-        player_stats.filter((pl.col("season") == season) & (pl.col("gameweek_id") == previous))
-        .group_by("player_code")
-        .agg(pl.col("selected").max().alias("selected"))
+    prior_rows = player_stats.filter(
+        (pl.col("season") == season) & (pl.col("gameweek_id") == previous)
     )
+    if prior_rows.is_empty():
+        # No prior gameweek — `gameweek` is the season opener, or the window
+        # starts before any recorded data. Every player would fill-null to zero
+        # ownership, and `_greedy_fill` would then rank a 600-player field by a
+        # column that is constant, returning whichever fifteen the frame
+        # happened to order first. That is not a template squad; it is an
+        # arbitrary one wearing the label, and it would enter a report as the
+        # "what the crowd owned" baseline.
+        raise ValueError(
+            f"no gameweek {previous} ownership for {season}, so a template squad for "
+            f"gameweek {gameweek} cannot be built. Ownership must be read from the "
+            "gameweek before the one being started, and there is none."
+        )
+    owned = prior_rows.group_by("player_code").agg(pl.col("selected").max().alias("selected"))
     ranked = players.join(owned, on="player_code", how="left").with_columns(
         pl.col("selected").fill_null(0)
     )

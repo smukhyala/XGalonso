@@ -163,9 +163,19 @@ def _schema_diff(needed: Sequence[str], active: ActiveSchema) -> FeatureSchemaDi
     # Relative order of the shared names. Selection is by name so this cannot
     # break inference, but it means the catalogue definition moved under the
     # artifact, which is worth saying.
-    shared = [c for c in active.feature_names if c in set(needed)]
-    artifact_order = [c for c in needed if c in available]
-    reordered = tuple(a for a, b in zip(shared, artifact_order, strict=False) if a != b)
+    #
+    # Both sides must be restricted to the *same* name set before they are
+    # zipped. Comparing `active ∩ needed` against `needed ∩ available` does not:
+    # `available` includes extension features that `active.feature_names` does
+    # not, so the two lists differ in membership and length, and
+    # `zip(strict=False)` silently truncates and pairs unrelated names. With one
+    # extension feature and an otherwise-identical order, that reports a
+    # reordering that did not happen.
+    shared_names = set(needed) & set(active.feature_names)
+    active_order = [c for c in active.feature_names if c in shared_names]
+    artifact_order = [c for c in needed if c in shared_names]
+    # `strict=True` is now safe, and asserts the restriction above holds.
+    reordered = tuple(a for a, b in zip(active_order, artifact_order, strict=True) if a != b)
 
     return FeatureSchemaDiff(
         expected_order=tuple(needed),

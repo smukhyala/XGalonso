@@ -878,7 +878,16 @@ def _evaluate_one(
         cluster_model_version=None if cluster_model is None else cluster_model.model_version(),
         objective_tags=(objective.id,),
         hypothesis_id=proposal.hypothesis.id,
-        validation_status=ValidationStatus.LEAKAGE_PASSED,
+        # Set from the proof, not asserted. This was hardcoded to
+        # `LEAKAGE_PASSED`, and `is_registrable` is exactly
+        # `status is LEAKAGE_PASSED` — so a program the harness *rejected* was
+        # still written into the registry as a usable feature. Making
+        # `FeatureEvaluation.leakage_passed` honest was not enough on its own:
+        # that field gates the acceptance verdict, while this one gates
+        # registration, and they were fixed one at a time.
+        validation_status=(
+            ValidationStatus.LEAKAGE_PASSED if proof.passed else ValidationStatus.REJECTED_LEAKAGE
+        ),
         complexity=program.node_count(),
     )
     return evaluation, spec

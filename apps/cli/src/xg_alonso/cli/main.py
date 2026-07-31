@@ -158,23 +158,41 @@ def _resolve_rules(
     )
     wanted = str(season)
 
-    if wanted in pinned:
-        context = _load_context(data_root, season)
-        return RulesResolution(
-            scoring=context.scoring, squad=context.squad_rules, source_season=wanted, exact=True
-        )
-
-    if require_exact:
+    if wanted not in pinned and require_exact:
         raise typer.BadParameter(
             f"no pinned rules for {wanted}. Available: {pinned or 'none'}. "
             "Run `xg ingest` for that season, or drop --require-exact-rules."
         )
 
-    earlier = [s for s in pinned if s <= wanted]
-    chosen = earlier[-1] if earlier else (pinned[-1] if pinned else DEFAULT_SEASON)
-    context = _load_context(data_root, parse_season(chosen))
+    if wanted in pinned:
+        chosen = wanted
+    else:
+        earlier = [s for s in pinned if s <= wanted]
+        chosen = earlier[-1] if earlier else (pinned[-1] if pinned else DEFAULT_SEASON)
+
+    # Read the chosen season's *pinned* rules, not the latest bronze snapshot.
+    #
+    # This previously called `_load_context`, which parses whatever bootstrap
+    # payload happens to be newest in bronze — so a 2022-23 resolution returned
+    # `exact=True`, `source_season="2022-23"` and a `ScoringRules` whose
+    # `version` said "2022-23" while its *values* came from 2026-27. It labelled
+    # the answer with the season it was asked about and supplied another
+    # season's rules, which is worse than the bug this function was written to
+    # fix: it turned a silent substitution into an asserted one.
+    scoring, squad = _load_pinned_rules(data_root, parse_season(chosen))
+    if scoring is None or squad is None:
+        # Nothing pinned at all — a first run. The snapshot is the only source
+        # there is, and `exact=False` says so rather than implying otherwise.
+        context = _load_context(data_root, season)
+        return RulesResolution(
+            scoring=context.scoring,
+            squad=context.squad_rules,
+            source_season=chosen,
+            exact=False,
+        )
+
     return RulesResolution(
-        scoring=context.scoring, squad=context.squad_rules, source_season=chosen, exact=False
+        scoring=scoring, squad=squad, source_season=chosen, exact=chosen == wanted
     )
 
 
@@ -1030,6 +1048,8 @@ def _manifest_for(saved: Any, path: Path, data_root: Path, season: Season) -> An
         model_name=path.stem,
         model_version=TRAINED_MODEL_VERSION,
         created_at=saved.saved_at,
+        git_commit=_git_commit(),
+        git_dirty=_git_dirty(),
         code_version=_git_commit(),
         runtime=RuntimeVersions(python=platform.python_version()),
         feature_catalogue_version=CATALOGUE_VERSION,
@@ -1070,17 +1090,73 @@ def _git_commit() -> str:
         return ""
 
 
+def _git_dirty() -> bool:
+    """Whether the working tree has uncommitted changes.
+
+    `ArtifactManifest.reproducible` is `bool(code_version) and not git_dirty`,
+    and `git_dirty` defaults to `False` — so leaving it unset made every
+    manifest claim reproducibility, including one written from a tree with
+    uncommitted edits. That inverts the field's purpose: it exists precisely to
+    say "the commit recorded here does not describe the code that ran".
+
+    Uses the same probe as `pipelines/ingestion/bootstrap.py` and
+    `discovery/experiment.py`, both of which already recorded this correctly.
+    On failure it returns `True`, because an unknown tree state is not a clean
+    one and the safe direction is to under-claim.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except Exception:
+        return True
+    return bool(out.stdout.strip())
+
+
+def _active_schema(data_root: Path, season: Season) -> Any:
+    """The active feature schema, carrying the active rules hash.
+
+    Every call site used the bare `ActiveSchema.from_catalogue()`, which leaves
+    `rules_snapshot_hash` empty — and the rules-drift check is guarded by
+    `if active.rules_snapshot_hash and manifest.rules_snapshot_hash and ...`.
+    So the one **blocking** check that catches a model fitted under one scoring
+    system and priced under another could never fire on any of them.
+
+    Resolution is non-exact-tolerant: `_resolve_rules` records which season's
+    snapshot it used, and a hash from the wrong season is still a real hash to
+    compare against. Failing to resolve rules at all is not fatal here — it
+    degrades to the previous behaviour, with the check inert, rather than
+    refusing to list artifacts.
+    """
+    from xg_alonso.domain.scoring import rules_snapshot_hash
+    from xg_alonso.prediction.artifacts import ActiveSchema
+
+    try:
+        resolved = _resolve_rules(data_root, season)
+        rules_hash = rules_snapshot_hash(resolved.scoring, resolved.squad)
+    except Exception:
+        rules_hash = ""
+    return ActiveSchema.from_catalogue(rules_snapshot_hash=rules_hash)
+
+
 @models_app.command("list")
 def models_list(
     data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
     show_all: Annotated[
         bool, typer.Option("--all", help="Include artifacts that cannot be used.")
     ] = False,
 ) -> None:
     """Every artifact and whether it can be used with the active build."""
-    from xg_alonso.prediction.artifacts import ActiveSchema, read_manifest
+    from xg_alonso.prediction.artifacts import read_manifest
 
-    active = ActiveSchema.from_catalogue()
+    active = _active_schema(data_root, parse_season(season))
     paths = sorted((data_root / "models").glob("*.pkl"))
     if not paths:
         typer.echo(f"  no artifacts under {data_root / 'models'}")
@@ -1135,14 +1211,13 @@ def _verify_one(path: Path, active: Any) -> Any:
 def models_verify(
     artifact: Annotated[Path, typer.Argument(help="Path to a .pkl artifact.")],
     data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
 ) -> None:
     """Explain in full whether one artifact can be used, and why not."""
-    from xg_alonso.prediction.artifacts import ActiveSchema
-
     if not artifact.exists():
         raise typer.BadParameter(f"no artifact at {artifact}")
 
-    verdict = _verify_one(artifact, ActiveSchema.from_catalogue())
+    verdict = _verify_one(artifact, _active_schema(data_root, parse_season(season)))
     typer.echo(verdict.explain())
     if verdict.schema_diff is not None:
         diff = verdict.schema_diff
@@ -1204,9 +1279,7 @@ def models_audit(
     and the expensive error is destroying provenance rather than failing to
     write it.
     """
-    from xg_alonso.prediction.artifacts import ActiveSchema
-
-    active = ActiveSchema.from_catalogue()
+    active = _active_schema(data_root, parse_season(season))
     paths = sorted((data_root / "models").glob("*.pkl"))
     if not paths:
         typer.echo(f"  no artifacts under {data_root / 'models'}")

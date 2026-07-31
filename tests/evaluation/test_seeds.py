@@ -21,6 +21,7 @@ import typer
 
 from xg_alonso.cli.main import _resolve_rules
 from xg_alonso.contracts.identifiers import parse_season
+from xg_alonso.contracts.prediction import Position
 from xg_alonso.contracts.provenance import SourceTimestamps, TimeSource
 from xg_alonso.contracts.seeds import ROOT_SEED, SeedLedger, derive_seed
 from xg_alonso.pipelines.ingestion.bootstrap import SOURCE_BOOTSTRAP
@@ -88,6 +89,14 @@ class TestTheLedgerRecordsWhatWasDrawn:
         assert ledger.for_label("absent") is None
 
 
+#: A value that differs between the pinned seasons the tests construct, so an
+#: assertion can tell *which snapshot's rules were actually loaded* rather than
+#: only which one was named. Six is the wrong answer for a goalkeeper goal —
+#: the exact transcription error `domain/scoring.py` exists to prevent — which
+#: makes it unmistakable in a failure message.
+_WRONG_GKP_GOAL = 6
+
+
 def _data_root_pinned_at(tmp_path: Path, *seasons: str) -> Path:
     """A data root holding pinned rules for exactly ``seasons``.
 
@@ -107,12 +116,18 @@ def _data_root_pinned_at(tmp_path: Path, *seasons: str) -> Path:
     pinned = tmp_path / "pinned"
     pinned.mkdir(parents=True, exist_ok=True)
     for season in seasons:
+        # Every season but the newest gets a deliberately distinguishable
+        # goalkeeper-goal value, so a test can prove which file was read.
+        stored = json.loads(json.dumps(payload))
+        if season != "2026-27":
+            stored["game_config"]["scoring"]["goals_scored"]["GKP"] = _WRONG_GKP_GOAL
+        body = json.dumps(stored).encode("utf-8")
         (pinned / f"rules_{season}.json").write_text(
             json.dumps(
                 {
                     "fetched_at": "2026-07-27T00:00:00+00:00",
-                    "payload": payload,
-                    "source_sha256": hashlib.sha256(raw).hexdigest(),
+                    "payload": stored,
+                    "source_sha256": hashlib.sha256(body).hexdigest(),
                 }
             )
         )
@@ -171,6 +186,31 @@ class TestRulesResolution:
 
         assert not resolved.exact
         assert resolved.source_season == "2022-23"
+        assert resolved.scoring.goals_scored[Position.GKP] == _WRONG_GKP_GOAL
+
+    def test_it_loads_the_named_snapshots_values_not_just_its_name(self, tmp_path: Path) -> None:
+        """The bug this pair of assertions exists for.
+
+        `_resolve_rules` used to call `_load_context`, which parses whatever
+        bootstrap payload is newest in bronze. So a 2022-23 resolution returned
+        `exact=True`, `source_season="2022-23"` and a `ScoringRules` whose
+        `version` field also said "2022-23" — while its *values* came from the
+        2026-27 snapshot. Every label agreed and the numbers were another
+        season's.
+
+        Asserting `source_season` alone cannot catch that, because
+        `source_season` was the one thing that was right.
+        """
+        root = _data_root_pinned_at(tmp_path, "2022-23", "2026-27")
+
+        old = _resolve_rules(root, parse_season("2022-23"))
+        new = _resolve_rules(root, parse_season("2026-27"))
+
+        assert old.exact
+        assert new.exact
+        assert old.scoring.goals_scored[Position.GKP] == _WRONG_GKP_GOAL
+        assert new.scoring.goals_scored[Position.GKP] == 10
+        assert old.scoring.goals_scored != new.scoring.goals_scored
 
     def test_it_falls_forward_only_when_nothing_earlier_exists(self, tmp_path: Path) -> None:
         root = _data_root_pinned_at(tmp_path, "2026-27")
