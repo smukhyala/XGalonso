@@ -28,12 +28,18 @@ from xg_alonso.domain.purchase_prices import (
     parse_transfer_log,
     reconstruct_purchase_prices,
 )
+from xg_alonso.domain.realisation import (
+    RealisedCounts,
+    realised_points,
+    realised_points_matrix,
+)
 from xg_alonso.domain.rules import PositionRule, SquadRules
 from xg_alonso.domain.scoring import ScoringRules, ScoringThresholds, assemble_points
 
 __all__ = [
     "PositionRule",
     "PurchasePriceResult",
+    "RealisedCounts",
     "ScoringRules",
     "ScoringThresholds",
     "SquadRules",
@@ -44,6 +50,8 @@ __all__ = [
     "check_starting_xi",
     "is_legal_squad",
     "parse_transfer_log",
+    "realised_points",
+    "realised_points_matrix",
     "reconstruct_purchase_prices",
     "selling_price",
     "squad_value",

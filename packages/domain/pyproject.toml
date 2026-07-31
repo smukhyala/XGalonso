@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Pure FPL and football rules. No database, no API, no I/O."
 requires-python = ">=3.12"
 dependencies = [
+    "numpy>=2.0",
     "pydantic>=2.10,<3",
     "xg-alonso-contracts",
 ]
