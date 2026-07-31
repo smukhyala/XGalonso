@@ -40,6 +40,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from xg_alonso.contracts.discovery import FoldMetrics, SubgroupResult
 from xg_alonso.contracts.folds import WalkForwardFold, walk_forward_folds
 from xg_alonso.contracts.identifiers import GameweekId
+from xg_alonso.contracts.seeds import ROOT_SEED
 from xg_alonso.discovery.search import ScoreResult
 
 __all__ = [
@@ -65,7 +66,7 @@ DEFAULT_ESTIMATOR_KWARGS: Final[dict[str, Any]] = {
     "learning_rate": 0.08,
     "min_samples_leaf": 40,
     "l2_regularization": 1.0,
-    "random_state": 20260727,
+    "random_state": ROOT_SEED,
 }
 
 #: The label a discovery run scores against by default.
@@ -131,7 +132,7 @@ class HarnessConfig:
     """Excluded from every fold. The final test period is never optimised on."""
 
     max_folds: int = 6
-    seed: int = 20260727
+    seed: int = ROOT_SEED
     estimator_kwargs: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ESTIMATOR_KWARGS))
     lower_is_better: bool = True
 
@@ -376,7 +377,7 @@ def random_control(
     baseline_columns: Sequence[str],
     config: HarnessConfig | None = None,
     splits: Sequence[FoldSplit] | None = None,
-    seed: int = 20260727,
+    seed: int = ROOT_SEED,
     repeats: int = 3,
 ) -> ScoreResult:
     """The baseline plus a matched-complexity **noise** column.
@@ -434,7 +435,7 @@ def shuffled_control(
     candidate: str,
     config: HarnessConfig | None = None,
     splits: Sequence[FoldSplit] | None = None,
-    seed: int = 20260727,
+    seed: int = ROOT_SEED,
 ) -> ScoreResult:
     """The baseline plus a **permuted copy of the candidate itself**.
 

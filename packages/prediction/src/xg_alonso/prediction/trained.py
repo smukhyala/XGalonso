@@ -29,6 +29,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostin
 
 from xg_alonso.contracts.folds import WalkForwardFold, walk_forward_folds
 from xg_alonso.contracts.identifiers import GameweekId
+from xg_alonso.contracts.seeds import ROOT_SEED
 
 __all__ = [
     "TRAINED_MODEL_NAME",
@@ -76,7 +77,7 @@ _REGRESSOR_KWARGS: Final[dict[str, Any]] = {
     "learning_rate": 0.06,
     "min_samples_leaf": 40,
     "l2_regularization": 1.0,
-    "random_state": 20260727,
+    "random_state": ROOT_SEED,
 }
 
 
@@ -144,6 +145,13 @@ class ComponentModels:
 
     Recorded rather than silently discarded: a feature set that quietly shrinks
     is one whose version string no longer describes it.
+    """
+
+    estimator_kwargs: dict[str, Any] = field(default_factory=dict)
+    """The hyperparameters these models were actually fitted with.
+
+    Applied at fit time and never stored, so "was the architecture frozen
+    between pinning and running" had no answer. A freeze check needs one.
     """
 
     label_means: dict[str, float] = field(default_factory=dict)
@@ -420,6 +428,7 @@ def train_component_models(
             np.mean((y_all > 0).astype(np.float64)) if label in _BINARY_LABELS else np.mean(y_all)
         )
     result.trained_on_rows = indexed.height
+    result.estimator_kwargs = {**_REGRESSOR_KWARGS, **(model_kwargs or {})}
 
     return result
 

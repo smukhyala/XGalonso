@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -113,6 +114,67 @@ def _load_context(data_root: Path, season: Season) -> SliceContext:
         season=season,
         snapshot_sha256=bootstrap_ref.content_sha256,
         available_time=bootstrap_ref.timestamps.available_time,
+    )
+
+
+@dataclass(frozen=True)
+class RulesResolution:
+    """Which season's rules were used, and whether they were the right ones."""
+
+    scoring: Any
+    squad: Any
+    source_season: str
+    exact: bool
+
+    @property
+    def caveat(self) -> str:
+        """One line for a report, empty when the rules are the season's own."""
+        if self.exact:
+            return ""
+        return (
+            f"scoring rules resolved from the {self.source_season} pinned snapshot; "
+            "no snapshot exists for the evaluated season"
+        )
+
+
+def _resolve_rules(
+    data_root: Path, season: Season, *, require_exact: bool = False
+) -> RulesResolution:
+    """Rules for ``season``, preferring its own pinned snapshot.
+
+    `.data/pinned` holds only the current season, so a 2024-25 backtest was
+    being scored under 2026-27 rules — three call sites reached for
+    `DEFAULT_SEASON` and none of them said so. There is no historical snapshot
+    to load, so the honest fix is not to pretend otherwise: fall back to the
+    newest pinned season no later than the one asked for, fall back further to
+    the newest available, and **record which**, so `rules_are_exact` reaches
+    the report rather than the reader's imagination.
+
+    Args:
+        require_exact: Refuse the fallback instead of recording it.
+    """
+    pinned = sorted(
+        p.stem.removeprefix("rules_") for p in (data_root / "pinned").glob("rules_*.json")
+    )
+    wanted = str(season)
+
+    if wanted in pinned:
+        context = _load_context(data_root, season)
+        return RulesResolution(
+            scoring=context.scoring, squad=context.squad_rules, source_season=wanted, exact=True
+        )
+
+    if require_exact:
+        raise typer.BadParameter(
+            f"no pinned rules for {wanted}. Available: {pinned or 'none'}. "
+            "Run `xg ingest` for that season, or drop --require-exact-rules."
+        )
+
+    earlier = [s for s in pinned if s <= wanted]
+    chosen = earlier[-1] if earlier else (pinned[-1] if pinned else DEFAULT_SEASON)
+    context = _load_context(data_root, parse_season(chosen))
+    return RulesResolution(
+        scoring=context.scoring, squad=context.squad_rules, source_season=chosen, exact=False
     )
 
 
@@ -1007,8 +1069,13 @@ def backtest(
         PlayerCode(int(r["player_code"])): str(r["web_name"]) for r in players.iter_rows(named=True)
     }
 
-    squad_rules = _load_context(data_root, parse_season(DEFAULT_SEASON)).squad_rules
-    scoring = _load_context(data_root, parse_season(DEFAULT_SEASON)).scoring
+    # One resolution rather than two full context rebuilds, and it records
+    # which season's rules these actually are.
+    resolved = _resolve_rules(data_root, parsed)
+    squad_rules = resolved.squad
+    scoring = resolved.scoring
+    if not resolved.exact:
+        typer.secho(f"  note: {resolved.caveat}", fg=typer.colors.YELLOW)
 
     trained = None
     if model_path is not None:
@@ -2014,7 +2081,10 @@ def score(
     deadlines = gameweek_deadlines(all_stats).filter(pl.col("season") == str(parsed))
     deadline_by_gw = {int(r["gameweek_id"]): r["deadline"] for r in deadlines.iter_rows(named=True)}
 
-    scoring = _load_context(data_root, parse_season(DEFAULT_SEASON)).scoring
+    resolved = _resolve_rules(data_root, parsed)
+    scoring = resolved.scoring
+    if not resolved.exact:
+        typer.secho(f"  note: {resolved.caveat}", fg=typer.colors.YELLOW)
 
     trained = None
     if model_path is not None:

@@ -55,6 +55,7 @@ from xg_alonso.contracts.discovery import (
 )
 from xg_alonso.contracts.objective import ObjectiveBundle
 from xg_alonso.contracts.provenance import utc_now
+from xg_alonso.contracts.seeds import ROOT_SEED
 from xg_alonso.discovery.acceptance import (
     DEFAULT_POLICY,
     AcceptancePolicy,
@@ -251,7 +252,7 @@ class ExperimentConfig:
     policy: AcceptancePolicy = DEFAULT_POLICY
     max_hypotheses: int = 8
     cluster_k: int = 5
-    seed: int = 20260727
+    seed: int = ROOT_SEED
     run_controls: bool = True
     """Fit the noise and shuffled controls. Expensive, and the thing that turns
     'this helped' into 'this helped more than adding any column would have'."""

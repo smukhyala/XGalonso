@@ -42,6 +42,7 @@ import numpy as np
 import polars as pl
 
 from xg_alonso.contracts.folds import WalkForwardFold
+from xg_alonso.contracts.seeds import ROOT_SEED
 
 __all__ = [
     "ALL_POSITIONS",
@@ -414,7 +415,7 @@ def permutation_importance(
     folds: tuple[WalkForwardFold, ...] = (),
     fold_index: int = 0,
     n_repeats: int = 5,
-    seed: int = 20260727,
+    seed: int = ROOT_SEED,
     features: tuple[str, ...] | None = None,
     position: str = ALL_POSITIONS,
 ) -> ImportanceTable:
