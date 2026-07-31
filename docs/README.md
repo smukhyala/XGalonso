@@ -205,6 +205,22 @@ gains no new dependency and needs no credential. Where a model is used it emits
 locally — never code, and a proposal that fails to parse is dropped rather than
 repaired.
 
+**One of those three reads outside the FPL API, and D6 says nothing may.**
+The team-news sweep (`interpreter/news.py`) calls Anthropic's `web_search`
+tool, so it reads press coverage and match reports, and that tool is a paid API
+feature. D6 reads *"Official FPL API only, zero budget. No scraping, no paid
+providers."* The sweep is not a scraper — there is no crawler and no
+site-specific parsing — but "official FPL API only" it plainly is not.
+
+This is recorded rather than resolved because the two halves were decided
+separately: the owner kept form signals and the LLM extras, and separately
+declined the D6 relaxation that would have permitted a non-FPL source. The
+feature is off by default, needs an explicit extra and a key, and can only
+scale an existing projection within a ±15% clamp with a source URL attached —
+so nothing silently depends on it. **It still needs an owner decision**: either
+D6 gains a stated exception for the sweep, or the sweep goes. Until then, no
+document here should be read as claiming the running system is D6-clean.
+
 **Form signals are a bounded human channel.** `.data/signals/form_signals.json`
 scales a projection by at most ±15%, requires a source URL, expires, and is
 evaluated against the *deadline* rather than the wall clock so a backtest sees
