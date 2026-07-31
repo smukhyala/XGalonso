@@ -74,6 +74,7 @@ from xg_alonso.prediction.adjustments import adjust_predictions
 from xg_alonso.prediction.baseline import predict_frame
 from xg_alonso.prediction.beliefs import BeliefAdjustment, apply_beliefs
 from xg_alonso.prediction.form import load_signals
+from xg_alonso.prediction.gameweek import collapse_by_player
 from xg_alonso.prediction.inference import predict_with_models
 from xg_alonso.prediction.trained import ComponentModels
 
@@ -552,7 +553,7 @@ def recommend(
         signals=load_signals(form_signals_path or _DEFAULT_SIGNALS),
         at=cutoff,
     )
-    by_code = {p.player_code: p for p in predictions}
+    by_code = collapse_by_player(predictions)
 
     # Unavailable players are excluded from the buy list rather than penalised.
     # Recommending an injured player is a category error, not a scoring nuance.

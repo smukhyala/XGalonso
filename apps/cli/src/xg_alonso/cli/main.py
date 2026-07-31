@@ -55,6 +55,7 @@ from xg_alonso.pipelines.normalization import (
     normalize_element_summary,
     normalize_history_past,
 )
+from xg_alonso.prediction.gameweek import collapse_by_player
 from xg_alonso.storage import FileSystemBronzeStore, ParquetTableStore
 
 app = typer.Typer(
@@ -1065,7 +1066,7 @@ def backtest(
             code_version="backtest",
             feature_set_version="slice1_v1",
         )
-        by_code = {p.player_code: p for p in predictions}
+        by_code = collapse_by_player(predictions)
         candidates = [
             Candidate(
                 player_code=p.player_code,
@@ -1136,7 +1137,7 @@ def backtest(
             feature_set_version=CATALOGUE_VERSION,
             shrink_by_skill=shrink,
         )
-        by_code = {p.player_code: p for p in predictions}
+        by_code = collapse_by_player(predictions)
         candidates = [
             Candidate(
                 player_code=p.player_code,
@@ -1767,7 +1768,7 @@ def build_squad_command(
         models = load_models(model_path).models
 
     predictions = _predict_all(context, gameweek, models)
-    by_code = {p.player_code: p for p in predictions}
+    by_code = collapse_by_player(predictions)
 
     available = {
         int(r["player_code"]): r
