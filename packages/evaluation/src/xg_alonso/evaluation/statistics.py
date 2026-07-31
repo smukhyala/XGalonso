@@ -183,8 +183,8 @@ def bootstrap_mean(
         for _ in range(resamples):
             drawn: list[float] = []
             for _ in range(len(keys)):
-                block = grouped[rng.choice(keys)]
-                drawn.extend(rng.choice(block) for _ in range(len(block)))
+                sampled = grouped[rng.choice(keys)]
+                drawn.extend(rng.choice(sampled) for _ in range(len(sampled)))
             means.append(statistics.fmean(drawn))
     else:
         size = len(values)
