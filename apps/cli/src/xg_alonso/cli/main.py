@@ -987,6 +987,149 @@ def backfill(
         typer.echo(f"  {players_history.height:,} player-seasons -> {players_dest}")
 
 
+evaluate_app = typer.Typer(
+    name="evaluate",
+    help="Multi-season, multi-squad policy evaluation.",
+    no_args_is_help=True,
+)
+app.add_typer(evaluate_app)
+
+
+@evaluate_app.command("check")
+def evaluate_check(
+    preset: Annotated[str, typer.Option("--preset", help="smoke, legacy or full.")] = "smoke",
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    model_path: Annotated[
+        Path | None, typer.Option("--model", help="Artifact to freeze-check.")
+    ] = None,
+) -> None:
+    """Run the freeze assertions and stop.
+
+    These guard failures that produce *better*-looking numbers — a model
+    trained on the season it is evaluated over does not crash, it wins — so
+    they are worth running before an experiment rather than after it.
+    """
+    from xg_alonso.contracts.evaluation import PRESETS
+    from xg_alonso.evaluation.frozen import FreezeViolation, assert_frozen
+    from xg_alonso.prediction import load_models
+
+    config = PRESETS.get(preset)
+    if config is None:
+        raise typer.BadParameter(f"unknown preset {preset!r}; expected one of {sorted(PRESETS)}")
+
+    models: dict[str, Any] = {spec.name: None for spec in config.models}
+    if model_path is not None:
+        saved = load_models(model_path)
+        for spec in config.models:
+            if spec.artifact_path is not None or spec.name != "closed_form":
+                models[spec.name] = saved
+
+    typer.echo(f"  {config.experiment_id}")
+    typer.echo(f"  seasons: {', '.join(config.evaluation_seasons)}")
+    try:
+        checks = assert_frozen(config, models=models)
+    except FreezeViolation as exc:
+        typer.secho(f"\n  FROZEN CHECK FAILED\n  {exc}", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo("")
+    for check in checks:
+        colour = typer.colors.GREEN if check.passed else typer.colors.YELLOW
+        typer.secho(f"  {check.row()}", fg=colour)
+    typer.echo(f"\n  {sum(c.passed for c in checks)}/{len(checks)} checks passed")
+
+
+@evaluate_app.command("plan")
+def evaluate_plan(
+    preset: Annotated[str, typer.Option("--preset", help="smoke, legacy or full.")] = "smoke",
+    squads: Annotated[int, typer.Option("--squads", help="How many starting squads.")] = 1,
+) -> None:
+    """Show what an experiment would run, without running any of it.
+
+    The unit list is pure and total, so the cost of a grid is knowable before
+    committing to it.
+    """
+    from xg_alonso.contracts.evaluation import PRESETS
+    from xg_alonso.evaluation.runner import plan_units
+
+    config = PRESETS.get(preset)
+    if config is None:
+        raise typer.BadParameter(f"unknown preset {preset!r}; expected one of {sorted(PRESETS)}")
+
+    units = plan_units(config, [f"squad-{i}" for i in range(squads)])
+    by_policy: dict[str, int] = {}
+    for unit in units:
+        by_policy[unit.policy] = by_policy.get(unit.policy, 0) + 1
+
+    typer.echo(f"  {config.experiment_id}")
+    typer.echo(f"  seasons     {', '.join(config.evaluation_seasons)}")
+    typer.echo(f"  conditions  {len({u.condition for u in units})}")
+    typer.echo(f"  units       {len(units)}\n")
+    for policy, count in sorted(by_policy.items(), key=lambda kv: -kv[1]):
+        note = "  (replicated: stochastic)" if count > len(units) // len(by_policy) else ""
+        typer.echo(f"    {policy:<18}{count:>5}{note}")
+
+
+@evaluate_app.command("status")
+def evaluate_status(
+    experiment_id: Annotated[str, typer.Argument(help="Experiment directory name.")],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+) -> None:
+    """How far along an experiment is, from its run files alone."""
+    directory = data_root / "experiments" / experiment_id
+    if not directory.exists():
+        raise typer.BadParameter(f"no experiment at {directory}")
+
+    manifest_path = directory / "manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        typer.echo(f"  {manifest['experiment_id']}")
+        typer.echo(f"  {manifest['runs_completed']}/{manifest['runs_planned']} runs")
+        typer.echo(f"  reproducible: {'yes' if manifest['reproducible'] else 'no'}")
+        for item in manifest.get("limitations", []):
+            typer.echo(f"    ! {item}")
+    else:
+        completed = len(list((directory / "runs").glob("*.json")))
+        typer.echo(f"  {completed} run(s) recorded, no manifest yet")
+
+
+@evaluate_app.command("report")
+def evaluate_report(
+    experiment_id: Annotated[str, typer.Argument(help="Experiment directory name.")],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+) -> None:
+    """Re-render every artifact from the run files.
+
+    Nothing accumulates: the aggregate, the comparisons and the summary are
+    recomputed each time, so a resumed experiment cannot emit a
+    half-aggregated report that reads as complete.
+    """
+    from xg_alonso.contracts.evaluation import ExperimentConfig
+    from xg_alonso.evaluation.experiment_report import (
+        build_report,
+        generate_limitations,
+        load_runs,
+        write_report,
+    )
+
+    directory = data_root / "experiments" / experiment_id
+    config_path = directory / "config.json"
+    if not config_path.exists():
+        raise typer.BadParameter(f"no config at {config_path}")
+
+    config = ExperimentConfig.model_validate_json(config_path.read_text())
+    runs = load_runs(directory)
+    if not runs:
+        raise typer.BadParameter(f"no completed runs under {directory}")
+
+    limitations = generate_limitations(config, runs)
+    report = build_report(config, runs, limitations=limitations)
+    written = write_report(directory, report)
+
+    typer.echo((directory / "summary.md").read_text())
+    typer.echo(f"  wrote {', '.join(sorted(written))} -> {directory}")
+
+
 @app.command()
 def backtest(
     season: Annotated[

@@ -110,7 +110,10 @@ def _train_seasons_precede_test(
         for trained in saved.trained_seasons:
             later = sorted(s for s in seasons if trained >= s)
             if later:
-                offences.append(f"{name} trained on {trained}, evaluated on {later}")
+                offences.append(
+                    f"model {name!r} was fitted on {trained}, which is not before "
+                    f"the evaluated season(s) {later}"
+                )
     return FreezeCheck(
         name="train_seasons_precede_test",
         passed=not offences,
