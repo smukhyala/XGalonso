@@ -33,7 +33,7 @@ we do not know.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -118,7 +118,7 @@ def correction_for(price: int) -> PriceBandCorrection | None:
 
 def apply_price_calibration(
     predictions: Sequence[PlayerPrediction],
-    prices: dict[PlayerCode, TenthsOfMillion],
+    prices: Mapping[PlayerCode, TenthsOfMillion],
 ) -> list[PlayerPrediction]:
     """Add back each band's measured under-projection, and widen where blind.
 

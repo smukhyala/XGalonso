@@ -70,9 +70,10 @@ from xg_alonso.pipelines.normalization import (
     normalize_players,
     normalize_teams,
 )
+from xg_alonso.prediction.adjustments import adjust_predictions
 from xg_alonso.prediction.baseline import predict_frame
 from xg_alonso.prediction.beliefs import BeliefAdjustment, apply_beliefs
-from xg_alonso.prediction.form import apply_form_signals, load_signals
+from xg_alonso.prediction.form import load_signals
 from xg_alonso.prediction.inference import predict_with_models
 from xg_alonso.prediction.trained import ComponentModels
 
@@ -531,12 +532,25 @@ def recommend(
             feature_set_version=SLICE1_FEATURE_SET_VERSION,
             horizon_gameweeks=horizon_gameweeks,
         )
-    # Outside information the API cannot see — a poor international tournament,
-    # a public fallout — scaled within a hard clamp and only where a sourced
-    # signal exists. Evaluated against the deadline rather than the wall clock,
-    # so a backtest sees what was live then.
-    predictions = apply_form_signals(
-        predictions, load_signals(form_signals_path or _DEFAULT_SIGNALS), at=cutoff
+    # Every adjustment, in the one settled order, through the same function the
+    # API and `_predict_all` call. This path previously applied form signals
+    # alone: a doubtful player was scored as fully fit and the measured
+    # premium-price bias went uncorrected, so `xg recommend` and `xg plan`
+    # disagreed about the same squad. Signals are evaluated against the deadline
+    # rather than the wall clock, so a backtest sees what was live then.
+    predictions = adjust_predictions(
+        predictions,
+        prices={
+            PlayerCode(int(r["player_code"])): TenthsOfMillion(int(r["current_price"]))
+            for r in context.players.iter_rows(named=True)
+            if r.get("current_price") is not None
+        },
+        chances={
+            PlayerCode(int(r["player_code"])): r.get("chance_of_playing_next_round")
+            for r in context.players.iter_rows(named=True)
+        },
+        signals=load_signals(form_signals_path or _DEFAULT_SIGNALS),
+        at=cutoff,
     )
     by_code = {p.player_code: p for p in predictions}
 

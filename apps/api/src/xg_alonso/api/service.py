@@ -75,9 +75,9 @@ from xg_alonso.optimization.objective import ObjectiveContext, objective_valued
 from xg_alonso.pipelines.ingestion import SOURCE_BOOTSTRAP, SOURCE_FIXTURES, FplApiClient
 from xg_alonso.pipelines.normalization import PLAYER_GAMEWEEK_STATS_SCHEMA, empty_frame
 from xg_alonso.prediction import load_models, predict_with_models
+from xg_alonso.prediction.adjustments import adjust_predictions
 from xg_alonso.prediction.baseline import predict_frame
-from xg_alonso.prediction.calibration import apply_price_calibration
-from xg_alonso.prediction.form import apply_form_signals, form_reason, load_signals
+from xg_alonso.prediction.form import form_reason, load_signals
 from xg_alonso.storage import FileSystemBronzeStore
 
 if TYPE_CHECKING:
@@ -225,24 +225,24 @@ class DecisionService:
                 feature_set_version=SLICE1_FEATURE_SET_VERSION,
             )
 
-        # Correct the model's measured under-projection of expensive players
-        # before anything downstream reads a number. Left uncorrected it makes
-        # the optimizer bank money rather than upgrade, because the players a
-        # budget would be spent on are exactly the ones scored too low.
+        # Every adjustment, in the one settled order. Applied here rather than
+        # in each endpoint so `/players`, `/squad` and `/build-squad` cannot
+        # disagree about the same player — and routed through
+        # `prediction.adjustments` so this surface cannot disagree with the two
+        # CLI paths either, which is the wider version of the same failure this
+        # module's header already records once.
         rows = self._player_rows()
-        prices = {
-            PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
-            for code, row in rows.items()
-        }
-        predictions = apply_price_calibration(predictions, prices)
-
-        # Outside information, applied here rather than in each endpoint so that
-        # `/players`, `/squad` and `/build-squad` cannot disagree with each
-        # other about the same player — the failure mode this module's header
-        # already records once.
-        predictions = apply_form_signals(
+        predictions = adjust_predictions(
             predictions,
-            load_signals(self._config.data_root / "signals" / "form_signals.json"),
+            prices={
+                PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
+                for code, row in rows.items()
+            },
+            chances={
+                PlayerCode(code): row.get("chance_of_playing_next_round")
+                for code, row in rows.items()
+            },
+            signals=load_signals(self._config.data_root / "signals" / "form_signals.json"),
             at=cutoff,
         )
 

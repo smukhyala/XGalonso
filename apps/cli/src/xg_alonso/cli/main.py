@@ -1881,31 +1881,35 @@ def _predict_all(  # type: ignore[no-untyped-def]
     def _temper(predictions: list[Any]) -> list[Any]:
         """Apply what is known about a player beyond the model's features.
 
-        Two adjustments, in order of authority. FPL's published chance of
-        playing is the game's own statement and is applied in full; a form
-        signal is somebody's reading of a match report and is clamped. Both were
-        already available and neither reached this path — a doubtful player was
-        scored as fully fit here while the recommend path knew better, which is
-        the kind of divergence nobody can explain after the fact.
-        """
-        from xg_alonso.prediction.availability import apply_availability
-        from xg_alonso.prediction.form import apply_form_signals, load_signals
+        Delegates to `prediction.adjustments` so this path, `xg recommend` and
+        the API apply the same adjustments in the same order. They previously
+        did not, and the divergence was invisible: the same team id produced
+        three different projections depending on which surface was asked.
 
+        Price calibration and availability come from the payload already loaded,
+        so they always apply. Signals need a file, so without a data root they
+        are simply absent rather than the whole adjustment being skipped.
+        """
+        from xg_alonso.prediction.adjustments import adjust_predictions
+        from xg_alonso.prediction.form import load_signals
+
+        rows = list(context.players.iter_rows(named=True))
+        prices = {
+            PlayerCode(int(row["player_code"])): TenthsOfMillion(int(row["current_price"]))
+            for row in rows
+            if row.get("current_price") is not None
+        }
         chances = {
             PlayerCode(int(row["player_code"])): row.get("chance_of_playing_next_round")
-            for row in context.players.iter_rows(named=True)
+            for row in rows
         }
-        tempered = apply_availability(predictions, chances)
-
-        # Availability always applies — it comes from the payload already
-        # loaded. Signals need a file, so without a data root they are simply
-        # absent rather than the whole adjustment being skipped.
-        if data_root is None:
-            return tempered
-        return apply_form_signals(
-            tempered,
-            load_signals(data_root / "signals" / "form_signals.json"),
-            at=cutoff,
+        signals = (
+            load_signals(data_root / "signals" / "form_signals.json")
+            if data_root is not None
+            else None
+        )
+        return adjust_predictions(
+            predictions, prices=prices, chances=chances, signals=signals, at=cutoff
         )
 
     if models is not None:
