@@ -22,6 +22,9 @@ from pathlib import Path
 import pytest
 
 from xg_alonso.contracts.evaluation import (
+    FULL_GRID,
+    LEGACY_HEADLINE,
+    SMOKE,
     EvaluationWindow,
     ExperimentConfig,
     ModelSpec,
@@ -101,18 +104,36 @@ class TestPlanning:
         assert by_policy["random"] == 2 * 5
 
     def test_the_declared_stochastic_set_matches_the_selectors(self) -> None:
-        """Guards the saving: a policy that varies must not be collapsed."""
+        """Guards the saving: a policy that varies must not be collapsed.
+
+        Checked against the *shipped* presets, not the three-policy fixture in
+        this file. Iterating `_POLICIES` asserted only that the fixture the
+        test author wrote is self-consistent — which it is by construction —
+        and could never have caught a production policy being mislabelled.
+        """
         deterministic = {
             PolicyKind.MODEL,
             PolicyKind.HIGHEST_FORM,
             PolicyKind.MOST_EXPENSIVE,
             PolicyKind.HOLD,
         }
-        for policy in _POLICIES:
+        stochastic = {PolicyKind.RANDOM}
+
+        shipped = {p.name: p for c in (SMOKE, LEGACY_HEADLINE, FULL_GRID) for p in c.policies}
+        assert shipped, "no shipped policies to check"
+
+        for policy in shipped.values():
             if policy.selector in deterministic:
                 assert not policy.stochastic, (
                     f"{policy.name} is declared stochastic but its selector "
-                    "ignores the generator; replicates would be identical"
+                    "ignores the generator; its replicates would be identical "
+                    "and would put copies of one number into the sample"
+                )
+            if policy.selector in stochastic:
+                assert policy.stochastic, (
+                    f"{policy.name} draws from the generator but is declared "
+                    "deterministic, so `plan_units` would collapse it to one "
+                    "replicate and the spread would go unmeasured"
                 )
 
     def test_planning_is_pure_and_repeatable(self) -> None:

@@ -43,7 +43,7 @@ from xg_alonso.contracts.identifiers import (
 from xg_alonso.contracts.prediction import PlayerPrediction, Position
 from xg_alonso.contracts.squad import SquadPick, SquadState
 from xg_alonso.domain.constraints import check_squad
-from xg_alonso.domain.rules import SquadRules
+from xg_alonso.domain.rules import PositionRule, SquadRules
 from xg_alonso.optimization.lineup import starting_xi_points
 
 __all__ = [
@@ -193,16 +193,49 @@ def _greedy_fill(
     budget = int(rules.total_budget)
     club_count: dict[int, int] = {}
     chosen: dict[str, list[Mapping[str, Any]]] = {}
-    remaining_slots = sum(r.squad_select for r in rules.positions)
     spend = 0
 
-    for rule in sorted(rules.positions, key=lambda r: -r.squad_select):
+    ordered = sorted(rules.positions, key=lambda r: -r.squad_select)
+
+    # Cheapest available price per position, so the reserve held back for
+    # unfilled slots is priced by the positions that will actually fill them.
+    #
+    # This used one number — the cheapest player in the *current* position's
+    # pool — for every remaining slot regardless of which position it belonged
+    # to. On a cheap position that understates the reserve and the fill
+    # overspends, failing on a later position that a legal squad could have
+    # afforded; on an expensive one it overstates and rejects players it could
+    # have taken. Either way the error is silent until a `ValueError` several
+    # positions later.
+    floor_by_position: dict[str, int] = {}
+    for rule in ordered:
+        prices = [
+            int(v)
+            for v in players.filter(pl.col("position") == rule.position.value)["current_price"]
+            if v is not None
+        ]
+        # 40 is the cheapest price FPL has ever listed. Used only when a
+        # position has no players at all, where any floor is arbitrary and the
+        # fill is about to fail anyway.
+        floor_by_position[rule.position.value] = min(prices, default=40)
+
+    def reserve(
+        after: Sequence[PositionRule], filled_in_current: int, current: PositionRule
+    ) -> int:
+        """Minimum cost of every slot still unfilled, priced per position."""
+        still_here = current.squad_select - filled_in_current
+        total: int = still_here * floor_by_position[current.position.value]
+        for later in after:
+            total += later.squad_select * floor_by_position[later.position.value]
+        return total
+
+    for index, rule in enumerate(ordered):
+        later_rules = ordered[index + 1 :]
         pool = list(
             players.filter(pl.col("position") == rule.position.value)
             .sort(order_by, descending=descending)
             .iter_rows(named=True)
         )
-        cheapest = min((int(r["current_price"]) for r in pool), default=40)
         picked: list[Mapping[str, Any]] = []
         for row in pool:
             if len(picked) == rule.squad_select:
@@ -211,8 +244,8 @@ def _greedy_fill(
             if club_count.get(team, 0) >= rules.max_per_club:
                 continue
             price = int(row["current_price"])
-            slots_after = remaining_slots - len(picked) - 1
-            if spend + price + slots_after * cheapest > budget:
+            # Slots left *after* taking this one.
+            if spend + price + reserve(later_rules, len(picked) + 1, rule) > budget:
                 continue
             club_count[team] = club_count.get(team, 0) + 1
             picked.append(row)
@@ -222,7 +255,6 @@ def _greedy_fill(
                 f"could not fill {rule.position.value} within budget; only "
                 f"{len(picked)} of {rule.squad_select} affordable"
             )
-        remaining_slots -= rule.squad_select
         chosen[rule.position.value] = picked
     return chosen
 
