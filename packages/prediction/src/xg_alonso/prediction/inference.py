@@ -13,14 +13,23 @@ meaningless while looking entirely normal.
 
 from __future__ import annotations
 
+import hashlib
 import pickle
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import polars as pl
 
+from xg_alonso.contracts.artifacts import (
+    ArtifactCompatibility,
+    ArtifactIncompatibility,
+    ArtifactManifest,
+    ArtifactStatus,
+    CompatibilityReason,
+    Severity,
+)
 from xg_alonso.contracts.evidence import FeatureEvidence
 from xg_alonso.contracts.identifiers import GameweekId, PlayerCode
 from xg_alonso.contracts.prediction import (
@@ -29,8 +38,18 @@ from xg_alonso.contracts.prediction import (
     PlayerPrediction,
     Position,
 )
-from xg_alonso.contracts.provenance import PredictionProvenance
+from xg_alonso.contracts.provenance import PredictionProvenance, utc_now
 from xg_alonso.domain.scoring import ScoringRules, assemble_points
+from xg_alonso.prediction.artifacts import (
+    ActiveSchema,
+    ArtifactCompatibilityError,
+    check_compatibility,
+    load_quietly,
+    manifest_path_for,
+    payload_digest,
+    read_manifest,
+    write_manifest,
+)
 from xg_alonso.prediction.evidence import build_feature_evidence
 from xg_alonso.prediction.trained import (
     TRAINED_MODEL_NAME,
@@ -56,6 +75,21 @@ class SavedModel:
     trained_seasons: tuple[str, ...]
     trained_gameweeks: tuple[int, ...]
     saved_at: datetime
+    manifest: ArtifactManifest | None = None
+    """Provenance, also written beside the file as a sidecar.
+
+    Appended with a default so a pickle written before this field existed
+    restores into the new class and simply reports ``None`` rather than raising
+    an AttributeError from inside a prediction loop.
+    """
+    compatibility: ArtifactCompatibility | None = None
+    """The verdict from *this* load. Describes the check, not the artifact, so
+    it is excluded from persistence."""
+
+    def __getstate__(self) -> dict[str, object]:
+        state = dict(self.__dict__)
+        state["compatibility"] = None
+        return state
 
     def overlaps(self, season: str, gameweeks: tuple[int, ...]) -> bool:
         """Whether this model was fitted on any of the given gameweeks.
@@ -69,11 +103,48 @@ class SavedModel:
         return bool(set(gameweeks) & set(self.trained_gameweeks))
 
 
-def save_models(saved: SavedModel, path: Path) -> None:
-    """Persist a fitted model and its provenance."""
+def save_models(saved: SavedModel, path: Path, *, manifest: ArtifactManifest | None = None) -> Path:
+    """Persist a fitted model, and write its manifest beside it.
+
+    The manifest is written **twice**: as a sidecar and embedded in the pickle.
+    The sidecar is the point — reading provenance must not execute code, and
+    unpickling an unknown file to find out whether it is safe to unpickle is
+    not a strategy. The embedded copy exists because a sidecar can be lost when
+    somebody copies a ``.pkl`` around, and an artifact that cannot describe
+    itself is exactly the failure being fixed.
+
+    They are tied together by ``payload_sha256``, so a disagreement means one
+    of the two was modified or half-written.
+
+    Returns:
+        The sidecar path, or the artifact path when no manifest was supplied.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as handle:
-        pickle.dump(saved, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    embedded = replace(saved, manifest=manifest, compatibility=None)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("wb") as handle:
+        pickle.dump(embedded, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    if manifest is None:
+        tmp.replace(path)
+        return path
+
+    # Hash the written bytes, then record that hash in the sidecar. The
+    # embedded copy cannot contain its own digest, so the sidecar is the one
+    # that carries it and the one the gate compares against.
+    digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
+    tmp.replace(path)
+    write_manifest(
+        path,
+        replace_manifest(manifest, payload_sha256=digest, payload_bytes=path.stat().st_size),
+    )
+    return manifest_path_for(path)
+
+
+def replace_manifest(manifest: ArtifactManifest, **updates: object) -> ArtifactManifest:
+    """A manifest with fields replaced. Frozen models need a copy, not a set."""
+    return manifest.model_copy(update=updates)
 
 
 #: Attributes a usable artifact must carry. Checked on load so an artifact
@@ -87,18 +158,59 @@ _REQUIRED_ATTRIBUTES: tuple[str, ...] = (
 )
 
 
-def load_models(path: Path) -> SavedModel:
-    """Load a persisted model, rejecting anything unusable.
+def load_models(
+    path: Path,
+    *,
+    active: ActiveSchema | None = None,
+    require_manifest: bool = False,
+    on_incompatible: Literal["raise", "warn", "ignore"] = "raise",
+) -> SavedModel:
+    """Load a persisted model, refusing anything unusable.
+
+    The compatibility gate runs against the sidecar manifest — plain JSON —
+    **before** ``pickle.load`` is called, so a schema mismatch can never first
+    surface as a ``KeyError`` from inside a prediction loop, or as a
+    scikit-learn arity error from three frames deeper.
+
+    Args:
+        active: What the current build can supply. Without it only the
+            structural checks run, which is the behaviour every existing caller
+            had.
+        require_manifest: Treat an absent sidecar as blocking. Off by default:
+            the artifacts already on disk predate manifests and still work.
+        on_incompatible: ``raise`` refuses, ``warn`` reports and continues,
+            ``ignore`` says nothing. Refusing is the default because a silently
+            wrong prediction is worse than a loud failure.
 
     Raises:
-        TypeError: if the file does not hold a :class:`SavedModel`. Unpickling
+        TypeError: if the file does not hold a ``SavedModel``. Unpickling
             arbitrary objects and hoping is not a loading strategy.
         ValueError: if the artifact predates a field the current code needs.
-            Pickle happily restores an object missing attributes added since it
-            was written, and the failure would otherwise surface much later.
+        ArtifactCompatibilityError: if it cannot be used with the active
+            catalogue and rules.
     """
-    with path.open("rb") as handle:
-        loaded = pickle.load(handle)
+    manifest = read_manifest(path)
+
+    if manifest is None and require_manifest:
+        _refuse(
+            path,
+            CompatibilityReason.MANIFEST_ABSENT,
+            f"{path.name} has no manifest. Re-save it with "
+            "`xg models backfill-manifest`, or retrain with `xg train`.",
+        )
+
+    # Gate on the manifest alone, before any code from the file is executed.
+    if manifest is not None and active is not None:
+        verdict = check_compatibility(
+            manifest,
+            active=active,
+            artifact_path=path,
+            payload_sha256=payload_digest(path),
+        )
+        if not verdict.compatible and on_incompatible == "raise":
+            raise ArtifactCompatibilityError(verdict)
+
+    loaded, version_warnings = load_quietly(path)
     if not isinstance(loaded, SavedModel):
         raise TypeError(f"{path} does not contain a SavedModel (got {type(loaded).__name__})")
 
@@ -108,7 +220,43 @@ def load_models(path: Path) -> SavedModel:
             f"{path} was saved by an older version and is missing {missing}. "
             "Retrain with `xg train` rather than using a stale artifact."
         )
+
+    if active is not None:
+        verdict = check_compatibility(
+            manifest,
+            active=active,
+            artifact_path=path,
+            artifact_feature_columns=loaded.models.feature_columns,
+            payload_sha256=payload_digest(path) if manifest else None,
+        )
+        if not verdict.compatible and on_incompatible == "raise":
+            raise ArtifactCompatibilityError(verdict)
+        if not verdict.compatible and on_incompatible == "warn":
+            print(verdict.explain())  # noqa: T201 - the caller asked to be told
+        loaded = replace(loaded, compatibility=verdict)
+
+    if version_warnings:
+        # Captured rather than raised: `filterwarnings = ["error"]` would
+        # otherwise turn a scikit-learn bump into an undiagnosable suite-wide
+        # failure at every artifact load.
+        print(  # noqa: T201
+            f"  note: {path.name} loaded with {len(version_warnings)} version warning(s)"
+        )
+
     return loaded
+
+
+def _refuse(path: Path, reason: CompatibilityReason, detail: str) -> None:
+    raise ArtifactCompatibilityError(
+        ArtifactCompatibility(
+            artifact_path=path,
+            status=ArtifactStatus.UNVERIFIED,
+            checked_at=utc_now(),
+            findings=(
+                ArtifactIncompatibility(reason=reason, severity=Severity.BLOCKING, detail=detail),
+            ),
+        )
+    )
 
 
 #: Days of inactivity beyond which the last match stops describing the next one.

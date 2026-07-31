@@ -987,6 +987,253 @@ def backfill(
         typer.echo(f"  {players_history.height:,} player-seasons -> {players_dest}")
 
 
+models_app = typer.Typer(
+    name="models",
+    help="Inspect, verify and audit saved model artifacts.",
+    no_args_is_help=True,
+)
+app.add_typer(models_app)
+
+
+def _manifest_for(saved: Any, path: Path, data_root: Path, season: Season) -> Any:
+    """Assemble a manifest from every layer that owns part of it.
+
+    `contracts` carries provenance and never computes it, so the catalogue hash
+    comes from `features`, the rules hash from `domain` and the data hash from
+    `storage`. This is the one place all three are in scope.
+    """
+    import platform
+
+    from xg_alonso.contracts.artifacts import (
+        ArtifactManifest,
+        ComponentMetrics,
+        RuntimeVersions,
+    )
+    from xg_alonso.domain.scoring import rules_snapshot_hash
+    from xg_alonso.features.catalogue import CATALOGUE_VERSION
+    from xg_alonso.features.schema import catalogue_hash
+    from xg_alonso.prediction.trained import TRAINED_MODEL_NAME, TRAINED_MODEL_VERSION
+    from xg_alonso.storage.training_manifest import training_data_manifest_hash
+
+    resolved = _resolve_rules(data_root, season)
+    skill = saved.models.skill_by_label()
+    bias = saved.models.mean_bias_by_label()
+    degenerate = set(saved.models.degenerate_labels())
+
+    data_hash = ""
+    silver = data_root / "silver" / "player_gameweek_stats.parquet"
+    if silver.exists():
+        data_hash, _ = training_data_manifest_hash(silver_path=silver)
+
+    return ArtifactManifest(
+        model_type=TRAINED_MODEL_NAME,
+        model_name=path.stem,
+        model_version=TRAINED_MODEL_VERSION,
+        created_at=saved.saved_at,
+        code_version=_git_commit(),
+        runtime=RuntimeVersions(python=platform.python_version()),
+        feature_catalogue_version=CATALOGUE_VERSION,
+        feature_catalogue_hash=catalogue_hash(),
+        feature_names=tuple(saved.models.feature_columns),
+        feature_count=len(saved.models.feature_columns),
+        dropped_features=tuple(getattr(saved.models, "dropped_features", ()) or ()),
+        rules_snapshot_hash=rules_snapshot_hash(resolved.scoring, resolved.squad),
+        scoring_rules_version=resolved.scoring.version,
+        training_data_manifest_hash=data_hash,
+        training_seasons=tuple(saved.trained_seasons),
+        training_gameweeks=tuple(saved.trained_gameweeks),
+        training_rows=saved.models.trained_on_rows,
+        component_metrics=tuple(
+            ComponentMetrics(
+                label=label,
+                mean_skill=round(value, 6),
+                mean_bias=round(bias.get(label, 0.0), 6),
+                degenerate=label in degenerate,
+                label_mean=round(saved.models.label_means.get(label, 0.0), 6),
+                folds=len(saved.models.folds),
+            )
+            for label, value in sorted(skill.items())
+        ),
+        label_columns=tuple(sorted(saved.models.models)),
+        model_fingerprint=saved.models.fingerprint(),
+    )
+
+
+def _git_commit() -> str:
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10, check=True
+        ).stdout.strip()
+    except Exception:
+        return ""
+
+
+@models_app.command("list")
+def models_list(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    show_all: Annotated[
+        bool, typer.Option("--all", help="Include artifacts that cannot be used.")
+    ] = False,
+) -> None:
+    """Every artifact and whether it can be used with the active build."""
+    from xg_alonso.prediction.artifacts import ActiveSchema, read_manifest
+
+    active = ActiveSchema.from_catalogue()
+    paths = sorted((data_root / "models").glob("*.pkl"))
+    if not paths:
+        typer.echo(f"  no artifacts under {data_root / 'models'}")
+        return
+
+    typer.echo(
+        f"  active schema: {len(active.feature_names)} features, {active.catalogue_version}\n"
+    )
+    for path in paths:
+        verdict = _verify_one(path, active)
+        usable = verdict.compatible
+        if not usable and not show_all:
+            typer.secho(f"  {path.name:<58} {verdict.status}", fg=typer.colors.RED)
+            continue
+        colour = typer.colors.GREEN if usable else typer.colors.RED
+        manifest = read_manifest(path)
+        detail = "" if manifest else "  (no manifest)"
+        typer.secho(f"  {path.name:<58} {verdict.status}{detail}", fg=colour)
+
+
+def _verify_one(path: Path, active: Any) -> Any:
+    """Check one artifact without letting a refusal stop the listing."""
+    from xg_alonso.prediction.artifacts import (
+        ArtifactCompatibilityError,
+        check_compatibility,
+        payload_digest,
+        read_manifest,
+    )
+    from xg_alonso.prediction.inference import load_models
+
+    try:
+        manifest = read_manifest(path)
+    except ArtifactCompatibilityError as exc:
+        return exc.compatibility
+
+    try:
+        saved = load_models(path, on_incompatible="ignore")
+        columns: Any = saved.models.feature_columns
+    except Exception:
+        columns = None
+
+    return check_compatibility(
+        manifest,
+        active=active,
+        artifact_path=path,
+        artifact_feature_columns=columns,
+        payload_sha256=payload_digest(path) if manifest else None,
+    )
+
+
+@models_app.command("verify")
+def models_verify(
+    artifact: Annotated[Path, typer.Argument(help="Path to a .pkl artifact.")],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+) -> None:
+    """Explain in full whether one artifact can be used, and why not."""
+    from xg_alonso.prediction.artifacts import ActiveSchema
+
+    if not artifact.exists():
+        raise typer.BadParameter(f"no artifact at {artifact}")
+
+    verdict = _verify_one(artifact, ActiveSchema.from_catalogue())
+    typer.echo(verdict.explain())
+    if verdict.schema_diff is not None:
+        diff = verdict.schema_diff
+        typer.echo(
+            f"\n  needs {len(diff.expected_order)} features; "
+            f"{len(diff.missing)} unavailable, {len(diff.unexpected)} unused"
+        )
+    if not verdict.compatible:
+        raise typer.Exit(1)
+
+
+@models_app.command("backfill-manifest")
+def models_backfill_manifest(
+    artifact: Annotated[Path, typer.Argument(help="Path to a .pkl artifact.")],
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+) -> None:
+    """Write a manifest for an artifact saved before manifests existed.
+
+    A backfilled manifest is a *description*, never a certificate. Fields that
+    cannot be recovered — the git commit it was trained at, the data hash if
+    the silver table has since changed — are left empty rather than guessed,
+    and the compatibility check treats an empty hash as unknown rather than as
+    a pass.
+    """
+    from xg_alonso.prediction.artifacts import payload_digest, write_manifest
+    from xg_alonso.prediction.inference import load_models, replace_manifest
+
+    if not artifact.exists():
+        raise typer.BadParameter(f"no artifact at {artifact}")
+
+    saved = load_models(artifact, on_incompatible="ignore")
+    manifest = _manifest_for(saved, artifact, data_root, parse_season(season))
+    manifest = replace_manifest(
+        manifest,
+        artifact_version="artifact_manifest_v1",
+        payload_sha256=payload_digest(artifact),
+        payload_bytes=artifact.stat().st_size,
+    )
+    written = write_manifest(artifact, manifest)
+    typer.echo(
+        f"  {artifact.name}: {manifest.feature_count} features, "
+        f"trained on {', '.join(manifest.training_seasons) or 'unknown'}"
+    )
+    typer.echo(f"  wrote {written}")
+
+
+@models_app.command("audit")
+def models_audit(
+    data_root: DataRoot = DEFAULT_DATA_ROOT,
+    season: SeasonOpt = DEFAULT_SEASON,
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Write manifests. Off by default.")
+    ] = False,
+) -> None:
+    """Classify every artifact, and optionally give each one a manifest.
+
+    Dry by default. `.data` is gitignored, so a mistake here has no safety net,
+    and the expensive error is destroying provenance rather than failing to
+    write it.
+    """
+    from xg_alonso.prediction.artifacts import ActiveSchema
+
+    active = ActiveSchema.from_catalogue()
+    paths = sorted((data_root / "models").glob("*.pkl"))
+    if not paths:
+        typer.echo(f"  no artifacts under {data_root / 'models'}")
+        return
+
+    mode = "APPLY" if apply else "dry run — nothing will be written"
+    typer.echo(f"  auditing {len(paths)} artifact(s) [{mode}]\n")
+
+    counts: dict[str, int] = {}
+    for path in paths:
+        verdict = _verify_one(path, active)
+        counts[str(verdict.status)] = counts.get(str(verdict.status), 0) + 1
+        colour = typer.colors.GREEN if verdict.compatible else typer.colors.RED
+        typer.secho(f"  {path.name:<58} {verdict.status}", fg=colour)
+        for finding in verdict.blocking:
+            typer.secho(f"      {finding.reason}: {finding.detail[:100]}", fg=typer.colors.RED)
+
+        if apply and verdict.compatible:
+            models_backfill_manifest(path, data_root=data_root, season=season)
+
+    typer.echo("")
+    for status, count in sorted(counts.items()):
+        typer.echo(f"  {count:>3}  {status}")
+    if not apply:
+        typer.echo("\n  re-run with --apply to write manifests")
+
+
 evaluate_app = typer.Typer(
     name="evaluate",
     help="Multi-season, multi-squad policy evaluation.",
