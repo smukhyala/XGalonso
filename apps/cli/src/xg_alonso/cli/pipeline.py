@@ -19,12 +19,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, SupportsInt, cast
 
 import polars as pl
 
 from xg_alonso.contracts.identifiers import (
     EntryId,
+    FixtureId,
     GameweekId,
     PlayerCode,
     PlayerElementId,
@@ -35,6 +36,7 @@ from xg_alonso.contracts.identifiers import (
 from xg_alonso.contracts.objective import ObjectiveBundle
 from xg_alonso.contracts.prediction import PlayerPrediction, Position
 from xg_alonso.contracts.recommendation import TransferRecommendation
+from xg_alonso.contracts.schedule import GameweekSlate, TeamFixture
 from xg_alonso.contracts.squad import ChipState, ChipStatus, SquadPick, SquadState
 from xg_alonso.domain.constraints import check_squad, check_starting_xi
 from xg_alonso.domain.pricing import selling_price
@@ -189,47 +191,135 @@ def build_context(
     )
 
 
-def build_entities(context: SliceContext, *, cutoff: datetime) -> pl.DataFrame:
-    """One prediction row per player, all sharing the gameweek deadline as cutoff.
-
-    Carries the upcoming fixture when it is known. Fixtures are published well
-    in advance, so ``opponent_team_id`` and ``was_home`` are inputs available at
-    the deadline — only the result of the match is withheld.
-    """
-    entities = context.players.select(
-        "player_code", "position", "team_id", "current_price", "web_name", "status"
-    ).with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
-
-    fixtures = context.fixtures
-    if fixtures.is_empty():
-        return entities.with_columns(
-            pl.lit(None, dtype=pl.Int64).alias("opponent_team_id"),
-            pl.lit(None, dtype=pl.Boolean).alias("was_home"),
-        )
-
-    upcoming = fixtures.filter(~pl.col("finished").fill_null(False))
-    home = upcoming.select(
+def _team_fixtures(fixtures: pl.DataFrame) -> pl.DataFrame:
+    """Both sides of every fixture, one row per club per match."""
+    home = fixtures.select(
+        pl.col("id").alias("fixture_id")
+        if "id" in fixtures.columns
+        else pl.lit(None).alias("fixture_id"),
+        pl.col("gameweek_id"),
         pl.col("home_team_id").alias("team_id"),
         pl.col("away_team_id").alias("opponent_team_id"),
         pl.lit(True).alias("was_home"),
         pl.col("kickoff_time"),
     )
-    away = upcoming.select(
+    away = fixtures.select(
+        pl.col("id").alias("fixture_id")
+        if "id" in fixtures.columns
+        else pl.lit(None).alias("fixture_id"),
+        pl.col("gameweek_id"),
         pl.col("away_team_id").alias("team_id"),
         pl.col("home_team_id").alias("opponent_team_id"),
         pl.lit(False).alias("was_home"),
         pl.col("kickoff_time"),
     )
+    return pl.concat([home, away])
+
+
+def next_unplayed_gameweek(context: SliceContext) -> GameweekId | None:
+    """The lowest gameweek with an unplayed fixture, or ``None`` when none remain."""
+    fixtures = context.fixtures
+    if fixtures.is_empty() or "gameweek_id" not in fixtures.columns:
+        return None
+    upcoming = fixtures.filter(~pl.col("finished").fill_null(False))
+    if upcoming.is_empty():
+        return None
+    lowest = upcoming["gameweek_id"].drop_nulls().min()
+    # Polars types a min() as a union covering temporal columns; this one is an
+    # integer gameweek, so the narrowing is sound and stated once.
+    return GameweekId(int(cast(SupportsInt, lowest))) if lowest is not None else None
+
+
+def build_slate(context: SliceContext, gameweek: GameweekId) -> GameweekSlate:
+    """Every fixture in one gameweek, as a typed slate.
+
+    Deliberately *not* deduplicated by club. A club with two fixtures gets two
+    rows and a club with none gets zero, which is what makes a blank and a
+    double ordinary rather than special.
+    """
+    fixtures = context.fixtures
+    if fixtures.is_empty() or "gameweek_id" not in fixtures.columns:
+        return GameweekSlate(gameweek=gameweek, fixtures=())
+
+    week = _team_fixtures(fixtures.filter(pl.col("gameweek_id") == int(gameweek)))
+    rows: list[TeamFixture] = []
+    for index, row in enumerate(week.iter_rows(named=True)):
+        if row["team_id"] is None or row["opponent_team_id"] is None:
+            continue
+        rows.append(
+            TeamFixture(
+                fixture_id=FixtureId(
+                    int(row["fixture_id"]) if row["fixture_id"] is not None else index
+                ),
+                gameweek=gameweek,
+                team_id=TeamId(int(row["team_id"])),
+                opponent_team_id=TeamId(int(row["opponent_team_id"])),
+                was_home=bool(row["was_home"]),
+                kickoff_time=row["kickoff_time"],
+            )
+        )
+    return GameweekSlate(gameweek=gameweek, fixtures=tuple(rows))
+
+
+def build_entities(
+    context: SliceContext, *, cutoff: datetime, gameweek: GameweekId | None = None
+) -> pl.DataFrame:
+    """One prediction row per player **per fixture**, sharing the deadline as cutoff.
+
+    A club playing twice produces two rows for each of its players; a club not
+    playing produces one row with a null opponent and ``fixture_count`` of zero.
+    Neither is a special case — which is the point. The previous implementation
+    took ``.unique(subset=["team_id"], keep="first")`` over every upcoming
+    fixture, so a double gameweek silently lost its second leg and a blanking
+    club silently inherited a fixture from a *later* gameweek.
+
+    Args:
+        gameweek: Which gameweek to build. Defaults to the next one with an
+            unplayed fixture. Passing it explicitly is what lets a horizon ask
+            about week three rather than only about the next week.
+
+    Carries the fixture because fixtures are published well in advance, so
+    ``opponent_team_id`` and ``was_home`` are inputs available at the deadline —
+    only the result of the match is withheld.
+    """
+    entities = context.players.select(
+        "player_code", "position", "team_id", "current_price", "web_name", "status"
+    ).with_columns(pl.lit(cutoff).alias("prediction_timestamp"))
+
+    target = gameweek if gameweek is not None else next_unplayed_gameweek(context)
+    blank_columns = [
+        pl.lit(None, dtype=pl.Int64).alias("opponent_team_id"),
+        pl.lit(None, dtype=pl.Boolean).alias("was_home"),
+        pl.lit(None, dtype=pl.Int64).alias("fixture_id"),
+        pl.lit(0, dtype=pl.Int64).alias("fixture_index"),
+        pl.lit(0, dtype=pl.Int64).alias("fixture_count"),
+    ]
+    if target is None or context.fixtures.is_empty():
+        return entities.with_columns(blank_columns)
+
+    week = _team_fixtures(context.fixtures.filter(pl.col("gameweek_id") == int(target)))
+    if week.is_empty():
+        return entities.with_columns(blank_columns)
+
     # Sort AFTER concatenating. Sorting each side separately and then taking the
-    # first row per team always matches the home row, because every home row
+    # first row per team always matched the home row, because every home row
     # precedes every away row — which made `is_home` identically true.
-    next_fixture = (
-        pl.concat([home, away])
-        .sort(["kickoff_time", "team_id"], nulls_last=True)
-        .unique(subset=["team_id"], keep="first", maintain_order=True)
-        .drop("kickoff_time")
+    week = (
+        week.sort(["team_id", "kickoff_time", "fixture_id"], nulls_last=True)
+        .with_columns(
+            pl.int_range(pl.len()).over("team_id").alias("fixture_index"),
+            pl.len().over("team_id").alias("fixture_count"),
+        )
+        .drop("kickoff_time", "gameweek_id")
     )
-    return entities.join(next_fixture, on="team_id", how="left")
+
+    # A left join, so a club with no fixture keeps exactly one row rather than
+    # disappearing. A blank is a stated fact, not an absence to be inferred.
+    joined = entities.join(week, on="team_id", how="left")
+    return joined.with_columns(
+        pl.col("fixture_index").fill_null(0).cast(pl.Int64),
+        pl.col("fixture_count").fill_null(0).cast(pl.Int64),
+    )
 
 
 def fixtures_by_gameweek(
@@ -260,9 +350,9 @@ def fixtures_by_gameweek(
             pl.col("home_team_id").alias("opponent_team_id"),
             pl.lit(False).alias("was_home"),
         )
-        by_gameweek[int(gameweek)] = pl.concat([home, away]).unique(
-            subset=["team_id"], keep="first", maintain_order=True
-        )
+        # Every leg, not one per club. Deduplicating here was what made a
+        # horizon under-count a double gameweek.
+        by_gameweek[int(gameweek)] = pl.concat([home, away])
     return by_gameweek
 
 
