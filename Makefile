@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install fmt lint types boundaries test test-fast leakage e2e check clean ingest features recommend api web web-install
+.PHONY: help install fmt lint types boundaries test test-fast leakage e2e golden check clean demo fixtures ingest features recommend api web web-install
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -50,6 +50,9 @@ leakage: ## Point-in-time leakage tests only
 e2e: ## End-to-end slice tests only
 	uv run pytest -m e2e -v
 
+golden: ## Committed-fixture tests only
+	uv run pytest -m golden -v
+
 banned-strings: ## Fail if a corrected claim reappears in the docs
 	@! grep -rniE '3000\+|thousands of candidate features|raw_understat_shots' \
 		--include='*.md' --include='*.py' . \
@@ -62,6 +65,19 @@ clean: ## Remove caches and build artifacts
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .hypothesis htmlcov .coverage coverage.xml
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 	find . -type d -name '*.egg-info' -prune -exec rm -rf {} +
+
+# ---------------------------------------------------------------------------
+# The offline demo. `make install && make demo` is the whole first run: it
+# needs no network, no API key and no ingest, because `data/fixtures` is
+# committed. See tools/build_demo_fixture.py for what those fixtures are.
+# ---------------------------------------------------------------------------
+
+demo: ## Run the whole pipeline offline on committed fixtures
+	XG_ALONSO_OFFLINE=1 uv run xg demo
+
+fixtures: ## Regenerate data/fixtures from a populated local .data
+	uv run python tools/build_demo_fixture.py
+	@uv run python tools/build_demo_fixture.py --check
 
 # ---------------------------------------------------------------------------
 # Slice-1 workflow
