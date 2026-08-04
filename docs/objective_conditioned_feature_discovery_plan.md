@@ -1,5 +1,30 @@
 # Objective-Conditioned Automated Feature Discovery — Implementation Plan
 
+**Status: Superseded — see [`objective_conditioned_feature_discovery.md`](objective_conditioned_feature_discovery.md).**
+
+This is the plan that produced `packages/discovery`, written against the repository at `87e9c60`
+and preserved as a record of the reasoning. It is no longer a description of the code, and it was
+wrong about several things even when written. Do not use it as a reference.
+
+**Corrections, so a reader is not misled by a document kept for its history:**
+
+| Claim here | Reality |
+|---|---|
+| *"LLM: nothing in this repository… no `anthropic` package, no `.env`, no key"* | **False now.** `discovery/llm.py` is a live client (449 lines) and `interpreter/news.py` calls a web-search tool (311 lines). Both are opt-in extras (`uv sync --extra llm`), off by default, and emit data rather than code — but they exist |
+| `discovery.memory` | Never built. Lessons persist to the `discovery_lessons` table via `discovery/registry.py` |
+| `discovery.residuals` | Never built as a module. `generate_from_residuals` lives in `discovery/hypotheses.py`, and `residual_weakness` in `discovery/experiment.py` |
+| `domain/belief.py` | Never built. Beliefs are `UserBelief` in `contracts/objective.py`, applied in `prediction/beliefs.py` |
+| `discovery.fpl.*` | Never built. The FPL bindings live in `discovery/experiment.py`, which `.importlinter` deliberately excludes from the generic-core contract |
+| class `FeatureUtility` | Never built under that name. The real names are `UtilityBreakdown`, `feature_utility()` and `UtilityWeights` in `discovery/utility.py` |
+
+The section-1 summary of `.importlinter` is also incomplete: there are seven contracts today, not
+four, and the layer list has since gained `xg_alonso.discovery` and `xg_alonso.interpreter`. See
+[Repository Structure §7](architecture/01_repository_structure.md).
+
+---
+
+**Original preamble, retained verbatim:**
+
 **Status:** design, grounded in the repository at `87e9c60`.
 **Author:** this change.
 **Scope:** extend XG Alonso so that *which* representation of the player pool is built

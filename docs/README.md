@@ -21,13 +21,25 @@ as a commitment.**
 
 | Status | Meaning |
 |---|---|
-| `Active` | Describes what is being built now |
-| `Build Specification` | Approved design, implementation in progress or imminent |
-| `Draft` | Written but not yet reconciled against binding decisions |
-| `Deferred (Post-MVP)` | Design retained deliberately; **not** in the MVP. Nothing here ships yet |
+| `Active` | Describes what exists now, and has been checked against it |
+| `Build Specification` | Approved design; parts may not be built. Read the document's own as-built header |
+| `Draft` | Written but not yet reconciled against binding decisions or against the code |
+| `Deferred (Post-MVP)` | Design retained deliberately; **not** built. Nothing here ships yet |
+| `Superseded` | The capability exists, but not through the interface this document specifies. Kept for the reasoning, not the contract |
+| `In progress` | Partly built, and actively being finished; the document says which part |
+| `Partially shipped` | Some sections describe running code and some do not. The document says which, section by section |
 
 A `Deferred (Post-MVP)` document is not dead — it holds real design substance and its contracts
 constrain what the MVP must not make impossible. It is simply not a promise about this release.
+
+**`Superseded` is the status this suite most needed and did not have.** Four `docs/ml/` documents
+sat at `Deferred (Post-MVP)` while the capability they described was shipping under a different
+design in `packages/discovery`. Flipping them to "implemented" would have been just as wrong in the
+other direction, because the interfaces they specify — Feature Cards, a twelve-stage screen, a
+`packages/embeddings` — were never built. `Superseded` says both things at once.
+
+A `Deferred` status on a document that names a package with source files now **fails a test**
+(`tests/docs/test_docs_match_code.py`), so that particular rot cannot recur silently.
 
 ---
 
@@ -72,29 +84,32 @@ wins and the document is scheduled for correction.
 | `02_system_architecture.md` | Planned | End-to-end data and control flow |
 | `03_service_boundaries.md` | Planned | What may call what, and why |
 
-**Dependency direction.** Arrows point toward dependencies; nothing may point back.
+**Dependency direction.** Arrows point toward dependencies; nothing may point back. This is a
+summary of `.importlinter`, which is executable and therefore authoritative.
 
 ```mermaid
 flowchart TD
-    apps --> explanations
-    apps --> optimization
-    apps --> prediction
-    explanations --> feature_scientist
-    optimization --> feature_factory
-    prediction --> feature_factory
-    prediction --> embeddings
-    feature_scientist --> domain
-    feature_factory --> domain
-    embeddings --> domain
-    feature_factory --> data_contracts
-    domain --> data_contracts
-    evaluation --> data_contracts
-    observability --> data_contracts
-    pipelines -.orchestrates.-> apps
+    api --> cli
+    cli --> discovery
+    discovery --> evaluation
+    evaluation --> optimization
+    optimization --> prediction
+    explanations --> prediction
+    prediction --> features
+    features --> interpreter
+    interpreter --> domain
+    interpreter --> storage
+    domain --> contracts
+    storage --> contracts
 ```
 
-`pipelines` may orchestrate every package. `domain` holds pure football and FPL rules with no
-database or API dependency.
+`domain` holds pure football and FPL rules with no database, dataframe or HTTP dependency.
+`contracts` is the bottom layer and depends on nothing internal — which is why walk-forward fold
+construction lives there (`contracts/folds.py`), reachable by `prediction`, `evaluation` and
+`discovery` alike.
+
+There is no `packages/feature_scientist`, `packages/embeddings` or `packages/observability`; earlier
+versions of this diagram showed all three.
 
 ---
 
@@ -125,11 +140,11 @@ flowchart LR
 | Document | Status | Purpose |
 |---|---|---|
 | `01_ml_architecture.md` | Planned | How the ML subsystems compose |
-| [02_feature_factory.md](ml/02_feature_factory.md) | Build Specification | Deterministic candidate-feature generation. **The deepest spec in the repo** |
-| [03_feature_scientist.md](ml/03_feature_scientist.md) | Deferred (Post-MVP) | Automated feature evaluation and promotion |
-| [04_interaction_discovery.md](ml/04_interaction_discovery.md) | Deferred (Post-MVP) | Controlled interaction search and gating |
-| [05_player_clustering.md](ml/05_player_clustering.md) | Deferred (Post-MVP) | Archetype clustering for priors and similarity |
-| [06_embeddings.md](ml/06_embeddings.md) | Deferred (Post-MVP) | Representation learning |
+| [02_feature_factory.md](ml/02_feature_factory.md) | Build Specification | Deterministic candidate-feature generation. **The deepest spec in the repo, and largely unbuilt as specified** — read its as-built header first |
+| [03_feature_scientist.md](ml/03_feature_scientist.md) | Superseded | Capability shipped in `packages/discovery`; this interface was not built |
+| [04_interaction_discovery.md](ml/04_interaction_discovery.md) | In progress | Interactions are expressible (`Arith(MUL)`); the set search exists but is not yet wired |
+| [05_player_clustering.md](ml/05_player_clustering.md) | Superseded | Clustering shipped in `discovery/clusters.py`, dynamic rather than static |
+| [06_embeddings.md](ml/06_embeddings.md) | Partially shipped | Player embeddings built; team, manager and fixture embeddings not |
 | [07_prediction_models.md](ml/07_prediction_models.md) | Draft | Minutes, components, points, price, fair value |
 | [model_artifacts.md](ml/model_artifacts.md) | Implemented | Manifests, compatibility gating, safe inspection, current inventory |
 | `08_continual_learning.md` | Planned | Per-gameweek retraining and champion/challenger |
@@ -155,11 +170,11 @@ The optimizer is the product; predictions are inputs to it.
 
 | Document | Status | Purpose |
 |---|---|---|
-| [01_public_api.md](api/01_public_api.md) | Draft | CLI surface first, HTTP API second |
+| [01_public_api.md](api/01_public_api.md) | Active | The CLI's 26 commands and the API's 17 routes, as built |
 | `02_internal_contracts.md` | Planned | Package-to-package contracts |
 | `01_information_architecture.md` | Planned | Web app screens and navigation |
-| [02_dashboard.md](frontend/02_dashboard.md) | Deferred (Post-MVP) | Dashboard views |
-| `03_design_system.md` | Planned | Visual language |
+| [02_dashboard.md](frontend/02_dashboard.md) | Partially shipped | Which dashboard views exist and which are still blocked |
+| `03_design_system.md` | Planned | Visual language — the shipped token set is `apps/web/app/globals.css` |
 
 ---
 
@@ -167,7 +182,7 @@ The optimizer is the product; predictions are inputs to it.
 
 | Document | Status | Purpose |
 |---|---|---|
-| [01_build_plan.md](implementation/01_build_plan.md) | Draft | Phase sequencing |
+| [01_build_plan.md](implementation/01_build_plan.md) | Superseded | A 25-day plan from 2026-07-27, exceeded in scope. Retained as a record of sequencing |
 | `02_mvp_milestones.md` | Planned | Milestone acceptance criteria |
 | `03_testing_strategy.md` | Planned | Unit, property, golden, integration, leakage, e2e |
 | `04_release_checklist.md` | Planned | Release gates and definition of done |

@@ -1,3 +1,8 @@
+<!-- claims
+commands: xg models list, xg models verify, xg models backfill-manifest, xg models audit
+symbols: xg_alonso.features.career:CAREER_VERSION, xg_alonso.features.catalogue:CATALOGUE_VERSION
+-->
+
 # Model Artifacts
 
 **Status:** `Implemented`
@@ -162,8 +167,13 @@ xg models audit [--dry-run|--apply]   # --dry-run is the DEFAULT
 xg models list [--all]                # default listing shows COMPATIBLE only
 xg models verify <path>
 xg models backfill-manifest <path>
-xg models activate|deactivate <artifact-id>
 ```
+
+Those four are the whole sub-app. An earlier draft of this section documented
+`xg models activate|deactivate`; **neither was ever implemented**, and there is no notion of an
+"active" artifact that a command can toggle. Compatibility is decided per artifact against the
+current build, at the moment it is loaded, rather than by a stored activation flag — which is the
+stronger design, because an activation flag can be true and wrong.
 
 `--dry-run` is the default because `.data` is gitignored and a bad `--apply` is unrecoverable. The
 audit **moves** rather than copy-then-deletes, and appends the index entry *before* the move, so a
@@ -188,9 +198,9 @@ is a description, not a certificate.**
 - **The catalogue hash cannot see imperative feature code.** Opponent, career and recency features
   come from hand-written functions rather than declarative specs, so only their names and a module
   version constant are hashable. Editing the arithmetic inside `build_career_features` without
-  bumping `CAREER_FEATURES_VERSION` will not change the digest. This is exactly why a
-  catalogue-hash mismatch is a warning rather than a refusal, and why those version constants
-  exist at all.
+  bumping `CAREER_VERSION` (`packages/feature_factory/src/xg_alonso/features/career.py`) will not
+  change the digest. This is exactly why a catalogue-hash mismatch is a warning rather than a
+  refusal, and why those version constants exist at all.
 
 ---
 

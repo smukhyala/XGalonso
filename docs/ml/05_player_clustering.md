@@ -1,14 +1,37 @@
+<!-- claims
+package: packages/discovery
+symbols: xg_alonso.discovery.clusters, xg_alonso.discovery.registry:DiscoveryRegistry
+routes: GET /clusters, GET /players/{player_code}/cluster-history
+-->
+
 # Player Clustering Design
 
 | Field | Value |
 |---|---|
 | Project | XG Alonso |
 | Document | Player Clustering |
-| Version | 1.0 |
-| Status | Deferred (Post-MVP) |
+| Version | 1.1 |
+| Status | Superseded — the capability shipped, this interface did not |
 | Owner | ML Platform |
 | Dependencies | [Feature Factory](02_feature_factory.md), [Embeddings](06_embeddings.md), [Prediction Models](07_prediction_models.md) |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-08-04 |
+
+> **Status correction, 2026-08-04.** This document carried `Deferred (Post-MVP)` after clustering had
+> shipped. It runs in `packages/discovery/src/xg_alonso/discovery/clusters.py`, is seeded and
+> deterministic, persists to the `discovery_cluster_models` and `discovery_cluster_assignments`
+> tables, and is served at `GET /clusters` and
+> `GET /players/{player_code}/cluster-history`.
+>
+> **It shipped as part of the discovery package, not as `packages/embeddings`,** and the clusters are
+> **dynamic**: recomputed per fold and conditioned on the objective, rather than a single static
+> archetype assignment. The pipeline diagram in section 3 is close to what runs; the production
+> registry at the end of it is the discovery registry, not a separate store.
+>
+> One thing the shipped surface is careful about that this document does not say: a cluster is not
+> an identity. The cluster-history route exists so a reader can see a player move between clusters
+> rather than treating a label as a permanent attribute.
+>
+> See [Player Embeddings and Clusters](../player_embeddings_and_clusters.md) for what was built.
 
 ---
 

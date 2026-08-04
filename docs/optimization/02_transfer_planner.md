@@ -1,11 +1,17 @@
+<!-- claims
+commands: xg recommend, xg advise, xg backtest
+routes: GET /recommend/{entry_id}
+symbols: xg_alonso.domain.rules:SquadRules, xg_alonso.optimization.transfer
+-->
+
 # Transfer Planner
 
 | Field | Value |
 |---|---|
 | Project | XG Alonso |
 | Document | Transfer Planner |
-| Version | 1.0 |
-| Status | Draft |
+| Version | 1.1 |
+| Status | Draft — §3.1 and §6.1 corrected against the code 2026-08-04 |
 | Owner | Optimization |
 | Dependencies | [Prediction Models](../ml/07_prediction_models.md), [Database Schema](../data/04_database_schema.md), [Public API](../api/01_public_api.md) |
 | Last updated | 2026-07-27 |
@@ -55,9 +61,21 @@ current values, recorded here for review only — code reads them from
 | Maximum players per Premier League club | 3 | `squad_team_limit` |
 | Starting budget | 1000 tenths of a million (£100.0m) | `squad_total_spend` |
 | Sell-on fee | 0.5 (half of any profit) | `transfers_sell_on_fee` |
-| Maximum extra free transfers | 4, so free transfers cap at **5** | `transfers_max_extra_free` |
+| Maximum extra free transfers | 4, so free transfers cap at **5** | `max_extra_free_transfers` |
 | Transfers cap in one gameweek | 20 | `transfers_cap` |
-| Points cost per transfer beyond the free allowance | −4 | `transfers_cost` |
+| Points cost per transfer beyond the free allowance | −4 | *not published* — see below |
+
+Two corrections to an earlier draft of this table, both of the exact kind the constants rule exists
+to prevent:
+
+- The extra-free-transfer key is **`max_extra_free_transfers`**, not `transfers_max_extra_free`.
+  `SquadRules.from_payload` in `packages/domain/src/xg_alonso/domain/rules.py` reads the former; a
+  document naming the latter would send a reader looking for a key the payload does not have.
+- **There is no `transfers_cost` key.** The hit cost is `SquadRules.hit_cost_per_transfer`, a field
+  with a default of `4` and a `VERIFY:` marker on its description, precisely because it could not be
+  sourced from `game_config.rules` like everything else in this table. It is the one constraint
+  constant in the system that *is* effectively transcribed, and it is flagged as such in the code
+  rather than blending in with the values that are not.
 
 ### 3.2 Positional quotas and formation bounds
 
@@ -181,8 +199,19 @@ maximize   E[points over horizon]
 | `transfer hit cost` | 4 points per transfer beyond the free allowance |
 | `risk penalty` | Variance and availability exposure: rotation risk, injury doubt, fixture uncertainty |
 
-Weights live in `configs/optimization/`, are versioned, and are recorded in the run provenance. A
-recommendation cannot be reproduced without knowing the weights that produced it.
+**Weights are module constants, not configuration.** `_RISK_WEIGHT` and `_MIN_NET_GAIN` live in
+`packages/optimization/src/xg_alonso/optimization/transfer.py`. There is no `configs/` directory;
+one was specified in an early repository layout and never built.
+
+This is the weakest link in the reproducibility story and is stated rather than glossed. A
+recommendation cannot be reproduced without knowing the weights that produced it, and today that
+knowledge is carried by the commit hash in the run manifest rather than by a versioned weights file.
+That is adequate while the weights are two constants nobody tunes, and would not be if they were
+tuned per objective — at which point they belong in the manifest as values, not by reference.
+
+`_MIN_NET_GAIN` deserves naming here because it is not a weight but a threshold: a candidate
+transfer whose net gain falls below it is reported as a hold rather than as a marginal
+recommendation.
 
 ### 6.2 Constraints
 

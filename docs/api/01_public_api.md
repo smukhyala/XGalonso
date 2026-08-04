@@ -1,38 +1,53 @@
+<!-- claims
+commands: xg ingest, xg ingest-history, xg backfill, xg refresh, xg team-news, xg refresh-plan, xg build-features, xg train, xg importance, xg squad, xg recommend, xg build-squad, xg plan, xg advise, xg backtest, xg score, xg build-discovery-frame, xg discover, xg models list, xg models verify, xg models backfill-manifest, xg models audit, xg evaluate check, xg evaluate plan, xg evaluate status, xg evaluate report
+routes: GET /health, GET /players, GET /squad/{entry_id}, GET /recommend/{entry_id}, GET /build-squad, GET /build-squad/explained, GET /features/importance, POST /objectives/compile, POST /requirements/parse, POST /squad/plan, GET /objectives, GET /features/discovered, GET /hypotheses, GET /clusters, GET /players/{player_code}/cluster-history, GET /experiments, GET /experiments/{experiment_id}
+-->
+
 # Public API
 
 | Field | Value |
 |---|---|
 | Project | XG Alonso |
 | Document | Public API |
-| Version | 1.0 |
-| Status | Draft |
+| Version | 2.0 |
+| Status | Active |
 | Owner | Product |
 | Dependencies | [Transfer Planner](../optimization/02_transfer_planner.md), [Database Schema](../data/04_database_schema.md), [Prediction Models](../ml/07_prediction_models.md) |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-08-04 |
+
+**Version 2.0 documents the surface that exists.** Version 1.0 was written before either surface was
+built and never reconciled afterwards. It specified nine HTTP routes under a `/v1` prefix — none of
+which were ever served — four CLI commands that were never written (`xg predict`, `xg config pin`,
+`xg config show`, `xg doctor`), an `xg evaluate` flag form that is actually a sub-app, and six error
+codes that appear nowhere in the codebase. All of it is gone. The design intent that survived
+contact with the implementation is kept and marked as such.
+
+The claims block at the top of this file is checked by `tests/docs/test_docs_match_code.py`, which
+introspects the Typer app and the FastAPI app. A route or command named there that stops existing
+now fails a test rather than quietly misleading a reader.
 
 ---
 
 ## 1. Surface order
 
-**The CLI is the first and only shipping surface.** FastAPI follows once the CLI produces
-recommendations users trust; Next.js follows after that. There is no frontend in the MVP (D4).
+Three surfaces, all over the same functions. The CLI was built first, the HTTP API second, the web
+app third — the order D4 sets — though the web app arrived earlier in absolute terms than D4's
+"no frontend in the MVP" anticipated. See the D4 supersession note in `CLAUDE.md`.
 
 ```mermaid
 flowchart LR
-    A["CLI: xg"] --> B["HTTP API: FastAPI"]
-    B --> C["Web app: Next.js"]
-    A -.-> D["Shipping now"]
-    B -.-> E["Second surface"]
-    C -.-> F["Deferred, post-MVP"]
+    A["CLI: xg<br/>26 commands"] --> B["HTTP API: FastAPI<br/>17 routes, unprefixed"]
+    B --> C["Web app: Next.js<br/>4 routes"]
 ```
 
-Both surfaces call the same domain packages. The HTTP API is a transport over the identical
-functions the CLI invokes — it never reimplements planning, scoring or constraint logic.
+The HTTP API is a transport over the functions the CLI invokes. It never reimplements planning,
+scoring or constraint logic: `apps/api/src/xg_alonso/api/main.py` holds request and response models
+and route handlers, and every handler delegates to `service.py`, which is the composition root.
 
 ### 1.1 Vocabulary
 
-The previous draft used `{team_id}`, which is ambiguous: in FPL "team" means both a manager's fantasy
-side and a Premier League club. That ambiguity is banned from this API.
+In FPL "team" means both a manager's fantasy side and a Premier League club. That ambiguity is
+banned here.
 
 | Term | Means | Identifier | Example |
 |---|---|---|---|
@@ -40,391 +55,222 @@ side and a Premier League club. That ambiguity is banned from this API.
 | **team** | A Premier League club | `team_id` (season-scoped), `team_code` (stable) | Arsenal |
 | **player** | A footballer | `player_id` (season-scoped), `player_code` (stable) | Saka |
 
-**`{team_id}` must never appear in a route path.** A route addressing a manager uses `{entry_id}`.
-
-### 1.2 Corrections to the previous draft
-
-| Was | Now | Reason |
-|---|---|---|
-| `GET /playersG` + `ET /recommendations/{team_id}` | `GET /players` and `GET /entries/{entry_id}/recommendations` | A line-break typo split one route into two invalid ones |
-| `GET /wildcard/{team_id}` | Removed | No chips in the MVP (D5) |
-| `POST /optimize/wildcard` | Removed | No chips in the MVP (D5) |
-| `POST /optimize/transfers` | `POST /recommendations/transfers` | Same capability; renamed to match the resource vocabulary |
-
-Wildcard design is retained in [Wildcard Planner](../optimization/03_wildcard_planner.md) with status
-`Deferred (Post-MVP)`. Removing the routes removes the promise, not the design.
+**`{team_id}` must never appear in a route path.** A route addressing a manager uses `{entry_id}`;
+a route addressing a player uses `{player_code}`, because a cluster history spans seasons and
+`player_id` is re-issued each one.
 
 ---
 
 ## 2. CLI
 
-Installed as a single entry point `xg`. Every command is deterministic: the same inputs and the same
-pinned config produce byte-identical output.
+Installed as a single entry point `xg`. Twenty-six commands: eighteen at the top level and two
+sub-apps, `models` and `evaluate`. `xg --help` and `xg <command> --help` are authoritative; this
+section groups the surface so it can be read without running anything.
 
-### 2.1 Global options
+### 2.1 Options
 
-| Option | Effect |
-|---|---|
-| `--season <s>` | Season key, e.g. `2026-27`. Defaults to the current season from `bootstrap-static` |
-| `--as-of <ts>` | Point-in-time cutoff. Nothing with `available_time > as-of` is used. Defaults to now |
-| `--config <id>` | Pinned `game_config` snapshot id. Defaults to the pinned row for the season |
-| `--json` | Emit machine-readable JSON instead of the human table |
-| `--run-id <id>` | Reuse a run id, for reproducing an earlier run exactly |
-| `-v, --verbose` | Per-stage timings and row counts |
-
-### 2.2 `xg ingest`
-
-Fetches from the official FPL API into bronze, then normalises to silver.
-
-```bash
-xg ingest                                   # incremental: everything stale
-xg ingest --source bootstrap-static         # one source only
-xg ingest --source element-summary --resume # resume a checkpointed per-player crawl
-xg ingest --backfill --from-season 2022-23  # historical backfill floor per D7
-xg ingest --check-config                    # run the game_config drift check only
-```
+There is no global option callback. Options are declared per command, which means the same flag can
+be absent from a command that has no use for it. The recurring ones:
 
 | Option | Effect |
 |---|---|
-| `--source <name>` | Restrict to one endpoint family. Repeatable |
-| `--backfill` | Historical load including the community archive for completed seasons |
-| `--from-season <s>` | Backfill floor. Cannot precede `2022-23` (D7) |
-| `--resume` | Continue a checkpointed crawl rather than restarting |
-| `--check-config` | Compare live `game_config` against the pinned snapshot and exit non-zero on drift |
+| `--data-root <path>` | Where bronze, silver, gold and artifacts live. Defaults to `.data` |
+| `--season <s>` | Season in `YYYY-YY` form. Defaults to `2026-27` |
+| `--squad-file <path>` | Read a squad from a local file instead of the API. See §2.4 |
+| `--horizon <n>` | Gameweeks to judge a decision over |
 
-Exits non-zero on `game_config` drift, on a checksum mismatch against an existing bronze snapshot,
-or on a component-to-`total_points` reconciliation failure.
+A single `--run-id` that replays an arbitrary command byte-for-byte does **not** exist. Experiments
+carry a manifest and can be re-rendered with `xg evaluate report`; ad-hoc commands cannot.
 
-### 2.3 `xg build-features`
-
-Materializes point-in-time feature rows from gold.
-
-```bash
-xg build-features --up-to-gw 2
-xg build-features --feature-set fs_core_v1.2 --up-to-gw 2
-xg build-features --leakage-check
-```
-
-| Option | Effect |
-|---|---|
-| `--up-to-gw <n>` | Build rows for prediction timestamps up to and including gameweek `n`'s deadline |
-| `--feature-set <id>` | Named, versioned feature set. Defaults to the current approved set |
-| `--leakage-check` | Run the leakage harness: assert no feature reads data with `available_time` after the row's prediction timestamp |
-
-`--leakage-check` is advisory here and mandatory in CI.
-
-### 2.4 `xg predict`
-
-Runs the component and points models over materialized features.
-
-```bash
-xg predict --gw 3 --horizon 3
-xg predict --gw 3 --model points_component_v0.3.1
-```
-
-| Option | Effect |
-|---|---|
-| `--gw <n>` | Target gameweek |
-| `--horizon <n>` | Number of gameweeks to project, `1`, `3` or `6` |
-| `--model <version>` | Explicit model version. Defaults to the current champion |
-
-Writes predictions with model version, feature-set version and data cutoff attached to every row.
-
-### 2.5 `xg squad`
-
-Resolves and displays an entry's current squad, including reconstructed purchase and selling prices.
-
-```bash
-xg squad 1234567
-xg squad 1234567 --gw 2
-xg squad 1234567 --squad-file ./my_gw1_squad.yaml
-```
-
-| Option | Effect |
-|---|---|
-| `--gw <n>` | Gameweek whose picks to resolve. Defaults to the last finished gameweek |
-| `--squad-file <path>` | Read the squad from a local file instead of the API |
-
-**`--squad-file` is not a convenience flag; it is required for GW1.**
-`entry/{entry_id}/event/{gw}/picks/` returns **404 before the deadline**, so at the start of a season
-there is no way to read a squad from the API. The file format:
-
-```yaml
-entry_id: 1234567
-season: "2026-27"
-gameweek: 1
-bank: 5            # tenths of a million
-free_transfers: 1
-picks:
-  - player_id: 351   # element id from bootstrap-static
-    purchase_price: 55
-    is_captain: true
-  - player_id: 427
-    purchase_price: 72
-    is_vice_captain: true
-  # ... 15 entries total
-```
-
-`purchase_price` is required because selling price depends on it via the sell-on fee. When the API
-path is used instead, purchase prices are reconstructed from `entry/{entry_id}/transfers/` (D3).
-
-The loader validates the squad against the pinned constraint constants — 15 players, positional
-quotas GKP 2 / DEF 5 / MID 5 / FWD 3, at most 3 per club, total cost plus bank within budget — and
-refuses an illegal squad rather than planning from it.
-
-### 2.6 `xg recommend`
-
-The product. Produces ranked transfer recommendations against the HOLD baseline.
-
-```bash
-xg recommend 1234567
-xg recommend 1234567 --gw 3 --horizon 3
-xg recommend 1234567 --gw 1 --squad-file ./my_gw1_squad.yaml
-xg recommend 1234567 --max-transfers 2 --json
-```
-
-| Option | Effect |
-|---|---|
-| `--gw <n>` | Target gameweek. Defaults to the next gameweek by deadline |
-| `--horizon <n>` | Planning horizon in gameweeks: `1`, `3` or `6`. Default `3` |
-| `--max-transfers <n>` | Cap on transfers considered. Slice 1 supports `0` and `1` |
-| `--squad-file <path>` | As for `xg squad`; required before the GW1 deadline |
-| `--top <n>` | Number of ranked recommendations to display. Default `5` |
-| `--explain` | Include per-recommendation feature contributions |
-
-Illustrative output (mocked values, real format):
-
-```text
-$ xg recommend 1234567 --gw 3 --horizon 3
-
-XG Alonso  ·  entry 1234567  ·  GW3  ·  horizon GW3-GW5
-Squad source   entry/1234567/event/2/picks/   observed 2026-08-29T09:12:04Z
-Bank 1.6m      Squad value 100.4m             Free transfers 1
-
-BASELINE   HOLD                                            168.2 pts  (GW3-GW5)
-           0 transfers · XI, formation, captain and bench re-optimised
-           Formation 3-4-3 · C Haaland (MCI) · VC Saka (ARS)
-
-  #  ACTION                                   NET Δ vs HOLD   HIT   CONF
-  1  TRANSFER  Wissa (BRE) → Watkins (AVL)          +6.1      0     0.71
-        sell 7.4m  (bought 7.2m, now 7.6m, sell-on fee 0.2m)
-        buy  8.9m  ·  bank 1.6m → 0.1m
-        why: 3 of next 3 at home vs FDR<=2 · xGI/90 0.68 vs 0.41
-             expected minutes 84 vs 71 · ownership 12.4% vs 9.1%
-        captain unchanged (Haaland)
-
-  2  HOLD (roll transfer to GW4)                     +0.0      0     ---
-        why: 2 free transfers at GW4 covers the Gabriel → Saliba
-             swap that GW5's fixture swing favours
-
-  3  TRANSFER  Mbeumo (BRE) → Rogers (AVL)           +2.3      0     0.54
-
-  4  TRANSFER  Wissa (BRE) → Isak (NEW)              -1.8     -4     0.63
-        raw gain +2.2 does not cover the 4-point hit
-
-RECOMMENDED  #1  ·  +6.1 pts over HOLD across GW3-GW5
-Confidence 0.71 · above the 0.60 action threshold
-
-model=points_component_v0.3.1  features=fs_core_v1.2
-data cutoff=2026-08-29T09:12:04Z  predicted=2026-08-29T09:14:31Z
-scoring config=gc_2026-27_pin3  run=01JQ8ZC4M2WK7B3XN5T9RVGH0D
-```
-
-Every number above traces to a stored artefact: the run id reproduces the whole output, and the
-scoring config id pins the constants used to convert components to points.
-
-### 2.7 Ancillary commands
+### 2.2 Data
 
 | Command | Purpose |
 |---|---|
-| `xg config pin` | Pin the current `game_config` payload as the season's authoritative snapshot |
-| `xg config show` | Print pinned scoring and constraint constants with their fetch timestamp |
-| `xg evaluate --from-gw <a> --to-gw <b>` | Walk-forward evaluation of recommendation quality against HOLD |
-| `xg doctor` | Freshness, drift, schema and pinned-config health checks |
+| `xg ingest` | Fetch official FPL data into immutable bronze snapshots. The only command that reads the network on the main path |
+| `xg ingest-history` | Fetch each player's per-gameweek history into bronze |
+| `xg backfill` | Backfill per-gameweek history from the community archive |
+| `xg refresh` | Re-read the official payload and report what changed |
+| `xg team-news` | Search for team news FPL has not published and file it as bounded form signals |
+| `xg refresh-plan` | Show which clubs are worth looking up for form, and which are not |
 
-### 2.8 Exit codes
+`xg team-news` reads outside the official FPL API and therefore sits in tension with D6. That
+tension is recorded, unresolved, in [the documentation index](../README.md#the-research-surface-and-what-it-may-not-touch);
+the feature is off by default and needs an explicit extra and a key.
 
-| Code | Meaning |
+### 2.3 Features and models
+
+| Command | Purpose |
 |---|---|
-| `0` | Success |
-| `1` | Unexpected error |
-| `2` | Invalid arguments or an illegal squad |
-| `3` | Upstream FPL API failure after retries |
-| `4` | `game_config` drift against the pinned snapshot |
-| `5` | Stale data: required inputs older than the freshness threshold |
-| `6` | Leakage check failed |
+| `xg build-features` | Build the point-in-time feature set for the next gameweek |
+| `xg train` | Fit component models on historical seasons |
+| `xg importance` | Measure which features actually earn their place, out of sample |
+| `xg models list` | Every artifact and whether it can be used with the active build |
+| `xg models verify` | Explain in full whether one artifact can be used, and why not |
+| `xg models backfill-manifest` | Write a manifest for an artifact saved before manifests existed |
+| `xg models audit` | Classify every artifact, and optionally give each one a manifest |
+
+See [Model Artifacts](../ml/model_artifacts.md) for what a manifest carries and how compatibility is
+decided.
+
+### 2.4 Decisions
+
+| Command | Purpose |
+|---|---|
+| `xg squad` | Show a squad with projected points per player |
+| `xg recommend` | The best legal single transfer, or an explicit hold |
+| `xg build-squad` | Build a squad from scratch — the gameweek-1 answer |
+| `xg plan` | Build a squad around requirements typed in plain English |
+| `xg advise` | Recommend a transfer under an objective, constraints and beliefs |
+
+**`--squad-file` is not a convenience flag; it is a launch requirement.**
+`entry/{entry_id}/event/{gw}/picks/` returns **404 before the deadline**, so at the start of a season
+there is no way to read a squad from the API at all. Before GW1, `xg build-squad` is the right
+command anyway: transfers are unlimited before the first deadline, so recommending one swap answers
+a question nobody is asking.
+
+`purchase_price` is required in a squad file because selling price depends on it via the sell-on
+fee. When the API path is used instead, purchase prices are reconstructed from
+`entry/{entry_id}/transfers/` (D3), and where they must be assumed the output says so and states
+that the budget shown is a lower bound.
+
+The loader validates a squad against the pinned constraint constants — 15 players, quotas
+GKP 2 / DEF 5 / MID 5 / FWD 3, at most 3 per club, cost plus bank within budget — and refuses an
+illegal squad rather than planning from it.
+
+### 2.5 Evaluation and research
+
+| Command | Purpose |
+|---|---|
+| `xg backtest` | Walk a past season, measuring recommendations against holding |
+| `xg score` | Score assembled expected points against what actually happened |
+| `xg evaluate check` | Run the freeze assertions and stop |
+| `xg evaluate plan` | Show what an experiment would run, without running any of it |
+| `xg evaluate status` | How far along an experiment is, from its run files alone |
+| `xg evaluate report` | Re-render every artifact from the run files |
+| `xg build-discovery-frame` | Build the point-in-time training frame the discovery loop runs on |
+| `xg discover` | Compile a request, discover features that serve it, report the verdicts |
+
+`evaluate` is a sub-app, not a flag form. Version 1.0 documented
+`xg evaluate --from-gw <a> --to-gw <b>`; that never existed.
+
+**There is no `xg evaluate run`.** `run_one` is injected but never wired, so the reproduction gate
+against the recorded legacy headline is unrun rather than passing. This is a known gap, tracked in
+[Model Artifacts §8](../ml/model_artifacts.md).
+
+### 2.6 Exit codes
+
+The CLI uses `0` for success and `1` for a handled failure, raised as `typer.Exit(1)` at the point
+the failure is explained. The graded scheme version 1.0 specified — separate codes for drift, stale
+data, illegal squads and leakage — was **not implemented**. It is a reasonable design and is
+recorded here as unbuilt rather than deleted: a caller today must read stderr, which makes the CLI
+awkward to script against.
 
 ---
 
 ## 3. HTTP API
 
-The second surface. Read-only apart from the stateless planning endpoint. No authentication —
-an entry id is public information (D3).
+Seventeen routes, **unprefixed**. There is no `/v1`. No authentication — an entry id is public
+information (D3). Read-only apart from three planning endpoints, all of which are stateless: they
+compute from the payload and store nothing.
 
-Base path `/v1`. All timestamps are ISO-8601 UTC. All money is in tenths of a million.
+All timestamps are ISO-8601 UTC. All money is in tenths of a million, as integers. FastAPI serves
+`/docs`, `/redoc` and `/openapi.json`, and the OpenAPI schema is the authoritative contract.
 
-### 3.1 Provenance envelope
+### 3.1 Provenance
 
-**Every response carries provenance. There are no exceptions and no "lightweight" responses that
-omit it.** A recommendation without provenance is unreproducible, and an unreproducible
-recommendation is not a product.
+**Every response that carries a decision carries provenance.** A recommendation without provenance
+is unreproducible, and an unreproducible recommendation is not a product. The `Provenance` model
+lives in `api/main.py` and is attached to the recommendation, squad-build and plan responses; the
+web app prints it in the footer, so a figure whose lineage cannot be shown does not reach the page.
 
-```json
-{
-  "data": { "...": "endpoint-specific payload" },
-  "provenance": {
-    "model_version": "points_component_v0.3.1",
-    "feature_set_version": "fs_core_v1.2",
-    "scoring_config_id": "gc_2026-27_pin3",
-    "data_cutoff": "2026-08-29T09:12:04Z",
-    "prediction_timestamp": "2026-08-29T09:14:31Z",
-    "run_id": "01JQ8ZC4M2WK7B3XN5T9RVGH0D",
-    "season": "2026-27",
-    "source": "live_api"
-  }
-}
-```
+Reference and research reads — the cluster, hypothesis and experiment routes — carry their own
+version and computed-at fields instead, because there is no model version to attach.
 
-| Field | Meaning |
-|---|---|
-| `model_version` | Exact trained artefact that produced the predictions |
-| `feature_set_version` | Versioned feature set the model consumed |
-| `scoring_config_id` | Pinned `game_config` snapshot used for points conversion and constraints |
-| `data_cutoff` | Latest `available_time` of any input row — the point-in-time boundary |
-| `prediction_timestamp` | When inference ran |
-| `run_id` | Replays the entire computation |
-| `source` | `live_api` or `community_archive` for the underlying rows |
-
-For purely static reference data, `model_version` and `feature_set_version` are `null` while
-`data_cutoff` and `run_id` remain populated.
-
-### 3.2 Endpoints
+### 3.2 Decision routes
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/v1/players` | Player list with predictions. Filters: `position`, `team_id`, `max_cost`, `min_minutes`, `available_only`, `sort`, `limit`, `offset` |
-| `GET` | `/v1/players/{player_id}` | One player: attributes, per-gameweek history, predictions, feature contributions |
-| `GET` | `/v1/teams` | Premier League clubs with strength fields and the `strength_scale` flag |
-| `GET` | `/v1/fixtures` | Fixtures with difficulty. Filters: `event_id`, `team_id`, `from_event`, `to_event` |
-| `GET` | `/v1/gameweeks` | Gameweeks with deadlines, `finished` and `data_checked` |
-| `GET` | `/v1/entries/{entry_id}` | Entry summary: name, overall points and rank, bank, squad value, free transfers |
-| `GET` | `/v1/entries/{entry_id}/squad` | Resolved 15-player squad with purchase and selling prices |
-| `GET` | `/v1/entries/{entry_id}/recommendations` | Ranked recommendations against HOLD for the entry's stored squad |
-| `POST` | `/v1/recommendations/transfers` | Stateless planning from a caller-supplied squad — the HTTP equivalent of `--squad-file` |
-| `GET` | `/v1/predictions` | Raw predictions. Filters: `event_id`, `horizon`, `player_id`, `model_version` |
-| `GET` | `/v1/meta/versions` | Current champion model, feature set, pinned scoring config, data freshness |
-| `GET` | `/v1/health` | Liveness plus per-source freshness |
+| `GET` | `/health` | Whether the system can answer, and whether its data is current. `stale` surfaces in the web masthead rather than being swallowed |
+| `GET` | `/players` | Ranked players for the next gameweek. Query: `limit`, `position`, `max_price` |
+| `GET` | `/squad/{entry_id}` | A manager's squad with projected points and the XI that would be fielded. Query: `squad_file` |
+| `GET` | `/recommend/{entry_id}` | The best legal single transfer, or an explicit hold. Query: `squad_file`, `horizon` |
+| `GET` | `/build-squad` | A squad built from scratch |
+| `GET` | `/build-squad/explained` | The optimal fifteen from scratch, with a justification for every pick |
+| `GET` | `/features/importance` | Which features earn their place, measured out of sample. Query: `label`, `family`, `position`, `limit` |
 
-`GET /v1/entries/{entry_id}/recommendations` returns `409 Conflict` before the GW1 deadline, because
-picks are not readable yet. The error body directs the caller to `POST /v1/recommendations/transfers`.
+`horizon` on `/recommend/{entry_id}` defaults to `1` and is capped at `10`. Its docstring states the
+reason it exists at all: a transfer is permanent and paid for once, so scoring it on the next
+gameweek alone undervalues buying a better player.
 
-### 3.3 `POST /v1/recommendations/transfers`
+`/features/importance` returns a `stale` flag that is true when the table was computed against a
+different model than the one currently loaded. Serving old numbers silently is worse than serving
+none.
 
-Request:
+### 3.3 Planning routes
 
-```json
-{
-  "entry_id": 1234567,
-  "season": "2026-27",
-  "gameweek": 3,
-  "horizon": 3,
-  "max_transfers": 1,
-  "bank": 16,
-  "free_transfers": 1,
-  "squad": [
-    { "player_id": 351, "purchase_price": 55, "is_captain": true },
-    { "player_id": 427, "purchase_price": 72, "is_vice_captain": true }
-  ]
-}
-```
-
-`squad` must contain 15 entries and satisfy the pinned constraints. `bank` and `purchase_price` are
-in tenths of a million.
-
-Response:
-
-```json
-{
-  "data": {
-    "baseline": {
-      "kind": "HOLD",
-      "expected_points": 168.2,
-      "horizon": ["GW3", "GW4", "GW5"],
-      "formation": "3-4-3",
-      "captain_player_id": 355,
-      "vice_captain_player_id": 17
-    },
-    "recommendations": [
-      {
-        "rank": 1,
-        "kind": "SINGLE_TRANSFER",
-        "players_out": [
-          { "player_id": 102, "web_name": "Wissa", "selling_price": 74, "purchase_price": 72 }
-        ],
-        "players_in": [
-          { "player_id": 60, "web_name": "Watkins", "cost": 89 }
-        ],
-        "cost": 15,
-        "bank_after": 1,
-        "transfers_used": 1,
-        "hit_points": 0,
-        "expected_point_gain": 6.1,
-        "expected_value_gain": 0.3,
-        "risk": 0.28,
-        "confidence": 0.71,
-        "explanation": {
-          "reason_codes": ["FIXTURE_RUN_FAVOURABLE", "XGI_PER_90_HIGHER", "MINUTES_SECURE"],
-          "text": "Watkins has three home fixtures against FDR<=2 defences ..."
-        }
-      }
-    ]
-  },
-  "provenance": { "...": "as in 3.1" }
-}
-```
-
-`expected_point_gain` is always **net of hit cost and always relative to HOLD**. See
-[Transfer Planner §4](../optimization/02_transfer_planner.md) for the baseline definition.
-
-### 3.4 Errors
-
-```json
-{
-  "error": {
-    "code": "PICKS_NOT_AVAILABLE",
-    "message": "Entry picks are not published before the gameweek deadline.",
-    "detail": { "entry_id": 1234567, "gameweek": 1, "deadline": "2026-08-21T17:30:00Z" },
-    "remediation": "Supply the squad explicitly via POST /v1/recommendations/transfers."
-  },
-  "provenance": { "...": "as in 3.1" }
-}
-```
-
-| Code | HTTP | Meaning |
+| Method | Path | Returns |
 |---|---|---|
-| `ENTRY_NOT_FOUND` | 404 | No such public entry id |
-| `PICKS_NOT_AVAILABLE` | 409 | Before the deadline; upstream returns 404 |
-| `INVALID_SQUAD` | 422 | Supplied squad violates a pinned constraint |
-| `STALE_DATA` | 503 | Required inputs older than the freshness threshold |
-| `CONFIG_DRIFT` | 503 | Live `game_config` differs from the pinned snapshot |
-| `UPSTREAM_UNAVAILABLE` | 502 | FPL API failed after retries |
+| `POST` | `/objectives/compile` | Parse a request into an objective, constraints and beliefs |
+| `POST` | `/requirements/parse` | Read squad requirements out of a request, without building anything |
+| `POST` | `/squad/plan` | Build the best legal squad that honours what was asked for |
 
-`INVALID_SQUAD` names the violated constraint and the pinned constant it was checked against, so a
-caller can tell a genuine mistake from a stale pin.
+All three are stateless and compile deterministically, by regex, with no language model on the
+default path. `/objectives/compile` is the endpoint to reach for when the question is "what did the
+system think I asked for" — anything the parser did not understand is returned rather than dropped.
+
+### 3.4 Research routes
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/objectives` | The shipped objective presets |
+| `GET` | `/features/discovered` | Every discovered feature's latest verdict, accepted and rejected alike |
+| `GET` | `/hypotheses` | Every hypothesis tested, with the condition that would have refuted it |
+| `GET` | `/clusters` | Player clusters, with the statistical basis behind each label |
+| `GET` | `/players/{player_code}/cluster-history` | One player's cluster over time |
+| `GET` | `/experiments` | Every recorded experiment, newest first |
+| `GET` | `/experiments/{experiment_id}` | One experiment's manifest |
+
+Rejected features are returned alongside accepted ones deliberately. A discovery surface that shows
+only its successes is a marketing page.
+
+**Running an experiment is deliberately not exposed over HTTP.** A discovery run fits hundreds of
+models and takes minutes, and there is no job queue (D1 keeps everything local). A request that
+blocks for that long is not an API, it is a timeout.
+
+### 3.5 Errors
+
+Errors are FastAPI's default shape — `{"detail": "..."}` — with the status chosen by the handler:
+
+| Status | Raised when |
+|---|---|
+| `400` | An invalid query parameter, such as an unrecognised position |
+| `404` | No such entry, or picks that cannot be resolved |
+| `422` | A squad that violates a pinned constraint, or a request that cannot be satisfied |
+
+The typed error-code vocabulary version 1.0 specified — `PICKS_NOT_AVAILABLE`, `ENTRY_NOT_FOUND`,
+`INVALID_SQUAD`, `STALE_DATA`, `CONFIG_DRIFT`, `UPSTREAM_UNAVAILABLE` — **exists nowhere in the
+codebase.** It is a better design than what was built: a caller currently cannot distinguish a
+missing entry from unpublished picks without parsing English. Recorded as an unbuilt improvement.
 
 ---
 
 ## 4. Acceptance criteria
 
-- `xg recommend` runs end to end from a cold local checkout with no network access, using pinned
-  bronze snapshots.
-- `xg recommend --gw 1 --squad-file ...` works before the GW1 deadline of `2026-08-21T17:30Z`.
+Met today:
+
+- `xg recommend` runs end to end from a local checkout with no network access, from stored bronze
+  snapshots.
 - No route path contains `{team_id}`.
-- Every response and every `--json` output carries the full provenance block.
-- Identical inputs and the same `--run-id` produce byte-identical output.
-- The HTTP layer contains no planning, scoring or constraint logic — it only validates, calls domain
-  packages, and serialises.
-- No wildcard or chip route exists in the MVP surface.
+- The HTTP layer contains no planning, scoring or constraint logic — it validates, calls
+  `service.py`, and serialises.
+- No wildcard or chip route exists.
+- Every decision response carries provenance, and the web front end renders it.
+
+Not met, and stated rather than quietly dropped:
+
+- **Byte-identical replay of an arbitrary command is not supported.** There is no `--run-id`.
+  Experiments are reproducible from their manifests; ad-hoc CLI invocations are not.
+- **Machine-readable errors are not implemented** on either surface. See §2.6 and §3.5.
 
 ---
 
@@ -432,9 +278,10 @@ caller can tell a genuine mistake from a stale pin.
 
 - [Transfer Planner](../optimization/02_transfer_planner.md) — what `xg recommend` calls
 - [Wildcard Planner](../optimization/03_wildcard_planner.md) — deferred; routes deliberately absent
-- [Database Schema](../data/04_database_schema.md) — repository interface behind every read
+- [Database Schema](../data/04_database_schema.md) — what is persisted, and what is not
 - [Data Sources](../data/01_data_sources.md) — what `xg ingest` fetches
-- [Prediction Models](../ml/07_prediction_models.md) — what `xg predict` runs
-- [Dashboard](../frontend/02_dashboard.md) — deferred third surface
-- [Build Plan](../implementation/01_build_plan.md) — phase 8 delivers the CLI
+- [Prediction Models](../ml/07_prediction_models.md) — the models behind every projection
+- [Model Artifacts](../ml/model_artifacts.md) — what `xg models` inspects
+- [Dashboard](../frontend/02_dashboard.md) — the third surface, and which of its views exist
+- [`apps/web/README.md`](../../apps/web/README.md) — the front end as built
 - [Documentation Index](../README.md)

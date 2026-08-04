@@ -1,64 +1,70 @@
+<!-- claims
+routes: GET /squad/{entry_id}, GET /recommend/{entry_id}, GET /players, GET /features/importance, GET /features/discovered, GET /hypotheses, GET /clusters, GET /experiments
+-->
+
 # Dashboard
 
 | Field | Value |
 |---|---|
 | Project | XG Alonso |
 | Document | Dashboard |
-| Version | 1.0 |
-| Status | Deferred (Post-MVP) |
+| Version | 1.1 |
+| Status | Partially shipped |
 | Owner | Product |
 | Dependencies | [Public API](../api/01_public_api.md), [Transfer Planner](../optimization/02_transfer_planner.md), [Feature Factory](../ml/02_feature_factory.md) |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-08-04 |
 
 ---
 
-## 1. Deferral notice
+## 1. Status
 
-**No frontend ships in the MVP.** Binding decision D4 sets the surface order: CLI first, then
-FastAPI, then Next.js. The dashboard is the third surface and is not on the critical path to GW1 of
-2026/27 (D9).
+**The frontend shipped.** `apps/web` serves four routes — the recommendation (`/`), squad planning
+(`/plan`), feature importance (`/features`) and the discovery lab (`/discovery`) — built from nine
+components over `apps/api`. See [`apps/web/README.md`](../../apps/web/README.md) for the design and
+the honesty constraints it holds itself to.
 
-This document exists so the eventual UI is built against contracts the API already provides, rather
-than the API being retrofitted to a UI designed in isolation. Each view below names the subsystem it
-depends on and whether that subsystem exists yet.
+This document previously read *"No frontend ships in the MVP"*, citing D4. D4's ordering was in fact
+followed — CLI, then API, then Next.js — but its "no frontend in the MVP" clause has been superseded;
+see the dated note in `CLAUDE.md`. The document is kept because its view register and its
+cross-cutting requirements are still the right frame, and because two of the six views really are
+still blocked.
 
-The MVP equivalent of every view below is terminal output from `xg`. See
-[Public API §2](../api/01_public_api.md).
+The CLI equivalent of every view remains available. See [Public API §2](../api/01_public_api.md).
 
 ---
 
 ## 2. View register
 
-| View | Purpose | Depends on | Blocked by |
+| View | Purpose | Reads | Status |
 |---|---|---|---|
-| Squad | The entry's current 15, XI, formation, captain, bench, bank, squad value, purchase and selling prices | `GET /v1/entries/{entry_id}/squad` | Nothing — buildable as soon as the HTTP API exists |
-| Recommendations | Ranked transfer recommendations against HOLD, with hit accounting and explanations | `GET /v1/entries/{entry_id}/recommendations` | Nothing beyond the API |
-| Players | Player explorer: filter, sort, compare, per-player projections and history | `GET /v1/players`, `GET /v1/players/{player_id}` | Nothing beyond the API |
-| Market | Price rises and falls, ownership momentum, transfer flow, value opportunities | Price model | **Deferred price model (D11)** — no current-season price data exists at GW1, so this view has nothing truthful to display |
-| Feature Lab | Feature catalogue, lineage, importance, stability, promotion and retirement history | Feature registry and Feature Scientist | **Post-MVP subsystems** — [Feature Scientist](../ml/03_feature_scientist.md) is `Deferred (Post-MVP)` and the `feature_registry` / `feature_values` tables are not built |
-| Knowledge Lab | Accumulated hypotheses, experiments, outcomes and what has been learned across seasons | Research layer | **Post-MVP subsystem** — [Knowledge Lab](../research/01_knowledge_lab.md) is `Deferred (Post-MVP)`; product comes first (D10) |
+| Recommendation | The transfer written as a sentence, the resulting XI in the chosen formation, the arithmetic beneath it | `GET /recommend/{entry_id}`, `GET /squad/{entry_id}` | **Shipped** at `/` |
+| Plan | Build a squad from requirements typed in plain English, with a justification per pick | `POST /squad/plan`, `POST /requirements/parse`, `GET /build-squad/explained` | **Shipped** at `/plan` |
+| Players | Ranked player pool and per-player ledger | `GET /players` | **Shipped**, as the depth panel and ledger inside `/` rather than as a standalone explorer. Filter, sort and side-by-side compare are not built |
+| Feature Lab | Feature importance out of sample; discovered features, accepted and rejected; hypotheses and their refutation conditions; clusters; experiment manifests | `GET /features/importance`, `GET /features/discovered`, `GET /hypotheses`, `GET /clusters`, `GET /experiments` | **Shipped** across `/features` and `/discovery`. Not as specified: there is no feature *registry* view, because there is no `feature_registry` table — lineage is carried on the artifact manifest and the catalogue version instead |
+| Market | Price rises and falls, ownership momentum, transfer flow, value opportunities | Price model | **Blocked (D11)** — no current-season price data exists at GW1, so this view has nothing truthful to display |
+| Knowledge Lab | What has been learned across seasons, as opposed to within one experiment | Research layer | **Partly subsumed.** `/discovery` shows hypotheses, verdicts and experiments, which is most of what this view was for. The cross-season lesson accumulation in [Knowledge Lab](../research/01_knowledge_lab.md) is still not built |
 
-Three of the six views are blocked on subsystems that do not exist. Building the shell for all six
-would produce three views with placeholder content, which is worse than three honest views.
+The rule that governed the build order held: no view shipped as an empty shell. Market is absent
+rather than present-and-blank.
 
-### 2.1 Build order when the frontend starts
+### 2.1 Build order followed
 
 ```mermaid
 flowchart LR
-    A["Squad"] --> B["Recommendations"]
-    B --> C["Players"]
-    C --> D["Market: needs price model"]
-    C --> E["Feature Lab: needs feature registry"]
-    E --> F["Knowledge Lab: needs research layer"]
+    A["Recommendation"] --> B["Plan"]
+    B --> C["Features"]
+    C --> D["Discovery"]
+    D -.blocked.-> E["Market: needs price model"]
 ```
 
-Squad and Recommendations together constitute the product. Everything after that is depth.
+The Recommendation view alone constitutes the product. Everything after it is depth.
 
 ---
 
 ## 3. Cross-cutting requirements
 
-These apply to every view whenever the frontend is built.
+These apply to every view. They are met today and are load-bearing rather than aspirational — see
+the "Honesty constraints" section of [`apps/web/README.md`](../../apps/web/README.md).
 
 | Requirement | Rule |
 |---|---|
@@ -76,8 +82,8 @@ These apply to every view whenever the frontend is built.
 - [Public API](../api/01_public_api.md) — the contracts every view reads
 - [Transfer Planner](../optimization/02_transfer_planner.md) — what the Recommendations view displays
 - [Feature Factory](../ml/02_feature_factory.md) — what the Feature Lab would expose
-- [Feature Scientist](../ml/03_feature_scientist.md) — deferred, blocks the Feature Lab
-- [Knowledge Lab](../research/01_knowledge_lab.md) — deferred, blocks the Knowledge Lab view
+- [Feature Scientist](../ml/03_feature_scientist.md) — superseded; the capability behind `/discovery`
+- [Knowledge Lab](../research/01_knowledge_lab.md) — still deferred; the cross-season half of `/discovery`
 - [Repository Structure](../architecture/01_repository_structure.md) — `apps/web` ownership boundary
-- [Build Plan](../implementation/01_build_plan.md) — the frontend is after phase 9
+- [`apps/web/README.md`](../../apps/web/README.md) — the front end as built
 - [Documentation Index](../README.md)
