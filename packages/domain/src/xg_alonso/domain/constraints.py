@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
+from itertools import product
 
 from xg_alonso.contracts.constraints import SquadViolation
 from xg_alonso.contracts.identifiers import TeamId, TenthsOfMillion
@@ -25,11 +26,38 @@ __all__ = [
     "check_squad",
     "check_starting_xi",
     "is_legal_squad",
+    "legal_formations",
 ]
 
 # `SquadViolation` lives in `contracts` because a simulation *carries* one and
 # `contracts` may not import `domain`. Re-exported here, where it is produced,
 # so every existing import keeps resolving and there is still exactly one type.
+
+
+def legal_formations(rules: SquadRules) -> list[tuple[int, int, int, int]]:
+    """Every legal ``(GKP, DEF, MID, FWD)`` shape, derived from the rules.
+
+    Read from ``min_play``/``max_play`` rather than hardcoded, so a rule change
+    is picked up from the pinned snapshot like every other constant.
+
+    Lives here rather than in :mod:`xg_alonso.optimization.lineup`, where it was
+    first written, because it is a statement about squad legality and nothing
+    else — it takes only :class:`~xg_alonso.domain.rules.SquadRules` and returns
+    shapes, with no reference to points, predictions or search.
+    :func:`~xg_alonso.domain.context_features.encode_context` needs it and sits
+    below ``optimization`` in the layering, so the choice was to move it down or
+    to write it twice. ``optimization`` re-exports it, so every existing import
+    still resolves to this one definition.
+    """
+    bounds = [
+        range(rules.rule_for(p).min_play, rules.rule_for(p).max_play + 1)
+        for p in (Position.GKP, Position.DEF, Position.MID, Position.FWD)
+    ]
+    shapes: list[tuple[int, int, int, int]] = []
+    for gkp, dfd, mid, fwd in product(*bounds):
+        if gkp + dfd + mid + fwd == rules.starting_size:
+            shapes.append((gkp, dfd, mid, fwd))
+    return shapes
 
 
 def check_squad(

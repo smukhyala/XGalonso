@@ -12,15 +12,31 @@ designed several incompatible ways, so each now has exactly one definition:
 - :mod:`~xg_alonso.contracts.folds` — the walk-forward fold
 - :mod:`~xg_alonso.contracts.storage` — the storage protocols
 
-Two further modules describe the objective-conditioned discovery layer:
+Three further modules describe the context-conditioned discovery layer:
 
 - :mod:`~xg_alonso.contracts.objective` — what a manager is trying to achieve,
   what they will not allow, and what they believe
+- :mod:`~xg_alonso.contracts.context` — those three plus the situation they apply
+  to, and the three identities (pool digest, cache bucket, provenance
+  fingerprint) that keep per-manager conditioning from fragmenting the artifact
+  space
 - :mod:`~xg_alonso.contracts.discovery` — hypotheses, feature programs, their
   evaluations, clusters and experiment manifests
 """
 
 from xg_alonso.contracts.constraints import SquadViolation
+from xg_alonso.contracts.context import (
+    CONTEXT_VERSION,
+    BeliefLoad,
+    BudgetBand,
+    ClubPressure,
+    ContextBucket,
+    DecisionContext,
+    HitAppetite,
+    LockPressure,
+    LockShape,
+    TransferFreedom,
+)
 from xg_alonso.contracts.discovery import (
     AcceptanceStatus,
     ClusterSummary,
@@ -137,6 +153,7 @@ from xg_alonso.contracts.squad import ChipState, ChipStatus, SquadPick, SquadSta
 from xg_alonso.contracts.storage import BronzeSnapshotStore, SnapshotRef, TableStore
 
 __all__ = [
+    "CONTEXT_VERSION",
     "EVIDENCE_PANEL_VERSION",
     "EXPLANATORY_PANEL",
     "FORM_SIGNAL_CLAMP",
@@ -146,17 +163,22 @@ __all__ = [
     "AutosubResult",
     "BaselineComparison",
     "BeliefEntity",
+    "BeliefLoad",
     "BeliefProposition",
     "BronzeSnapshotStore",
+    "BudgetBand",
     "CaptainSource",
     "Captaincy",
     "ChipIntent",
     "ChipState",
     "ChipStatus",
+    "ClubPressure",
     "ClusterSummary",
     "CompiledIntent",
     "ComplementarityClass",
     "ComponentExpectations",
+    "ContextBucket",
+    "DecisionContext",
     "DiscoveredFeatureSpec",
     "EntityLevel",
     "EntryId",
@@ -177,9 +199,12 @@ __all__ = [
     "GameweekSimulation",
     "GameweekSlate",
     "GenerationSource",
+    "HitAppetite",
     "HypothesisStatus",
     "LeakageRisk",
     "Lesson",
+    "LockPressure",
+    "LockShape",
     "ManagerConstraints",
     "ManagerObjective",
     "MinutesPrediction",
@@ -222,6 +247,7 @@ __all__ = [
     "TeamQuota",
     "TenthsOfMillion",
     "TimeSource",
+    "TransferFreedom",
     "TransferMove",
     "TransferPackage",
     "TransferRecommendation",

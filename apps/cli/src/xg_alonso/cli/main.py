@@ -8,8 +8,15 @@ that is not convincing as plain text will not become convincing in a card.
 
 from __future__ import annotations
 
+import gzip
 import json
+import os
+import shutil
+import tempfile
+import time
 import uuid
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +34,7 @@ from xg_alonso.cli.pipeline import (
     recommend,
     squad_from_payload,
 )
+from xg_alonso.contracts.context import DecisionContext
 from xg_alonso.contracts.identifiers import (
     EntryId,
     GameweekId,
@@ -38,6 +46,7 @@ from xg_alonso.contracts.identifiers import (
 )
 from xg_alonso.contracts.provenance import utc_now
 from xg_alonso.contracts.squad import SquadPick
+from xg_alonso.discovery.feasible import FeasiblePool
 from xg_alonso.explanations.render import render_recommendation, render_squad_summary
 from xg_alonso.pipelines.ingestion import (
     SOURCE_BOOTSTRAP,
@@ -77,6 +86,60 @@ SeasonOpt = Annotated[str, typer.Option("--season", help="Season in YYYY-YY form
 
 def _bronze(data_root: Path) -> FileSystemBronzeStore:
     return FileSystemBronzeStore(data_root / "bronze")
+
+
+def _require_input(path: Path, *, produced_by: str, what: str = "") -> Path:
+    """Refuse to read a missing table, naming the command that writes it.
+
+    A bare :func:`polars.read_parquet` on an absent file raises
+    ``FileNotFoundError`` with a path and nothing else, which tells a first-time
+    user neither what the file is nor how to get one. Every command that reads
+    the silver or gold layers routes through here so the answer is always in
+    the message rather than in the source.
+
+    Args:
+        path: The file that must exist.
+        produced_by: The ``xg`` command that writes it, without the ``xg``.
+        what: Optional plain description, when the filename is not self-evident.
+
+    Returns:
+        ``path``, so this composes inline with the read.
+
+    Raises:
+        typer.Exit: with status 1, after printing the guidance.
+    """
+    if path.exists():
+        return path
+
+    description = f"{what} " if what else ""
+    typer.secho(
+        f"No {description}file at {path}. Run `xg {produced_by}` first.",
+        fg=typer.colors.RED,
+    )
+    raise typer.Exit(1)
+
+
+def _silver(data_root: Path) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """The two silver tables every historical command needs, guarded.
+
+    One helper rather than a guard per call site: three commands read exactly
+    this pair, and the third of them had no check at all.
+    """
+    stats = pl.read_parquet(
+        _require_input(
+            data_root / "silver" / "player_gameweek_stats.parquet",
+            produced_by="backfill",
+            what="per-gameweek history",
+        )
+    )
+    history = pl.read_parquet(
+        _require_input(
+            data_root / "silver" / "players_history.parquet",
+            produced_by="backfill",
+            what="per-season player",
+        )
+    )
+    return stats, history
 
 
 def _load_context(data_root: Path, season: Season) -> SliceContext:
@@ -711,7 +774,9 @@ def squad(
 ) -> None:
     """Show a squad with projected points per player."""
     context = _load_context(data_root, parse_season(season))
-    recommendation, predictions = _run(context, entry_id, squad_file, model_path)
+    recommendation, predictions = _run(
+        context, entry_id, squad_file, model_path, data_root=data_root
+    )
     names = context.player_names()
 
     state = _squad_state(context, entry_id, squad_file)
@@ -783,8 +848,26 @@ def _squad_state(context: SliceContext, entry_id: int, squad_file: Path | None):
         ) from exc
 
 
+def _signals_path(data_root: Path) -> Path:
+    """Where sourced form signals live for *this* data root.
+
+    ``pipeline._DEFAULT_SIGNALS`` is the literal ``.data/signals/...``, so
+    before this existed a run under ``--data-root /somewhere/else`` still read
+    signals out of ``.data`` — the one input that silently moves a
+    recommendation, taken from a store the caller had explicitly redirected
+    away from. A missing file still means "no outside information", which
+    remains the correct default.
+    """
+    return data_root / "signals" / "form_signals.json"
+
+
 def _run(  # type: ignore[no-untyped-def]
-    context: SliceContext, entry_id: int, squad_file: Path | None, model_path: Path | None = None
+    context: SliceContext,
+    entry_id: int,
+    squad_file: Path | None,
+    model_path: Path | None = None,
+    *,
+    data_root: Path = DEFAULT_DATA_ROOT,
 ):
     state = _squad_state(context, entry_id, squad_file)
     manifest = git_manifest("recommend", run_id=f"rec-{uuid.uuid4().hex[:12]}")
@@ -803,6 +886,7 @@ def _run(  # type: ignore[no-untyped-def]
         code_version=manifest.git_commit,
         generated_at=utc_now(),
         models=models,
+        form_signals_path=_signals_path(data_root),
     )
 
 
@@ -829,7 +913,7 @@ def recommend_command(
 ) -> None:
     """Recommend the best legal single transfer, or advise holding."""
     context = _load_context(data_root, parse_season(season))
-    recommendation, _ = _run(context, entry_id, squad_file, model_path)
+    recommendation, _ = _run(context, entry_id, squad_file, model_path, data_root=data_root)
 
     prices = {
         PlayerCode(int(r["player_code"])): int(r["current_price"])
@@ -850,8 +934,11 @@ def main() -> None:
     app()
 
 
-if __name__ == "__main__":
-    main()
+# NOTE: the ``if __name__ == "__main__"`` guard lives at the *end* of this file,
+# not here. Sitting at this line it ran ``app()`` while the module was still
+# being executed, so every command defined below — two thirds of them, including
+# `train`, `discover` and `demo` — was not yet registered, and
+# ``python -m xg_alonso.cli.main demo`` answered "No such command 'demo'".
 
 
 @app.command(name="ingest-history")
@@ -1509,14 +1596,8 @@ def backtest(
     from xg_alonso.prediction.baseline import predict_frame
 
     parsed = parse_season(season)
-    silver = data_root / "silver"
-    stats_path = silver / "player_gameweek_stats.parquet"
-    players_path = silver / "players_history.parquet"
-    if not stats_path.exists() or not players_path.exists():
-        raise typer.BadParameter("no backfill found. Run `xg backfill` first.")
-
-    all_stats = pl.read_parquet(stats_path)
-    history = pl.read_parquet(players_path).filter(pl.col("season") == str(parsed))
+    all_stats, all_history = _silver(data_root)
+    history = all_history.filter(pl.col("season") == str(parsed))
     if history.is_empty():
         raise typer.BadParameter(f"no player history for {season}. Backfill it first.")
 
@@ -1971,7 +2052,10 @@ def _objective_feature_columns(
 
     context = CompileContext(player_stats=player_stats, stage=stage_window)
     added: list[str] = []
-    for spec in specs:
+    for spec, note in specs:
+        # Borrowed evidence is announced, never presented as this run's own.
+        if note:
+            typer.secho(f"    {spec.name}: {note}", fg=typer.colors.YELLOW)
         if spec.name in frame.columns:
             continue
         try:
@@ -2189,6 +2273,28 @@ def train(
     min_gameweek: Annotated[
         int, typer.Option("--min-gw", help="Skip opening gameweeks with empty windows.")
     ] = 4,
+    validate_gameweeks: Annotated[
+        int,
+        typer.Option(
+            "--validate-gws",
+            help=(
+                "Length of each walk-forward validation window. Widening it produces "
+                "fewer, larger folds — the only honest way to make a run cheaper, since "
+                "every fold is still strictly out of sample."
+            ),
+        ),
+    ] = 4,
+    max_iter: Annotated[
+        int,
+        typer.Option(
+            "--max-iter",
+            help=(
+                "Boosting iteration cap. 0 keeps the estimator default. Recorded on the "
+                "saved artifact, so a deliberately small model can never be mistaken for "
+                "the full one."
+            ),
+        ),
+    ] = 0,
 ) -> None:
     """Fit component models on historical seasons.
 
@@ -2205,9 +2311,11 @@ def train(
         train_component_models,
     )
 
-    stats_path = data_root / "silver" / "player_gameweek_stats.parquet"
-    if not stats_path.exists():
-        raise typer.BadParameter("no backfill found. Run `xg backfill` first.")
+    stats_path = _require_input(
+        data_root / "silver" / "player_gameweek_stats.parquet",
+        produced_by="backfill",
+        what="per-gameweek history",
+    )
 
     wanted = [s.strip() for s in seasons.split(",")]
     stats = pl.read_parquet(stats_path)
@@ -2238,10 +2346,18 @@ def train(
             )
 
     typer.echo("  fitting component models ...")
+    if max_iter or validate_gameweeks != 4:
+        typer.secho(
+            f"    reduced fit: validation window {validate_gameweeks} gameweek(s)"
+            f"{f', max_iter {max_iter}' if max_iter else ''}",
+            fg=typer.colors.YELLOW,
+        )
     models = train_component_models(
         frame,
         feature_columns=tuple(feature_columns),
         label_columns=data.label_columns,
+        validate_gameweeks=validate_gameweeks,
+        model_kwargs={"max_iter": max_iter} if max_iter else None,
     )
 
     saved = SavedModel(
@@ -2510,6 +2626,13 @@ def score(
         Path | None,
         typer.Option("--model", help="Score a fitted model instead of the closed-form baseline."),
     ] = None,
+    distributions: Annotated[
+        bool,
+        typer.Option(
+            "--distributions/--no-distributions",
+            help="Also check whether the reported uncertainty tells the truth.",
+        ),
+    ] = True,
 ) -> None:
     """Score assembled expected points against what actually happened.
 
@@ -2524,6 +2647,24 @@ def score(
     the optimizer. Slices by position and price band come with it, since a
     pooled number hides a model that is excellent at goalkeepers and blind to
     forwards.
+
+    **A second, distributional report follows it, on by default.** Every number
+    above is about a point estimate; `expected_points_sd` travels beside that
+    estimate all the way to the interface and the optimizer's risk penalty, and
+    nothing has ever checked whether it is true. `--no-distributions` skips it,
+    but the default is on: an audit you have to opt into is an audit nobody
+    runs, and the cost is one closed-form pass over rows already in memory —
+    no extra feature build and no extra model call.
+
+    What that second report is, exactly, matters and is stated in the output
+    too. **This prediction path emits no predictive distribution.** It emits a
+    mean and a standard deviation, so the distribution scored is a Gaussian
+    discretised onto the points lattice from that pair. That is not a shipped
+    forecast being graded; it is precisely the negative control
+    `calibration.gaussian_pmf` documents — "built from the *incumbent*
+    ``expected_points_sd``, this is what the shipped code is really claiming" —
+    and it is labelled as such rather than presented as a distributional model
+    this repository has.
     """
     from xg_alonso.contracts.prediction import Position
     from xg_alonso.evaluation import (
@@ -2536,14 +2677,8 @@ def score(
     from xg_alonso.prediction.baseline import predict_frame
 
     parsed = parse_season(season)
-    silver = data_root / "silver"
-    stats_path = silver / "player_gameweek_stats.parquet"
-    players_path = silver / "players_history.parquet"
-    if not stats_path.exists() or not players_path.exists():
-        raise typer.BadParameter("no backfill found. Run `xg backfill` first.")
-
-    all_stats = pl.read_parquet(stats_path)
-    history = pl.read_parquet(players_path).filter(pl.col("season") == str(parsed))
+    all_stats, all_history = _silver(data_root)
+    history = all_history.filter(pl.col("season") == str(parsed))
     if history.is_empty():
         raise typer.BadParameter(f"no player history for {season}. Backfill it first.")
 
@@ -2660,6 +2795,10 @@ def score(
             {
                 "player_code": [int(p.player_code) for p in predictions],
                 "predicted": [float(p.expected_points) for p in predictions],
+                # Carried on the same row as the estimate it qualifies, so the
+                # distributional report below scores the exact pair the
+                # interface displayed rather than a re-derived one.
+                "predicted_sd": [float(p.expected_points_sd) for p in predictions],
                 "position": [str(p.position.value) for p in predictions],
             }
         )
@@ -2692,6 +2831,83 @@ def score(
         typer.secho(
             "\n  WARNING: expected points is constant across players. The optimizer "
             "cannot rank anybody on this output.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+
+    if distributions:
+        _echo_distribution_report(frame)
+
+
+#: Nominal level the headline honesty check is read at. Central, so a failure
+#: here is a failure of the body of the distribution rather than of a tail.
+_HEADLINE_LEVEL = 0.8
+
+
+def _echo_distribution_report(frame: pl.DataFrame) -> None:
+    """Score the reported uncertainty, and say plainly what was scored.
+
+    Separated from :func:`score` so the point-estimate report above stays
+    exactly what it was: this reads the frame that was already assembled, adds
+    no I/O, and cannot change a number printed before it.
+    """
+    from xg_alonso.evaluation.calibration import (
+        frame_from_distributions,
+        gaussian_pmf,
+        score_distributions,
+    )
+
+    typer.echo("\n" + "-" * 72)
+    typer.secho(
+        "Distributional check — NEGATIVE CONTROL, not a shipped forecast",
+        fg=typer.colors.CYAN,
+        bold=True,
+    )
+    typer.echo(
+        "  Nothing in this prediction path produces a predictive distribution.\n"
+        "  It produces a mean and `expected_points_sd`, so what is scored below\n"
+        "  is a Gaussian discretised onto the points lattice from that pair —\n"
+        "  what the shipped code is really claiming when it reports an sd.\n"
+        "  A failure here is a finding about `expected_points_sd`, and a pass\n"
+        "  would not be evidence that this repository has a calibrated\n"
+        "  distributional model, because it does not have one yet.\n"
+    )
+
+    built = [
+        gaussian_pmf(float(mean), float(sd))
+        for mean, sd in zip(frame["predicted"], frame["predicted_sd"], strict=True)
+    ]
+    scored = score_distributions(
+        frame_from_distributions(
+            built,
+            [int(v) for v in frame["actual"]],
+            extra={
+                # Each optional column unlocks one slice. Minutes matters most:
+                # the zero atom drags every pooled statistic toward looking
+                # acceptable, and `started (60+)` is where the incumbent sd is
+                # documented to be inverted.
+                "minutes": list(frame["minutes"]),
+                "position": list(frame["position"]),
+                "price": list(frame["price"]),
+                "predicted": list(frame["predicted"]),
+            },
+        ),
+        label="expected_points_sd as a gaussian",
+    )
+    typer.echo(scored.summary())
+
+    # Coverage travels with the width that bought it, in the report above and
+    # here. A single number would let a forecast look honest by being wide.
+    band = next(
+        (b for b in scored.appeared_only.coverage if b.nominal == _HEADLINE_LEVEL),
+        None,
+    )
+    if band is not None and scored.appeared_only.n > 0 and band.gap < -0.05:
+        typer.secho(
+            f"\n  FINDING: among players who appeared, the nominal "
+            f"{band.nominal:.0%} interval covered {band.empirical:.1%} at a mean "
+            f"width of {band.mean_width:.2f} points. The reported uncertainty is "
+            "too narrow; a risk penalty computed from it understates risk.",
             fg=typer.colors.RED,
             bold=True,
         )
@@ -2783,13 +2999,16 @@ def importance(
     from xg_alonso.features.opponent import OPPONENT_FEATURES
     from xg_alonso.prediction import build_training_frame, load_models
 
-    stats_path = data_root / "silver" / "player_gameweek_stats.parquet"
-    if not stats_path.exists():
-        raise typer.BadParameter("no backfill found. Run `xg backfill` first.")
-
-    resolved_model = model_path or (data_root / "models" / "component_models.pkl")
-    if not resolved_model.exists():
-        raise typer.BadParameter(f"no model at {resolved_model}. Run `xg train` first.")
+    stats_path = _require_input(
+        data_root / "silver" / "player_gameweek_stats.parquet",
+        produced_by="backfill",
+        what="per-gameweek history",
+    )
+    resolved_model = _require_input(
+        model_path or (data_root / "models" / "component_models.pkl"),
+        produced_by="train",
+        what="trained model",
+    )
 
     saved = load_models(resolved_model)
     models = saved.models
@@ -3118,6 +3337,18 @@ def discover_command(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show the parsed intent and stop.")
     ] = False,
+    squad_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--squad-file",
+            help=(
+                "Measure over the players this squad could actually buy, rather than "
+                "over the whole league. Without it, budget, formation and club-quota "
+                "constraints have no squad to be relative to and cannot narrow anything."
+            ),
+        ),
+    ] = None,
+    season: SeasonOpt = DEFAULT_SEASON,
 ) -> None:
     """Compile a request, discover features that serve it, and report the verdicts.
 
@@ -3142,8 +3373,7 @@ def discover_command(
         raise typer.Exit(1)
 
     frame = pl.read_parquet(frame_file)
-    stats = pl.read_parquet(data_root / "silver" / "player_gameweek_stats.parquet")
-    history = pl.read_parquet(data_root / "silver" / "players_history.parquet")
+    stats, history = _silver(data_root)
     # Indexed by full name *and* by unambiguous surname: the stored name is
     # "Erling Haaland" and a manager types "Haaland".
     names = build_name_index(
@@ -3198,6 +3428,22 @@ def discover_command(
     store = ParquetTableStore(data_root / "discovery")
     registry = DiscoveryRegistry(store)
 
+    # The decision context is what turns "objective-conditioned" into
+    # "context-conditioned": with a squad attached, every measurement below is
+    # taken over the players this manager could actually buy. Without one, the
+    # run measures the whole league and `DiscoveryResult.summary()` says so —
+    # the two are different questions and must not be reported alike.
+    decision_context = None
+    squad_rules = None
+    if squad_file is not None:
+        slice_context = _load_context(data_root, Season(season))
+        squad_rules = slice_context.squad_rules
+        decision_context = DecisionContext(
+            bundle=bundle,
+            requirements=intent.requirements,
+            squad=_squad_state(slice_context, 0, squad_file),
+        )
+
     def on_stage(stage: ExperimentStage, detail: str) -> None:
         typer.echo(f"  [{stage.value:<19}] {detail}")
 
@@ -3220,6 +3466,8 @@ def discover_command(
                 use_llm=use_llm,
             ),
             on_stage=on_stage,
+            decision_context=decision_context,
+            rules=squad_rules,
         )
     finally:
         pass
@@ -3297,6 +3545,118 @@ def discover_command(
         )
 
 
+def _attach_price(
+    frame: pl.DataFrame, stats: pl.DataFrame, *, seasons: Sequence[str]
+) -> pl.DataFrame:
+    """Attach ``price_tenths``: the last price visible *before* the deadline.
+
+    **Not the label row's own ``value``.** In the silver table ``value`` is the
+    price recorded against the gameweek the player then played, so reading it
+    off the outcome row is reading a number from the far side of the deadline
+    the frame claims to be built at. It would very probably be harmless — FPL
+    sets a gameweek's price before its deadline — but "probably harmless" is the
+    argument that puts leaks in datasets, and the whole reason this frame is
+    expensive to build is that it refuses that argument everywhere else.
+
+    So the price is taken from the most recent gameweek *strictly before* the
+    label gameweek, via a backward as-of join. The cost is staleness of at most
+    one gameweek, which for a 0.1m price move is nothing; the benefit is that
+    :func:`xg_alonso.features.leakage.find_leakage` can prove the column does
+    not move when future records are appended.
+
+    A player's first gameweek in a season has no prior row, so the price is
+    null there rather than back-filled from another season.
+    """
+    prices = (
+        stats.filter(pl.col("season").is_in(list(seasons)))
+        .select(
+            "player_code",
+            "season",
+            pl.col("gameweek_id").alias("price_gameweek"),
+            pl.col("value").cast(pl.Int64).alias("price_tenths"),
+        )
+        .unique(subset=["player_code", "season", "price_gameweek"])
+        .sort(["player_code", "season", "price_gameweek"])
+    )
+    with_key = frame.with_columns(
+        (pl.col("label_gameweek") - 1).cast(pl.Int64).alias("__price_as_of")
+    ).sort(["player_code", "label_season", "__price_as_of"])
+
+    joined = with_key.join_asof(
+        prices,
+        left_on="__price_as_of",
+        right_on="price_gameweek",
+        by_left=["player_code", "label_season"],
+        by_right=["player_code", "season"],
+        strategy="backward",
+        # Both sides are sorted immediately above. Polars cannot verify that
+        # itself once `by` groups are supplied and warns to say so; the repo
+        # runs `filterwarnings = ["error"]`, so an unsuppressed warning here
+        # would fail every test that builds a discovery frame.
+        check_sortedness=False,
+    )
+    return joined.drop([c for c in ("__price_as_of", "price_gameweek") if c in joined.columns])
+
+
+def _attach_team_id(frame: pl.DataFrame, data_root: Path) -> pl.DataFrame:
+    """Attach ``team_id`` in the *current* season's id space.
+
+    Club identity does not survive a season boundary. FPL renumbers ``team.id``
+    alphabetically every year, so club 5 in 2023-24 and club 5 in 2026-27 are
+    routinely different clubs. A frame spanning old seasons therefore cannot
+    simply carry the ``team_id`` those seasons recorded — joined against a
+    present-day squad it would silently compare unrelated clubs, and a
+    max-three-per-club constraint derived from it would restrict the wrong ones.
+
+    The mapping goes through ``team_name`` against the pinned bootstrap
+    snapshot, so every row is expressed in the id space the manager's squad
+    uses. Clubs that were in the league then and are not now — the promoted and
+    relegated — get a null ``team_id``. That is the honest answer: there is no
+    club-quota question to ask about a team the manager cannot own. Consumers
+    treat null as "no club constraint applies", never as club zero.
+
+    Falls back to leaving the column absent, with a warning, when no bootstrap
+    snapshot is available. An absent column makes
+    :func:`~xg_alonso.discovery.feasible.feasible_pool` report that it could not
+    derive a club-constrained pool, which is preferable to a column of nulls
+    that reads as a successful mapping.
+    """
+    if "team_name" not in frame.columns:
+        return frame
+
+    bronze = _bronze(data_root)
+    bootstrap_ref = bronze.latest(SOURCE_BOOTSTRAP)
+    if bootstrap_ref is None:
+        typer.secho(
+            "  no bootstrap snapshot, so `team_id` is omitted; club-constrained "
+            "discovery pools will report themselves unavailable",
+            fg=typer.colors.YELLOW,
+        )
+        return frame
+
+    payload = json.loads(bronze.read(bootstrap_ref))
+    teams = pl.DataFrame(
+        {
+            "team_name": [str(team["name"]) for team in payload.get("teams", [])],
+            "team_id": [int(team["id"]) for team in payload.get("teams", [])],
+        }
+    )
+    if teams.height == 0:
+        return frame
+
+    mapped = frame.join(teams, on="team_name", how="left")
+    unmapped = int(mapped.get_column("team_id").null_count())
+    if unmapped:
+        share = unmapped / mapped.height
+        typer.secho(
+            f"  {unmapped:,} rows ({share:.1%}) are clubs not in the current league "
+            "(promoted or relegated since); their team_id is null and club quotas "
+            "will not bind on them",
+            fg=typer.colors.YELLOW,
+        )
+    return mapped
+
+
 @app.command(name="build-discovery-frame")
 def build_discovery_frame_command(
     data_root: DataRoot = DEFAULT_DATA_ROOT,
@@ -3316,8 +3676,7 @@ def build_discovery_frame_command(
     from xg_alonso.prediction.dataset import build_training_frame
 
     wanted = [s.strip() for s in seasons.split(",") if s.strip()]
-    stats = pl.read_parquet(data_root / "silver" / "player_gameweek_stats.parquet")
-    history = pl.read_parquet(data_root / "silver" / "players_history.parquet")
+    stats, history = _silver(data_root)
 
     typer.echo(f"Building features as of every deadline in {', '.join(wanted)}...")
     data = build_training_frame(stats, seasons=wanted, min_gameweek=min_gameweek)
@@ -3347,6 +3706,9 @@ def build_discovery_frame_command(
         right_on=["player_code", "season"],
         how="left",
     ).filter(pl.col("label_total_points").is_not_null() & pl.col("position").is_not_null())
+
+    frame = _attach_price(frame, stats, seasons=wanted)
+    frame = _attach_team_id(frame, data_root)
 
     destination = data_root / "gold" / "discovery_training.parquet"
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -3428,6 +3790,7 @@ def advise_command(
         code_version=manifest.git_commit,
         generated_at=utc_now(),
         models=models,
+        form_signals_path=_signals_path(data_root),
     )
 
     for problem in result.constraint_problems:
@@ -3478,3 +3841,626 @@ def advise_command(
             "  Shown separately on purpose: a belief is your judgement, not evidence.",
             fg=typer.colors.BLUE,
         )
+
+
+# ---------------------------------------------------------------------------
+# The offline demo
+#
+# Everything below exists so that `git clone && make install && uv run xg demo`
+# produces a real recommendation with no network, no credential and no local
+# `.data`. It **orchestrates** the commands above and reimplements none of
+# them: a demo that computed its own answer would be a second system, and the
+# first time the two diverged the demo would be the one people believed.
+# ---------------------------------------------------------------------------
+
+#: Where the committed fixtures live, relative to the repository root. Resolved
+#: from this module's location because the CLI is installed in editable mode
+#: from a uv workspace, so the source tree is always reachable from the import.
+_REPO_ROOT = Path(__file__).resolve().parents[5]
+
+#: Overridable so a test can point the demo at a fixture tree it built itself,
+#: and so a non-editable install can say where the data went.
+FIXTURES_ENV_VAR = "XG_ALONSO_FIXTURES"
+
+#: The demo's scratch data root. Under the system temp directory on purpose:
+#: the user's `.data` is theirs, and a demo that writes into it can destroy an
+#: ingest that took ten minutes and a season of history. Stable rather than
+#: randomised so a rerun is idempotent and the artifacts stay inspectable.
+_DEMO_ROOT_NAME = "xg-alonso-demo"
+
+#: The demo's manager. No such entry is fetched — the squad comes from
+#: `data/samples/example_squad.json` — but a recommendation is addressed to an
+#: entry, and a placeholder that looks like a real id would be worse.
+DEMO_ENTRY_ID = 1
+
+#: Reduced from the production defaults so the whole demo finishes in about a
+#: minute rather than the four it would otherwise take. Every reduction costs
+#: *resolution*, never honesty: fewer, wider walk-forward folds are still
+#: strictly out of sample, and three hypotheses are still scored against the
+#: full noise and shuffled controls. The reductions are printed as they happen.
+DEMO_TRAIN_SEASONS = "2023-24,2024-25"
+DEMO_VALIDATE_GAMEWEEKS = 16
+DEMO_MAX_ITER = 60
+DEMO_HYPOTHESES = 3
+DEMO_CLUSTERS = 3
+DEMO_HOLDOUT = "2024-25"
+
+#: The two managers of `xg discover-demo`. Same squad, same frame, same seed —
+#: the constraints are the only difference, which is the whole point.
+#: Manager A names her forwards individually rather than saying "my premium
+#: forwards", and the reason is worth recording because the first version of
+#: this demo got it wrong.
+#:
+#: "my premium forwards" is a phrase `compile_intent` reports as *unparsed* — it
+#: is a description of a set, not a set, and resolving it would mean guessing
+#: what the manager considers premium. So only Haaland locked, one of three
+#: forward slots stayed frozen, the position stayed open, and both managers were
+#: measured over an identical pool while the demo cheerfully reported that their
+#: constraints had differed. Naming the three forwards the demo squad actually
+#: holds closes the position, which is the mechanism that genuinely separates
+#: the two searches.
+#:
+#: These names must exist in `data/fixtures/demo_squad.json`;
+#: `tests/demo/test_two_managers.py` asserts it rather than trusting it.
+DEMO_MANAGER_A = (
+    "keep Haaland, Isak and Uche, I am protecting a top 1% rank, safe three-gameweek strategy"
+)
+DEMO_MANAGER_B = (
+    "I am 40 points behind in my mini-league, sell anything, find me differentials, "
+    "aggressive three-gameweek strategy"
+)
+
+_DEMO_MANAGERS: tuple[tuple[str, str], ...] = (("A", DEMO_MANAGER_A), ("B", DEMO_MANAGER_B))
+
+
+def _fixture_root() -> Path:
+    """Where the committed demo fixtures are, or a refusal that says what to do."""
+    override = os.environ.get(FIXTURES_ENV_VAR)
+    candidates = [Path(override)] if override else []
+    candidates += [_REPO_ROOT / "data" / "fixtures", Path.cwd() / "data" / "fixtures"]
+
+    for candidate in candidates:
+        if (candidate / "PROVENANCE.json").exists():
+            return candidate
+
+    typer.secho(
+        "No committed fixtures found. Looked in:\n"
+        + "\n".join(f"  {c}" for c in candidates)
+        + f"\nSet {FIXTURES_ENV_VAR}, or run `make fixtures` from a clone with a "
+        "populated .data.",
+        fg=typer.colors.RED,
+    )
+    raise typer.Exit(1)
+
+
+def _demo_root(override: Path | None) -> Path:
+    return override if override is not None else Path(tempfile.gettempdir()) / _DEMO_ROOT_NAME
+
+
+@contextmanager
+def _demo_lock(demo_root: Path) -> Iterator[None]:
+    """Hold an exclusive claim on a scratch root for the length of a run.
+
+    The default root is a *stable* path so a rerun is idempotent and the
+    artifacts stay inspectable, and that choice has a cost: two demos started
+    at once share it. It is not theoretical — it happened during development.
+    One run called ``--fresh``, deleted the tree while the other was mid-way
+    through the discovery registry, and the second died on a
+    ``FileNotFoundError`` for a table that had existed a moment earlier. A
+    stranger's first impression would have been a traceback caused by nothing
+    they did.
+
+    The lock file sits *beside* the root rather than inside it, because
+    ``--fresh`` deletes the root and would take its own lock with it. Held with
+    ``flock``, so a killed process releases it without leaving a stale file
+    that the next run has to reason about.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - POSIX only, which is D1's target
+        typer.secho(
+            "  (no file locking on this platform: run only one `xg demo` at a time)",
+            fg=typer.colors.YELLOW,
+        )
+        yield
+        return
+
+    lock_path = demo_root.parent / f"{demo_root.name}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        typer.secho(
+            f"Another demo is already using {demo_root}.\n"
+            "Two runs sharing one scratch root corrupt each other — `--fresh` deletes the "
+            "tree the other one is reading. Wait for it to finish, or pass a different "
+            "--demo-root.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1) from None
+
+    try:
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _seed_demo_root(fixtures: Path, demo_root: Path) -> dict[str, Any]:
+    """Populate a scratch data root from the committed fixtures.
+
+    The bronze payloads are **replayed through the real store** rather than
+    copied as files. Copying would carry over a ``_manifest.jsonl`` whose
+    recorded paths point at whichever machine built the fixture, and the
+    store's own hash check on read would then be verifying a lie. Writing them
+    back re-derives the manifest, and re-verifies that the committed bytes
+    still hash to what the sidecar claims.
+
+    Idempotent: the store deduplicates by content hash, so a second run appends
+    nothing.
+    """
+    from xg_alonso.contracts.provenance import SourceTimestamps
+
+    provenance: dict[str, Any] = json.loads((fixtures / "PROVENANCE.json").read_text())
+
+    (demo_root / "silver").mkdir(parents=True, exist_ok=True)
+    (demo_root / "pinned").mkdir(parents=True, exist_ok=True)
+
+    for name in ("player_gameweek_stats.parquet", "players_history.parquet"):
+        shutil.copyfile(fixtures / "silver" / name, demo_root / "silver" / name)
+
+    # CLAUDE.md's Verified Constants section requires scoring values to come
+    # from a pinned snapshot with a drift check. The demo goes through exactly
+    # that path — it does not carry its own copy of a single scoring constant.
+    shutil.copyfile(
+        fixtures / "pinned" / "rules_2026-27.json", demo_root / "pinned" / "rules_2026-27.json"
+    )
+
+    bronze = _bronze(demo_root)
+    for record in provenance["bronze_snapshots"]:
+        payload = gzip.decompress((fixtures / record["fixture_path"]).read_bytes())
+        ref = bronze.write(
+            source=str(record["source"]),
+            payload=payload,
+            timestamps=SourceTimestamps.model_validate(record["timestamps"]),
+            run_id="demo-seed",
+            http_status=record["http_status"],
+        )
+        if ref.content_sha256 != record["content_sha256"]:
+            typer.secho(
+                f"fixture {record['fixture_path']} hashes to {ref.content_sha256} but the "
+                f"sidecar records {record['content_sha256']}; the fixture has been edited "
+                "in place. Regenerate it with `make fixtures`.",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(1)
+
+    return provenance
+
+
+def _fixture_banner(provenance: dict[str, Any], demo_root: Path) -> str:
+    """The provenance header. Printed first, before anything computes a number.
+
+    A demo that prints confident recommendations over a sample of a hundred
+    players without saying so is worse than no demo: it teaches the reader to
+    trust a number the data cannot support.
+    """
+    stats: dict[str, Any] = next(
+        (f for f in provenance["files"] if f["path"].endswith("player_gameweek_stats.parquet")),
+        {},
+    )
+    seasons = ", ".join(provenance["seasons"])
+    return "\n".join(
+        [
+            "=== FIXTURE DATA — NOT A FULL DATASET, NOT EVIDENCE ABOUT FOOTBALL ===",
+            f"  source        real public FPL data, sampled: {stats.get('distinct_players', '?')} "
+            f"players, {stats.get('rows', '?'):,} player-gameweeks, seasons {seasons}",
+            f"  sampling      {provenance['club_quota']} per club per season, "
+            f"+{provenance['random_supplement_per_season']} random, seed {provenance['seed']}",
+            f"  extracted     {provenance['extracted_at']} by "
+            f"{provenance['generator']} v{provenance['generator_version']}",
+            "  scoring       loaded from the pinned bootstrap snapshot, as every other "
+            "command does",
+            f"  scratch root  {demo_root}  (your own store is never read or written)",
+            "  shows         that every stage of the pipeline runs, end to end, offline",
+            "  does not show anything about which players are good. "
+            f"{stats.get('distinct_players', '?')} players over",
+            f"                {len(provenance['seasons'])} seasons is a smoke test, not a study.",
+            "=" * 72,
+        ]
+    )
+
+
+@app.command(name="demo")
+def demo_command(
+    demo_root_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--demo-root",
+            help="Scratch data root. Defaults to a stable directory under the system temp.",
+        ),
+    ] = None,
+    fixtures_option: Annotated[
+        Path | None,
+        typer.Option("--fixtures", help="Committed fixture tree. Defaults to data/fixtures."),
+    ] = None,
+    fresh: Annotated[
+        bool, typer.Option("--fresh", help="Delete the scratch root first and rebuild it.")
+    ] = False,
+) -> None:
+    """Run the whole pipeline offline on committed fixtures, and recommend a transfer.
+
+    Needs no network, no API key and no `.data`. Every step is the real command
+    — features, training, the discovery loop with its controls, and a
+    recommendation — pointed at a scratch data root seeded from
+    `data/fixtures`. Nothing here writes to your own store.
+    """
+    fixtures = fixtures_option or _fixture_root()
+    demo_root = _demo_root(demo_root_option)
+    with _demo_lock(demo_root):
+        _run_demo(fixtures=fixtures, demo_root=demo_root, fresh=fresh)
+
+
+def _run_demo(*, fixtures: Path, demo_root: Path, fresh: bool) -> None:
+    """The demo body, run while the scratch root is exclusively held."""
+    if fresh and demo_root.exists():
+        shutil.rmtree(demo_root)
+    demo_root.mkdir(parents=True, exist_ok=True)
+
+    provenance = _seed_demo_root(fixtures, demo_root)
+    typer.secho(_fixture_banner(provenance, demo_root), fg=typer.colors.CYAN)
+
+    timings: list[tuple[str, float]] = []
+
+    def stage(number: int, title: str, detail: str) -> float:
+        typer.secho(f"\n[fixture data] {number}/4  {title}", bold=True)
+        typer.echo(f"           {detail}")
+        return time.monotonic()
+
+    started = stage(1, "build-features", "point-in-time features as of the next deadline")
+    build_features_command(data_root=demo_root, season=DEFAULT_SEASON, full=False)
+    timings.append(("build-features", time.monotonic() - started))
+
+    started = stage(
+        2,
+        "train",
+        f"component models on {DEMO_TRAIN_SEASONS} — reduced folds, see the warning it prints",
+    )
+    train(
+        data_root=demo_root,
+        objective="",
+        seasons=DEMO_TRAIN_SEASONS,
+        out=None,
+        min_gameweek=4,
+        validate_gameweeks=DEMO_VALIDATE_GAMEWEEKS,
+        max_iter=DEMO_MAX_ITER,
+    )
+    timings.append(("train", time.monotonic() - started))
+
+    started = stage(3, "discover", "objective-conditioned feature discovery, controls included")
+    build_discovery_frame_command(data_root=demo_root, seasons=DEMO_TRAIN_SEASONS, min_gameweek=2)
+    discover_command(
+        request=DEMO_MANAGER_B,
+        data_root=demo_root,
+        frame_path=None,
+        preset="expected_points",
+        max_hypotheses=DEMO_HYPOTHESES,
+        holdout=DEMO_HOLDOUT,
+        clusters=DEMO_CLUSTERS,
+        # Never --no-controls. The noise and shuffled controls are what separate
+        # "this feature helped" from "adding any column would have helped", and
+        # a demo that skipped them would be advertising the wrong thing.
+        no_controls=False,
+        use_llm=False,
+        dry_run=False,
+    )
+    timings.append(("discover", time.monotonic() - started))
+
+    started = stage(4, "recommend", "the best legal single transfer for the sample squad")
+    # Resolved from the fixture tree rather than from this module's location, so
+    # a relocated `data/` moves both together and neither is found alone.
+    squad_file = _require_input(
+        fixtures.parent / "samples" / "example_squad.json",
+        produced_by="build-squad --out",
+        what="sample squad",
+    )
+    recommend_command(
+        entry_id=DEMO_ENTRY_ID,
+        data_root=demo_root,
+        season=DEFAULT_SEASON,
+        squad_file=squad_file,
+        model_path=demo_root / "models" / "component_models.pkl",
+    )
+    timings.append(("recommend", time.monotonic() - started))
+
+    typer.secho("\n[fixture data] done", bold=True)
+    for name, seconds in timings:
+        typer.echo(f"  {name:<22}{seconds:7.1f}s")
+    typer.echo(f"  {'total':<22}{sum(s for _, s in timings):7.1f}s")
+    typer.secho(
+        # Repeated from the sidecar rather than restated here, so the closing
+        # caveat cannot drift away from the banner or from the data.
+        f"\n{provenance['warning']}\n"
+        "The recommendation above is not advice. Run `xg ingest` and `xg backfill` for "
+        "the real thing.",
+        fg=typer.colors.CYAN,
+    )
+
+
+def _pool_wiring_gaps(frame: pl.DataFrame) -> list[str]:
+    """Everything still missing before two managers can differ *for the right reason*.
+
+    ``xg discover-demo`` claims that two managers with different hard
+    constraints discover different features. That claim is only true once the
+    reachable-player pool (:mod:`xg_alonso.discovery.feasible`) is actually
+    consulted by the experiment. Until it is, both managers are measured over
+    the identical global population and any difference between their verdicts
+    comes from objective compilation instead — a real effect, but not the one
+    the command asserts.
+
+    Detected rather than assumed, because the dependency lands in another
+    branch and a hard-coded "not yet" would silently keep failing after it
+    arrives.
+    """
+    import dataclasses
+    import inspect
+
+    from xg_alonso.discovery.experiment import ExperimentConfig, run_discovery
+
+    gaps: list[str] = []
+    for column in ("price_tenths", "team_id"):
+        if column not in frame.columns:
+            gaps.append(
+                f"the discovery frame has no `{column}` column, so a price- or "
+                "club-constrained pool cannot be derived from it"
+            )
+
+    accepted = set(inspect.signature(run_discovery).parameters)
+    accepted |= {f.name for f in dataclasses.fields(ExperimentConfig)}
+    if not accepted & {"context", "decision_context"}:
+        gaps.append(
+            "run_discovery/ExperimentConfig accept no DecisionContext, so "
+            "xg_alonso.discovery.feasible.feasible_pool is never consulted"
+        )
+
+    # A signature probe cannot see whether the *caller* passes a context, and
+    # for one release it did not: `run_discovery` grew the parameter, this probe
+    # went quiet, and the demo printed "only the constraints differed" over two
+    # runs that had both been measured globally. The check below is the one that
+    # would have caught it, so it is kept alongside rather than instead — the
+    # signature check names the missing capability, this one names the missing
+    # wire.
+    if "squad_file" not in set(inspect.signature(discover_command).parameters):
+        gaps.append(
+            "`xg discover` takes no --squad-file, so it cannot build a "
+            "DecisionContext and the pool is never applied however well "
+            "run_discovery supports it"
+        )
+    return gaps
+
+
+@app.command(name="discover-demo")
+def discover_demo_command(
+    demo_root_option: Annotated[
+        Path | None, typer.Option("--demo-root", help="Scratch data root from `xg demo`.")
+    ] = None,
+    fixtures_option: Annotated[
+        Path | None, typer.Option("--fixtures", help="Committed fixture tree.")
+    ] = None,
+) -> None:
+    """Two managers, same squad and frame and seed, different constraints.
+
+    The central claim of the discovery work, made executable: a manager
+    protecting a top-1% rank with premium forwards locked cannot reach the same
+    players as one who is forty points behind and will sell anything, so the
+    features worth discovering for them are not the same features.
+
+    Exits non-zero when the two verdict sets come out identical. A demo of a
+    difference that does not appear is a failing test, not a demo.
+    """
+    fixtures = fixtures_option or _fixture_root()
+    demo_root = _demo_root(demo_root_option)
+    with _demo_lock(demo_root):
+        _run_discover_demo(fixtures=fixtures, demo_root=demo_root)
+
+
+def _run_discover_demo(*, fixtures: Path, demo_root: Path) -> None:
+    """The two-manager body, run while the scratch root is exclusively held."""
+    demo_root.mkdir(parents=True, exist_ok=True)
+
+    provenance = _seed_demo_root(fixtures, demo_root)
+    typer.secho(_fixture_banner(provenance, demo_root), fg=typer.colors.CYAN)
+
+    frame_file = demo_root / "gold" / "discovery_training.parquet"
+    if not frame_file.exists():
+        build_discovery_frame_command(
+            data_root=demo_root, seasons=DEMO_TRAIN_SEASONS, min_gameweek=2
+        )
+    frame = pl.read_parquet(frame_file)
+
+    gaps = _pool_wiring_gaps(frame)
+    if gaps:
+        typer.secho(
+            "\nNOT YET WIRED — refusing to run.\n",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        for gap in gaps:
+            typer.secho(f"  - {gap}", fg=typer.colors.RED)
+        typer.secho(
+            "\nThe two managers would be measured over the same global population, so any\n"
+            "difference in their verdicts would come from objective compilation, not from\n"
+            "their constraints. Reporting that as 'different constraints, different\n"
+            "features' would be a claim this command cannot yet support, so it stops here\n"
+            "rather than producing a difference and mislabelling its cause.\n"
+            "\nUnblocked by the feasible-pool phase: attach `price_tenths` and `team_id` to\n"
+            "the discovery frame, and have run_discovery consult\n"
+            "xg_alonso.discovery.feasible.feasible_pool for a DecisionContext.",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(2)
+
+    # Verdicts are filed per objective id, so two requests that compile to the
+    # same id would read the same registry rows and be *guaranteed* identical
+    # for a reason that has nothing to do with constraints. Said out loud here
+    # rather than diagnosed later from an empty diff.
+    objectives = {label: _objective_id(demo_root, request) for label, request in _DEMO_MANAGERS}
+    if objectives["A"] == objectives["B"]:
+        typer.secho(
+            f"\nBoth requests compiled to the same objective ({objectives['A']}), so the "
+            "registry cannot tell them apart. That is a gap in intent compilation, not a "
+            "result about constraints.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+    # The *same* squad for both managers. That is the whole design of the
+    # comparison: if the squads differed, a difference in verdicts would be
+    # explained by the squads and the constraints would prove nothing.
+    squad_file = fixtures / "demo_squad.json"
+
+    verdicts: dict[str, set[tuple[str, str]]] = {}
+    for label, request in _DEMO_MANAGERS:
+        typer.secho(f"\n[fixture data] manager {label}: {request}", bold=True)
+        discover_command(
+            request=request,
+            data_root=demo_root,
+            frame_path=frame_file,
+            preset="expected_points",
+            max_hypotheses=DEMO_HYPOTHESES,
+            holdout=DEMO_HOLDOUT,
+            clusters=DEMO_CLUSTERS,
+            no_controls=False,
+            use_llm=False,
+            dry_run=False,
+            squad_file=squad_file,
+        )
+        verdicts[label] = _latest_verdicts(demo_root, request)
+
+    # Did the constraints actually produce *different* searches? The pool being
+    # applied is not enough — two managers whose constraints resolve to the same
+    # reachable set were measured identically, and any difference in their
+    # verdicts is then explained by objective compilation. Checked here rather
+    # than left to a reader, because the sentence this command prints at the end
+    # is a causal claim.
+    pools = {
+        label: _manager_pool(demo_root, request, frame, squad_file)
+        for label, request in _DEMO_MANAGERS
+    }
+    typer.secho("\n[fixture data] the pools those constraints implied", bold=True)
+    for label, pool in pools.items():
+        typer.echo(f"  manager {label}  {pool.signature.key():<40} {pool.diagnostics.describe()}")
+
+    if pools["A"].signature.key() == pools["B"].signature.key():
+        typer.secho(
+            "\nBoth managers reached the SAME reachable pool, so they were measured over "
+            "an identical population. Any difference in their verdicts below comes from "
+            "objective compilation, not from their constraints — which is a real effect "
+            "but not the one this command exists to show.\n"
+            "\nThe usual cause is that the fixture roster does not contain the players "
+            "manager A names, so 'keep Haaland and my premium forwards' resolves to no "
+            "locks and consumes no budget. Refusing rather than narrating a difference "
+            "and mislabelling its cause.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(3)
+
+    only_a = sorted(verdicts["A"] - verdicts["B"])
+    only_b = sorted(verdicts["B"] - verdicts["A"])
+
+    typer.secho("\n[fixture data] what the constraints changed", bold=True)
+    typer.echo(f"  manager A only  {only_a or '(nothing)'}")
+    typer.echo(f"  manager B only  {only_b or '(nothing)'}")
+
+    if not only_a and not only_b:
+        typer.secho(
+            "\nThe two managers reached identical verdicts. The claim this command exists "
+            "to demonstrate did not hold on this data, so it fails rather than narrating "
+            "a difference that is not there.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(1)
+
+    typer.secho(
+        "\nSame squad, same frame, same seed. Only the constraints differed — and the "
+        "discovered feature sets differ with them.",
+        fg=typer.colors.GREEN,
+    )
+    typer.secho(
+        "  Both runs printed the population they were measured over, above. If either "
+        "says 'every player', the difference above came from objective compilation "
+        "rather than from constraints — read that line before quoting this result.",
+        fg=typer.colors.YELLOW,
+    )
+
+
+def _manager_pool(
+    data_root: Path, request: str, frame: pl.DataFrame, squad_file: Path
+) -> FeasiblePool:
+    """The reachable pool one manager's request implies, for comparison only.
+
+    Recomputed here rather than returned from ``discover_command`` so the
+    verification path is independent of the path being verified. If the two ever
+    disagree that is itself worth knowing, and a demo that asked the run under
+    test to report on itself would not be able to notice.
+    """
+    from xg_alonso.discovery.feasible import feasible_pool
+    from xg_alonso.domain.intent import build_name_index, compile_intent
+
+    slice_context = _load_context(data_root, Season(DEFAULT_SEASON))
+    # The same roster `discover` itself resolves against, so a name that fails
+    # to resolve there fails here too and the comparison stays faithful.
+    _, history = _silver(data_root)
+    names = build_name_index(
+        dict(
+            zip(
+                history["player_code"].to_list(),
+                history["web_name"].to_list(),
+                strict=True,
+            )
+        )
+    )
+    intent = compile_intent(request, players=names, base_preset="expected_points")
+    context = DecisionContext(
+        bundle=intent.bundle,
+        requirements=intent.requirements,
+        squad=_squad_state(slice_context, 0, squad_file),
+    )
+    return feasible_pool(frame, context=context, rules=slice_context.squad_rules)
+
+
+def _objective_id(data_root: Path, request: str) -> str:
+    """Compile a request exactly as ``xg discover`` does, and return its objective id.
+
+    Same preset, same name index. If this drifted from the call in
+    ``discover_command`` the verdicts would be looked up under an objective
+    that was never written to.
+    """
+    from xg_alonso.domain.intent import build_name_index, compile_intent
+
+    _, history = _silver(data_root)
+    names = build_name_index(
+        dict(zip(history["player_code"].to_list(), history["web_name"].to_list(), strict=True))
+    )
+    return str(
+        compile_intent(request, players=names, base_preset="expected_points").bundle.objective.id
+    )
+
+
+def _latest_verdicts(data_root: Path, request: str) -> set[tuple[str, str]]:
+    """The ``(feature, status)`` pairs the registry holds for a request's objective."""
+    from xg_alonso.discovery.registry import DiscoveryRegistry
+
+    registry = DiscoveryRegistry(ParquetTableStore(data_root / "discovery"))
+    report = registry.acceptance_report(_objective_id(data_root, request))
+    return {(str(row["feature"]), str(row["status"])) for row in report.iter_rows(named=True)}
+
+
+if __name__ == "__main__":
+    main()

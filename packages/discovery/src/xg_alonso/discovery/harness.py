@@ -45,12 +45,15 @@ from xg_alonso.discovery.search import ScoreResult
 
 __all__ = [
     "DEFAULT_ESTIMATOR_KWARGS",
+    "FoldPredictions",
     "FoldSplit",
     "HarnessConfig",
     "PredictionCache",
     "build_timeline",
     "evaluate_feature_set",
+    "fold_predictions",
     "make_scorer",
+    "max_random_control",
     "random_control",
     "shuffled_control",
     "subgroup_metrics",
@@ -135,6 +138,32 @@ class HarnessConfig:
     seed: int = ROOT_SEED
     estimator_kwargs: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ESTIMATOR_KWARGS))
     lower_is_better: bool = True
+
+    evaluate_on: str | None = None
+    """Boolean column restricting *scoring* — never fitting — to a subset.
+
+    Set to :data:`~xg_alonso.discovery.feasible.REACHABLE_COLUMN` to measure a
+    feature over the players a particular manager could actually buy, rather
+    than over the whole league.
+
+    **Fit on everything, evaluate on the subset.** Restricting the training rows
+    too would confound two different things: a feature would look worse partly
+    because it is worse for this manager and partly because the model saw a
+    tenth as much data. Only the validation side is masked, which is the same
+    decomposition :func:`subgroup_metrics` already performs — it fits once and
+    groups the validation errors afterwards, for exactly this reason.
+
+    Carried here rather than threaded as a parameter because every function that
+    would need it — :func:`evaluate_feature_set`, :func:`make_scorer`,
+    :func:`random_control`, :func:`shuffled_control`, :func:`subgroup_metrics`,
+    :func:`_fit_and_score`, :func:`_predictions_uncached` — already receives a
+    ``HarnessConfig``. One field reaches all of them, and no call site can
+    forget to pass it and silently measure globally while reporting otherwise.
+
+    A named column, not a mask array: :func:`_folds` filters and re-splits the
+    frame, so an index-aligned array would misalign after the holdout filter and
+    score the wrong rows.
+    """
 
 
 def build_timeline(
@@ -224,6 +253,22 @@ def _usable(frame: pl.DataFrame, columns: Sequence[str]) -> tuple[str, ...]:
     )
 
 
+def _scorable(split: FoldSplit, config: HarnessConfig, finite: np.ndarray) -> np.ndarray:
+    """Validation rows that may be scored, after any ``evaluate_on`` restriction.
+
+    A missing column is treated as "no restriction" rather than as an error.
+    The caller that set ``evaluate_on`` is responsible for attaching it, and
+    :func:`~xg_alonso.discovery.feasible.feasible_pool` reports separately
+    whether a pool was applied — so a silent global measurement here would be
+    caught there, while raising would make an older frame unrunnable.
+    """
+    if config.evaluate_on is None or config.evaluate_on not in split.validate.columns:
+        return finite
+    reachable = split.validate[config.evaluate_on].fill_null(value=False).to_numpy().astype(bool)
+    restricted: np.ndarray = finite & reachable
+    return restricted
+
+
 def _fit_and_score(
     split: FoldSplit, columns: Sequence[str], config: HarnessConfig
 ) -> tuple[float, int] | None:
@@ -235,7 +280,7 @@ def _fit_and_score(
     y_train = split.train[config.target].cast(pl.Float64, strict=False).to_numpy()
     y_validate = split.validate[config.target].cast(pl.Float64, strict=False).to_numpy()
     train_ok = np.isfinite(y_train)
-    validate_ok = np.isfinite(y_validate)
+    validate_ok = _scorable(split, config, np.isfinite(y_validate))
     if int(train_ok.sum()) < 50 or int(validate_ok.sum()) < 20:
         return None
     if float(np.std(y_train[train_ok])) < 1e-9:
@@ -428,6 +473,76 @@ def random_control(
     )
 
 
+def max_random_control(
+    frame: pl.DataFrame,
+    *,
+    baseline_columns: Sequence[str],
+    config: HarnessConfig | None = None,
+    splits: Sequence[FoldSplit] | None = None,
+    seed: int = ROOT_SEED,
+    trials: int = 8,
+    max_trials: int = 40,
+) -> tuple[ScoreResult, int]:
+    """The **best** of ``trials`` noise draws, and how many actually ran.
+
+    :func:`random_control` *averages* its draws, which is the right null for a
+    single pre-specified candidate. A candidate selected as the best of N is a
+    different question: the selection itself supplies an edge, so it must clear
+    the best of N noise draws rather than the average one. Searching
+    fifty-six interaction candidates against a model that likes columns will
+    otherwise turn up a winner reliably, and it will be noise.
+
+    An empirical max-statistic null rather than a significance test, because
+    ``docs/backtesting_and_leakage.md`` forbids significance language here and
+    because this is continuous with the controls that already exist — it is the
+    same fit, drawn more times and reduced differently.
+
+    Returns the null **and the trial count**, so a caller whose null was capped
+    can say so. A cap reported as if it were the full count reads as
+    completeness, and an under-sized null is exactly the condition under which a
+    spurious result survives.
+    """
+    settings = config or HarnessConfig()
+    folds = list(splits) if splits is not None else _folds(frame, settings)
+    ran = max(1, min(trials, max_trials))
+    generator = np.random.default_rng(seed)
+
+    best: ScoreResult | None = None
+    for draw in range(ran):
+        name = f"__max_control_noise_{draw}"
+        noisy = [
+            FoldSplit(
+                fold=split.fold,
+                train=split.train.with_columns(
+                    pl.Series(name, generator.standard_normal(split.train.height))
+                ),
+                validate=split.validate.with_columns(
+                    pl.Series(name, generator.standard_normal(split.validate.height))
+                ),
+            )
+            for split in folds
+        ]
+        score = evaluate_feature_set(
+            frame,
+            baseline_columns=baseline_columns,
+            candidate_columns=(name,),
+            config=settings,
+            splits=noisy,
+        )
+        if not np.isfinite(score.metric):
+            continue
+        # "Best" means the strongest apparent improvement, which under
+        # `lower_is_better` is the smallest metric.
+        if best is None or (
+            score.metric < best.metric if settings.lower_is_better else score.metric > best.metric
+        ):
+            best = score
+
+    if best is None:
+        return ScoreResult(metric=float("inf"), folds=(), lower_is_better=True), 0
+    return best, ran
+
+
 def shuffled_control(
     frame: pl.DataFrame,
     *,
@@ -551,6 +666,69 @@ def subgroup_metrics(
     return sorted(out, key=lambda r: -r.relative_improvement)
 
 
+@dataclass(frozen=True)
+class FoldPredictions:
+    """One fold's out-of-sample predictions, and the rows they belong to.
+
+    ``mask`` selects the validation rows that were actually scored, so a caller
+    can line the predictions back up against any other column of
+    ``split.validate`` — ownership, price, gameweek — without re-deriving which
+    rows survived the finite-target and ``evaluate_on`` filters.
+    """
+
+    fold_index: int
+    validate: pl.DataFrame
+    truth: np.ndarray
+    predicted: np.ndarray
+    mask: np.ndarray
+
+    def column(self, name: str) -> np.ndarray | None:
+        """A validation column, restricted to the scored rows."""
+        if name not in self.validate.columns:
+            return None
+        values: np.ndarray = self.validate[name].to_numpy()
+        selected: np.ndarray = values[self.mask]
+        return selected
+
+
+def fold_predictions(
+    frame: pl.DataFrame,
+    *,
+    columns: Sequence[str],
+    config: HarnessConfig | None = None,
+    splits: Sequence[FoldSplit] | None = None,
+    cache: PredictionCache | None = None,
+) -> list[FoldPredictions]:
+    """Per-fold out-of-sample predictions for one feature set.
+
+    A public view over the same cache :func:`subgroup_metrics` uses, so a
+    decision metric costs **no extra fits** — the entry is already there from the
+    subgroup breakdown. That matters: computing decision quality by refitting
+    would roughly double every discovery run, and a metric too expensive to run
+    is an unmeasured one with extra steps.
+    """
+    settings = config or HarnessConfig()
+    folds = list(splits) if splits is not None else _folds(frame, settings)
+    wanted = tuple(dict.fromkeys(columns))
+
+    out: list[FoldPredictions] = []
+    for split in folds:
+        got = _predictions(split, wanted, settings, cache)
+        if got is None:
+            continue
+        truth, predicted, mask = got
+        out.append(
+            FoldPredictions(
+                fold_index=split.fold.fold_index,
+                validate=split.validate,
+                truth=truth,
+                predicted=predicted,
+                mask=mask,
+            )
+        )
+    return out
+
+
 def _predictions(
     split: FoldSplit,
     columns: Sequence[str],
@@ -580,7 +758,7 @@ def _predictions_uncached(
     y_train = split.train[config.target].cast(pl.Float64, strict=False).to_numpy()
     y_validate = split.validate[config.target].cast(pl.Float64, strict=False).to_numpy()
     train_ok = np.isfinite(y_train)
-    validate_ok = np.isfinite(y_validate)
+    validate_ok = _scorable(split, config, np.isfinite(y_validate))
     if int(train_ok.sum()) < 50 or int(validate_ok.sum()) < 20:
         return None
     if float(np.std(y_train[train_ok])) < 1e-9:

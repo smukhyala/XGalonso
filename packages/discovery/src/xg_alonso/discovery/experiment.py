@@ -40,6 +40,7 @@ from typing import Any, Final
 import numpy as np
 import polars as pl
 
+from xg_alonso.contracts.context import DecisionContext
 from xg_alonso.contracts.discovery import (
     AcceptanceStatus,
     ClusterSummary,
@@ -70,10 +71,18 @@ from xg_alonso.discovery.compile import (
     program_builder,
     validate_program,
 )
+from xg_alonso.discovery.decision_metrics import (
+    build_metric_context,
+    decision_gain,
+    objective_gain,
+    turnover_penalty,
+)
 from xg_alonso.discovery.dsl import FeatureProgram, GroupKey, ProgramError
+from xg_alonso.discovery.feasible import REACHABLE_COLUMN, FeasiblePool, feasible_pool
 from xg_alonso.discovery.harness import (
     HarnessConfig,
     PredictionCache,
+    fold_predictions,
     make_scorer,
     paired_fold_metrics,
     random_control,
@@ -85,9 +94,11 @@ from xg_alonso.discovery.hypotheses import (
     SeededHypothesis,
     generate_from_residuals,
 )
+from xg_alonso.discovery.interactions import interaction_pairs
 from xg_alonso.discovery.registry import DiscoveryRegistry
 from xg_alonso.discovery.search import SearchResult, greedy_forward
 from xg_alonso.discovery.utility import feature_utility, stability_score
+from xg_alonso.domain.rules import SquadRules
 from xg_alonso.features.leakage import find_leakage
 
 __all__ = [
@@ -257,6 +268,18 @@ class ExperimentConfig:
     """Fit the noise and shuffled controls. Expensive, and the thing that turns
     'this helped' into 'this helped more than adding any column would have'."""
 
+    search_interactions: bool = True
+    """Cross the surviving programs and gate the products.
+
+    Off makes a run cheaper and strictly less thorough; the interaction
+    round roughly doubles the candidate count.
+    """
+
+    interaction_pool_cap: int = 6
+    """Programs crossed. Six gives fifteen pairs, thirty candidates across
+    two forms. The cap is what keeps the multiple-comparisons problem
+    bounded rather than merely acknowledged."""
+
     run_search: bool = True
     fit_clusters_for_objective: bool = True
     experiment_id: str = ""
@@ -288,6 +311,16 @@ class DiscoveryResult:
     lessons: list[Lesson] = field(default_factory=list)
     weak_segments: list[tuple[str, str, float]] = field(default_factory=list)
 
+    pool: FeasiblePool | None = None
+    """The reachable-player pool every measurement was taken over.
+
+    ``None`` when no decision context was supplied, and present-but-unapplied
+    when one was supplied and did not narrow anything. Both are reported rather
+    than collapsed, because "measured over everyone" and "measured over the 12%
+    this manager can afford" are different claims and only one of them supports
+    the sentence *"your constraints changed what we looked for"*.
+    """
+
     @property
     def accepted(self) -> list[FeatureEvaluation]:
         return [e for e in self.evaluations if e.accepted.is_usable]
@@ -304,6 +337,16 @@ class DiscoveryResult:
         ]
         if self.rejected_programs:
             lines.append(f"  refused early    {len(self.rejected_programs)} (static validation)")
+        # Which population these numbers describe, on the same screen as the
+        # numbers. A pool-conditioned gain is measured on an easier subset —
+        # cheap players have lower absolute error — so it is not comparable to a
+        # global one, and the label has to travel with the result.
+        if self.pool is None:
+            lines.append("  measured over    every player (no decision context supplied)")
+        else:
+            lines.append(f"  measured over    {self.pool.diagnostics.describe()}")
+            if self.pool.binding:
+                lines.append(f"  constraints bit  {', '.join(self.pool.binding)}")
         return "\n".join(lines)
 
 
@@ -381,10 +424,27 @@ def run_discovery(
     config: ExperimentConfig | None = None,
     extra_hypotheses: Sequence[SeededHypothesis] = (),
     on_stage: Callable[[ExperimentStage, str], None] | None = None,
+    decision_context: DecisionContext | None = None,
+    rules: SquadRules | None = None,
 ) -> DiscoveryResult:
-    """Run one objective-conditioned discovery experiment.
+    """Run one context-conditioned discovery experiment.
 
     Args:
+        decision_context: The manager's situation — objective, constraints,
+            beliefs and
+            the squad they apply to. When supplied together with ``rules``,
+            every measurement is taken over the players this manager could
+            actually buy rather than over the whole league, which is what makes
+            two managers with the same squad and different constraints capable
+            of discovering different features.
+
+            Optional, and both must be given together: a context without rules
+            cannot price a budget, so the pool would silently be derived from
+            exclusions alone and under-report how constrained the manager is.
+            Omitting both measures globally, which is the previous behaviour and
+            remains correct — it is a different question, not a worse answer.
+        rules: Squad quotas, budget and the per-club cap, from the pinned
+            snapshot. Only read when ``decision_context`` is supplied.
         bundle: The compiled objective, constraints and beliefs.
         training: Point-in-time training rows, one per player-gameweek, carrying
             the required feature columns, the target and ``label_season`` /
@@ -419,6 +479,27 @@ def run_discovery(
             "different question from the one the manager asked."
         )
     baseline_columns = required or ("minutes_mean_5", "total_points_mean_5")
+
+    # --- the reachable pool -------------------------------------------------
+    #
+    # Everything after this point is measured over the players this manager can
+    # actually buy, when a context makes that derivable. When it does not, the
+    # run measures globally and says so — the two numbers are not comparable and
+    # a gain carrying the wrong label is worse than a missing one.
+    pool: FeasiblePool | None = None
+    if decision_context is not None and rules is not None:
+        pool = feasible_pool(training, context=decision_context, rules=rules)
+        if pool.diagnostics.applied:
+            training = pool.attach(training)
+            settings = replace(
+                settings, harness=replace(settings.harness, evaluate_on=REACHABLE_COLUMN)
+            )
+            announce(
+                ExperimentStage.VALIDATING,
+                f"pool: {pool.diagnostics.describe()}; binding {', '.join(pool.binding)}",
+            )
+        else:
+            announce(ExperimentStage.VALIDATING, f"pool: {pool.diagnostics.describe()}")
 
     # --- residual evidence -------------------------------------------------
     announce(ExperimentStage.BACKTESTING, "measuring residual weakness")
@@ -505,42 +586,77 @@ def run_discovery(
     seen_versions = set(known_versions)
 
     for proposal in proposals:
-        program = proposal.program
-        issues = validate_program(
-            program,
-            available_columns=player_stats.columns,
-            entity_columns=working.columns,
-            forbidden_columns=FORBIDDEN_COLUMNS,
-            known_versions=tuple(seen_versions),
+        # Static validation, then the point-in-time proof *before* computing the
+        # program into the frame — a leaky program that reaches the backtest
+        # scores brilliantly and the acceptance policy would be deciding on a
+        # number that means nothing. Shared with the interaction round below, so
+        # the two cannot drift apart.
+        compiled = _compile_candidate(
+            proposal,
+            working=working,
+            player_stats=player_stats,
+            context=context,
+            seen_versions=seen_versions,
+            proofs=proofs,
+            rejected=rejected_programs,
+            announce=announce,
         )
-        if issues:
-            rejected_programs.append((program.name, issues))
+        if compiled is None:
             continue
-        seen_versions.add(program.version())
+        working = compiled
+        computed.append((proposal, proposal.program.name))
 
-        # Prove it point-in-time safe *before* computing it into the frame. A
-        # leaky program that reaches the backtest scores brilliantly, and the
-        # acceptance policy would then be deciding on a number that means
-        # nothing. Running the harness first costs one extra compile over a
-        # bounded slice and removes that whole class of outcome.
-        proof = _prove_point_in_time(program, entities=working, context=context)
-        proofs[program.name] = proof
-        if not proof.passed:
-            announce(
-                ExperimentStage.VALIDATING,
-                f"{program.name}: {proof.detail}",
+    # --- interaction round --------------------------------------------------
+    #
+    # Products and ratios of the programs that survived round one. Deliberately
+    # *derived* from measured results rather than proposed blind: a pair worth
+    # crossing is one whose halves both compiled and passed the leakage harness.
+    #
+    # Every interaction goes through the identical gate above — the same static
+    # validation, the same point-in-time proof, the same compile — because a
+    # parallel path is how a gate quietly stops applying to half the candidates.
+    components: dict[str, tuple[str, ...]] = {}
+    if settings.search_interactions and len(computed) > 1:
+        pairs = interaction_pairs(
+            [proposal.program for proposal, _ in computed],
+            cap=settings.interaction_pool_cap,
+        )
+        announce(ExperimentStage.COMPUTING_FEATURES, f"proposing {len(pairs)} interactions")
+        for candidate in pairs:
+            interacted = SeededHypothesis(
+                hypothesis=computed[0][0].hypothesis.model_copy(
+                    update={
+                        "id": candidate.program.name,
+                        "statement": (
+                            f"{candidate.left} and {candidate.right} matter together, "
+                            f"beyond what either contributes alone"
+                        ),
+                        # The declared refutation *is* the additive control, so
+                        # it is recorded before the measurement rather than
+                        # rationalised after it.
+                        "falsification_condition": (
+                            "no gain over the required set plus both components entered "
+                            "separately, in a majority of folds"
+                        ),
+                    }
+                ),
+                program=candidate.program,
             )
-
-        try:
-            working = compile_program(program, working, context)
-            computed.append((proposal, program.name))
-        except (ProgramError, ValueError, KeyError, TypeError) as exc:
-            # Reported, never swallowed. A program that failed to compute is a
-            # finding about the program, and a run that hid it would look like a
-            # run in which the candidate was simply never good.
-            rejected_programs.append(
-                (program.name, [ValidationIssue("compute_failed", str(exc)[:200])])
+            compiled = _compile_candidate(
+                interacted,
+                working=working,
+                player_stats=player_stats,
+                context=context,
+                seen_versions=seen_versions,
+                proofs=proofs,
+                rejected=rejected_programs,
+                announce=announce,
             )
+            if compiled is None:
+                continue
+            working = compiled
+            computed.append((interacted, candidate.program.name))
+            components[candidate.program.name] = candidate.components
 
     # --- backtest ----------------------------------------------------------
     announce(ExperimentStage.BACKTESTING, f"scoring {len(computed)} candidates")
@@ -574,6 +690,8 @@ def run_discovery(
             cluster_model=cluster_model,
             experiment_id=experiment_id,
             cache=prediction_cache,
+            components=components.get(name, ()),
+            pool_signature=(pool.signature.key() if pool is not None else "global"),
             proof=proofs.get(
                 name,
                 LeakageProof(
@@ -682,6 +800,7 @@ def run_discovery(
         search=search,
         lessons=lessons,
         weak_segments=weak,
+        pool=pool,
     )
 
 
@@ -732,6 +851,51 @@ def _membership_frame(assignments: Sequence[PlayerClusterAssignment]) -> pl.Data
     ).unique(subset=["player_code", "cluster_model_version"], keep="last", maintain_order=True)
 
 
+def _compile_candidate(
+    proposal: SeededHypothesis,
+    *,
+    working: pl.DataFrame,
+    player_stats: pl.DataFrame,
+    context: CompileContext,
+    seen_versions: set[str],
+    proofs: dict[str, LeakageProof],
+    rejected: list[tuple[str, list[ValidationIssue]]],
+    announce: Callable[[ExperimentStage, str], None],
+) -> pl.DataFrame | None:
+    """Validate, prove point-in-time safe, and compute one candidate.
+
+    Extracted so the interaction round runs the *same* gate as the first round
+    rather than a copy of it. A second implementation would drift, and the way
+    it would drift is by quietly omitting a check.
+
+    Returns the extended frame, or ``None`` when the candidate was refused —
+    in which case ``rejected`` carries the reason.
+    """
+    program = proposal.program
+    issues = validate_program(
+        program,
+        available_columns=player_stats.columns,
+        entity_columns=working.columns,
+        forbidden_columns=FORBIDDEN_COLUMNS,
+        known_versions=tuple(seen_versions),
+    )
+    if issues:
+        rejected.append((program.name, issues))
+        return None
+    seen_versions.add(program.version())
+
+    proof = _prove_point_in_time(program, entities=working, context=context)
+    proofs[program.name] = proof
+    if not proof.passed:
+        announce(ExperimentStage.VALIDATING, f"{program.name}: {proof.detail}")
+
+    try:
+        return compile_program(program, working, context)
+    except (ProgramError, ValueError, KeyError, TypeError) as exc:
+        rejected.append((program.name, [ValidationIssue("compute_failed", str(exc)[:200])]))
+        return None
+
+
 def _evaluate_one(
     *,
     proposal: SeededHypothesis,
@@ -748,6 +912,8 @@ def _evaluate_one(
     experiment_id: str,
     proof: LeakageProof,
     cache: PredictionCache | None = None,
+    components: tuple[str, ...] = (),
+    pool_signature: str = "global",
 ) -> tuple[FeatureEvaluation, DiscoveredFeatureSpec]:
     """Measure, control, segment and judge one candidate."""
     program = proposal.program
@@ -770,7 +936,27 @@ def _evaluate_one(
         splits=splits,
     )
     shuffled_gain = shuffled.improvement_over(baseline_score)
-    beat_controls = incremental > max(control_gain, shuffled_gain)
+
+    # The additive control — only meaningful for a constructed interaction, and
+    # decisive when it applies.
+    #
+    # The shuffled control is the wrong null here. Permuting `f_i x f_j`
+    # preserves the product's distribution, so beating it shows the product
+    # carries information — but a product of two useful features carries
+    # information without any interaction existing. The question that justifies
+    # the word is whether the product beats its own components entered
+    # *separately*, and that is what this measures.
+    #
+    # Free: `make_scorer` memoises on the sorted column tuple, and this exact
+    # set was scored during the interaction round.
+    additive_gain = 0.0
+    if components:
+        usable = [c for c in components if c in frame.columns]
+        if len(usable) == len(components):
+            additive = scorer((*baseline_columns, *usable))
+            additive_gain = additive.improvement_over(baseline_score)
+
+    beat_controls = incremental > max(control_gain, shuffled_gain, additive_gain)
 
     missingness = float(frame[name].null_count()) / max(1, frame.height)
 
@@ -801,11 +987,56 @@ def _evaluate_one(
         else []
     )
 
+    # --- decision quality ---------------------------------------------------
+    #
+    # Read from the same prediction cache the subgroup breakdown just populated,
+    # so these cost no extra fits. Each term is `None` when it could not be
+    # measured, and `unmeasured` below is built from exactly those — a term that
+    # could not be computed must never be reported as a measured zero.
+    baseline_context = build_metric_context(
+        fold_predictions(
+            frame,
+            columns=baseline_columns,
+            config=settings.harness,
+            splits=splits,
+            cache=cache,
+        )
+    )
+    candidate_context = build_metric_context(
+        fold_predictions(
+            frame,
+            columns=(*baseline_columns, name),
+            config=settings.harness,
+            splits=splits,
+            cache=cache,
+        )
+    )
+
+    measured_objective = (
+        objective_gain(objective.primary_metric.value, baseline_context, candidate_context)
+        if beat_controls
+        else 0.0
+    )
+    measured_decision = decision_gain(baseline_context, candidate_context)
+    measured_turnover = turnover_penalty(candidate_context)
+
+    unmeasured = tuple(
+        term
+        for term, value in (
+            ("objective_gain", measured_objective),
+            ("decision_gain", measured_decision),
+            ("turnover_penalty", measured_turnover),
+        )
+        if value is None
+    )
+
     stability = stability_score(folds)
     breakdown = feature_utility(
         weights=objective.objective_weights,
         predictive_gain=incremental,
-        objective_gain=incremental if beat_controls else 0.0,
+        objective_gain=measured_objective or 0.0,
+        decision_gain=measured_decision or 0.0,
+        turnover=measured_turnover or 0.0,
         folds=folds,
         complementarity_gain=max(0.0, incremental - max(control_gain, shuffled_gain)),
         complexity=program.node_count(),
@@ -815,16 +1046,14 @@ def _evaluate_one(
         # that this sinks the candidate — which is the behaviour that was missing
         # while `leakage_passed` was hardcoded to True.
         leakage_risk=0.0 if proof.passed else 1.0,
-        # Decision quality needs a policy backtest and turnover needs a ranking
-        # across runs; neither exists in this loop. Named rather than passed as
-        # zero, so the breakdown cannot present them as measured and unhelpful.
-        unmeasured=("decision_gain", "turnover_penalty"),
+        unmeasured=unmeasured,
     )
 
     draft = FeatureEvaluation(
         feature_id=proposal.hypothesis.id,
         feature_version=program.version(),
         objective_id=objective.id,
+        pool_signature=pool_signature,
         backtest_start=min((f.fold_index for f in folds), default=0),
         backtest_end=max((f.fold_index for f in folds), default=0),
         folds=folds,
@@ -838,6 +1067,12 @@ def _evaluate_one(
         ),
         incremental_value=round(incremental, 6),
         stability=round(stability, 6),
+        # Recorded, not merely used. `FeatureEvaluation.turnover` existed and was
+        # never assigned, so the registry persisted 0.0 while the utility score
+        # was computed from the real figure — an auditor reading the stored row
+        # would have concluded the term was unmeasured when it had decided part
+        # of the verdict.
+        turnover=round(measured_turnover or 0.0, 6),
         missingness=round(missingness, 6),
         leakage_checks=proof.checks,
         leakage_passed=proof.passed,

@@ -25,14 +25,19 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from itertools import product
 from typing import Final
 
 from xg_alonso.contracts.identifiers import PlayerCode
 from xg_alonso.contracts.prediction import PlayerPrediction, Position
 from xg_alonso.contracts.squad import SquadPick
+from xg_alonso.domain.constraints import legal_formations
 from xg_alonso.domain.rules import SquadRules
 from xg_alonso.domain.scoring import ScoringThresholds
+
+# `legal_formations` moved down to `domain.constraints`: it derives shapes from
+# `SquadRules` alone and is needed by `domain.context_features`, which sits below
+# this layer. Re-exported here so every existing import keeps resolving to the
+# single definition rather than acquiring a second one.
 
 __all__ = [
     "CAPTAIN_MULTIPLIER",
@@ -75,23 +80,6 @@ class XiSelection:
         """Conventional shorthand, e.g. ``3-4-3`` (the keeper is implied)."""
         _, defenders, midfielders, forwards = self.formation
         return f"{defenders}-{midfielders}-{forwards}"
-
-
-def legal_formations(rules: SquadRules) -> list[tuple[int, int, int, int]]:
-    """Every legal ``(GKP, DEF, MID, FWD)`` shape, derived from the rules.
-
-    Read from ``min_play``/``max_play`` rather than hardcoded, so a rule change
-    is picked up from the pinned snapshot like every other constant.
-    """
-    bounds = [
-        range(rules.rule_for(p).min_play, rules.rule_for(p).max_play + 1)
-        for p in (Position.GKP, Position.DEF, Position.MID, Position.FWD)
-    ]
-    shapes: list[tuple[int, int, int, int]] = []
-    for gkp, dfd, mid, fwd in product(*bounds):
-        if gkp + dfd + mid + fwd == rules.starting_size:
-            shapes.append((gkp, dfd, mid, fwd))
-    return shapes
 
 
 def _expected(pick: SquadPick, predictions: Mapping[PlayerCode, PlayerPrediction]) -> float:
