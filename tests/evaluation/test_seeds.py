@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 import typer
+from tests.conftest import BOOTSTRAP_FIXTURE
 
 from xg_alonso.cli.main import _resolve_rules
 from xg_alonso.contracts.identifiers import parse_season
@@ -107,10 +108,7 @@ def _data_root_pinned_at(tmp_path: Path, *seasons: str) -> Path:
     the input is also the only way to test the *fallback ordering*, which needs
     more than one pinned season and the real directory has only ever had one.
     """
-    fixture = (
-        Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
-    )
-    payload = json.loads(fixture.read_text())
+    payload = json.loads(BOOTSTRAP_FIXTURE.read_text())
     raw = json.dumps(payload).encode("utf-8")
 
     pinned = tmp_path / "pinned"
@@ -266,8 +264,8 @@ class TestFreezeProvenanceIsRecorded:
     def test_a_fitted_model_records_its_hyperparameters(self) -> None:
         """Applied at fit time and never stored, so nothing could check them."""
         import polars as pl
-        from conftest import FAST, synthetic_stats
 
+        from conftest import FAST, synthetic_stats
         from xg_alonso.prediction.dataset import build_training_frame
         from xg_alonso.prediction.trained import train_component_models
 

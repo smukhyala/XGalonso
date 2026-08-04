@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
+from tests.conftest import BOOTSTRAP_FIXTURE
 
 from xg_alonso.contracts.identifiers import GameweekId, PlayerCode, TenthsOfMillion
 from xg_alonso.contracts.prediction import (
@@ -30,9 +30,8 @@ from xg_alonso.prediction.calibration import (
 )
 
 NOW = datetime(2026, 8, 1, tzinfo=UTC)
-_FIXTURE = Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
 RULES = ScoringRules.from_bootstrap(
-    json.loads(_FIXTURE.read_text()),
+    json.loads(BOOTSTRAP_FIXTURE.read_text()),
     version="2026-27",
     source_sha256="f" * 64,
     fetched_at=NOW,

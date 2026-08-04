@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from tests.conftest import REPO_ROOT
 
 from xg_alonso.contracts.form import (
     FormDirection,
@@ -195,10 +196,7 @@ class TestEverySurfaceAppliesTheSameAdjustments:
 
     @staticmethod
     def _source(relative: str) -> str:
-        from pathlib import Path
-
-        root = Path(__file__).resolve().parents[2]
-        return (root / relative).read_text()
+        return (REPO_ROOT / relative).read_text()
 
     @pytest.mark.parametrize(
         "module",

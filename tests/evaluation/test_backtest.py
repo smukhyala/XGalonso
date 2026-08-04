@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
 
 import polars as pl
 import pytest
+from tests.conftest import BOOTSTRAP_FIXTURE
 
 from xg_alonso.contracts.identifiers import (
     EntryId,
@@ -45,11 +45,7 @@ NOW = datetime(2025, 8, 15, 12, 0, tzinfo=UTC)
 
 def _rules() -> SquadRules:
     """Rules from the pinned snapshot, so a cap is never a literal in a test."""
-    payload = json.loads(
-        (
-            Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
-        ).read_text()
-    )
+    payload = json.loads(BOOTSTRAP_FIXTURE.read_text())
     return SquadRules.from_bootstrap(payload, version="2026-27", source_sha256="b" * 64)
 
 

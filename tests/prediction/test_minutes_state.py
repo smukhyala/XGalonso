@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import polars as pl
 import pytest
+from tests.conftest import BOOTSTRAP_FIXTURE, REPO_ROOT
 
 from xg_alonso.contracts.prediction import MINUTES_STATES, MinutesState
 from xg_alonso.domain.scoring import ScoringRules
@@ -34,8 +34,8 @@ from xg_alonso.prediction.trained import (
     train_component_models,
 )
 
-ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = ROOT / "data/fixtures/fpl/bootstrap_static_2026_27.json"
+ROOT = REPO_ROOT
+FIXTURE = BOOTSTRAP_FIXTURE
 SILVER = ROOT / ".data/silver/player_gameweek_stats.parquet"
 TRAINING = ROOT / ".data/gold/training_frame.parquet"
 

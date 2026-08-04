@@ -10,11 +10,9 @@ Both cases are pinned below, along with the two things each hash must ignore.
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,12 +23,10 @@ from xg_alonso.domain.scoring import ScoringRules, rules_snapshot_hash
 from xg_alonso.features.catalogue import catalogue_specs
 from xg_alonso.features.schema import catalogue_hash, model_feature_names
 
-FIXTURE = Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
-
 
 @pytest.fixture(scope="module")
-def payload() -> dict[str, Any]:
-    return json.loads(FIXTURE.read_text())  # type: ignore[no-any-return]
+def payload(bootstrap_payload: dict[str, Any]) -> dict[str, Any]:
+    return bootstrap_payload
 
 
 @pytest.fixture(scope="module")

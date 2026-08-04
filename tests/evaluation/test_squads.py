@@ -10,7 +10,6 @@ an ownership template that cannot see the week it is choosing for.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -31,14 +30,13 @@ from xg_alonso.evaluation.squads import (
     write_squad_artifact,
 )
 
-FIXTURE = Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
 T0 = datetime(2026, 8, 21, tzinfo=UTC)
 
 
 @pytest.fixture(scope="module")
-def rules() -> SquadRules:
-    payload: dict[str, Any] = json.loads(FIXTURE.read_text())
-    return SquadRules.from_bootstrap(payload, version="2026-27", source_sha256="b" * 64)
+def rules(squad_rules: SquadRules) -> SquadRules:
+    """The pinned squad constraints, built once in the root conftest."""
+    return squad_rules
 
 
 @pytest.fixture(scope="module")

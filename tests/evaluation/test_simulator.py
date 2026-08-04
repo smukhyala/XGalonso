@@ -7,10 +7,6 @@ importantly, pin that the parts still sum to the whole.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any
-
 import pytest
 
 from xg_alonso.contracts.identifiers import (
@@ -27,17 +23,11 @@ from xg_alonso.domain.rules import SquadRules
 from xg_alonso.evaluation.backtest import score_squad
 from xg_alonso.evaluation.simulator import simulate_squad
 
-FIXTURE = Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
-
 
 @pytest.fixture(scope="module")
-def payload() -> dict[str, Any]:
-    return json.loads(FIXTURE.read_text())  # type: ignore[no-any-return]
-
-
-@pytest.fixture(scope="module")
-def rules(payload: dict[str, Any]) -> SquadRules:
-    return SquadRules.from_bootstrap(payload, version="2026-27", source_sha256="b" * 64)
+def rules(squad_rules: SquadRules) -> SquadRules:
+    """The pinned squad constraints, built once in the root conftest."""
+    return squad_rules
 
 
 def _squad(rules: SquadRules) -> SquadState:
