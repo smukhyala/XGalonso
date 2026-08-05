@@ -324,7 +324,6 @@ class TestRoundTrip:
     @staticmethod
     def _fitted() -> tuple[ComponentModels, TrainingData]:
         from conftest import FAST, synthetic_stats
-
         from xg_alonso.prediction.dataset import build_training_frame
         from xg_alonso.prediction.trained import train_component_models
 

@@ -1,14 +1,35 @@
+<!-- claims
+package: packages/discovery
+symbols: xg_alonso.discovery.embeddings, xg_alonso.discovery.clusters
+-->
+
 # Representation Learning
 
 | Field | Value |
 |---|---|
 | Project | XG Alonso |
 | Document | Embeddings |
-| Version | 1.0 |
-| Status | Deferred (Post-MVP) |
+| Version | 1.1 |
+| Status | Partially shipped — player embeddings only |
 | Owner | ML Platform |
 | Dependencies | [Feature Factory](02_feature_factory.md), [Player Clustering](05_player_clustering.md), [Prediction Models](07_prediction_models.md) |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-08-04 |
+
+> **Status correction, 2026-08-04.** This document carried `Deferred (Post-MVP)` after part of it had
+> shipped. Being precise about which part:
+>
+> | Section | Reality |
+> |---|---|
+> | 2.1 Player embeddings | **Built**, in `discovery/embeddings.py`. Seeded, deterministic, versioned, and consumed by clustering |
+> | 2.2 Team embeddings | **Not built.** The preseason `strength_*` guard below is still the right warning for whoever builds them |
+> | 2.3 Manager embeddings | **Not built**, and not planned — FPL publishes nothing that would identify a head coach's rotation tendency without inference from lineups |
+> | 2.4 Fixture embeddings | **Not built.** Matchup context is carried by the opponent-strength features in `features/opponent.py` instead |
+>
+> It shipped inside `packages/discovery`, not as `packages/embeddings`; that package does not exist.
+> Similarity search (section 3) is exposed as cluster membership rather than a nearest-neighbour
+> index over the vectors.
+>
+> See [Player Embeddings and Clusters](../player_embeddings_and_clusters.md) for what was built.
 
 ---
 

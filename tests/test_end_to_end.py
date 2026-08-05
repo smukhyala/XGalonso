@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -24,7 +23,6 @@ from xg_alonso.contracts.identifiers import EntryId, Season
 from xg_alonso.domain.constraints import check_squad, check_starting_xi
 from xg_alonso.pipelines.normalization import PLAYER_GAMEWEEK_STATS_SCHEMA, conform
 
-FIXTURE = Path(__file__).resolve().parents[1] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 SEASON = Season("2026-27")
 
@@ -174,9 +172,8 @@ def _cheap_squad(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.fixture(scope="module")
-def payload() -> dict[str, Any]:
-    real: dict[str, Any] = json.loads(FIXTURE.read_text())
-    built: dict[str, Any] = _synthetic_bootstrap(real)
+def payload(bootstrap_payload: dict[str, Any]) -> dict[str, Any]:
+    built: dict[str, Any] = _synthetic_bootstrap(bootstrap_payload)
     return built
 
 

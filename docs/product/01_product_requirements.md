@@ -4,11 +4,11 @@
 |---|---|
 | Project | XG Alonso |
 | Document | Product Requirements |
-| Version | 1.0 |
-| Status | Draft |
+| Version | 1.1 |
+| Status | Draft — §4 and §8 reconciled against the code 2026-08-04; §1-3, §5-7 are unverified target product |
 | Owner | Product |
 | Dependencies | [Vision](../vision/00_vision.md), [Repository Structure](../architecture/01_repository_structure.md) |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-08-04 |
 
 ---
 
@@ -139,40 +139,42 @@ would have to model itself, reconstructed from public transfer history and owner
 
 ### D. Feature Scientist
 
-**Deferred (D10)** — product first, research platform deepened afterwards. The Feature Factory
-ships in the MVP; the automated Feature Scientist that sits on top of it does not.
+**Shipped, after the product, as D10 sequenced it** — in `packages/discovery`, and not through the
+interface [Feature Scientist](../ml/03_feature_scientist.md) specified. Surfaced by `xg discover`
+and the `/discovery` view.
 
-The platform automatically discovers predictive football features.
+The platform automatically discovers predictive football features, conditioned on the manager's
+objective rather than on a single global accuracy metric.
 
-It should:
+| Requirement | Status |
+|---|---|
+| Generate 300-700 quality candidate features (D12 — a bounded target, not thousands) | Partly. 231 distinct columns today; D12 is a ceiling and the build is under it |
+| Discover interactions | Expressible via `Arith(MUL)` in the DSL; the set search exists but is not yet wired. See [Interaction Discovery](../ml/04_interaction_discovery.md) |
+| Rank importance | Shipped — `xg importance`, `GET /features/importance`, measured out of sample |
+| Remove redundant features | Partly. Acceptance rejects a candidate that does not add utility over the existing set; there is no standing redundancy sweep over accepted features |
+| Track feature versions | Shipped — `CATALOGUE_VERSION`, the discovery registry, and per-experiment manifests |
 
-- Generate 300-700 quality candidate features (D12 — a bounded target, not thousands)
-- Discover interactions
-- Rank importance
-- Remove redundant features
-- Track feature versions
-
-Users can inspect feature importance and understand why models changed.
-
-This is a primary differentiator.
+Users can inspect feature importance and understand why models changed. Rejected candidates are
+shown alongside accepted ones; a discovery surface that shows only its successes is a marketing
+page.
 
 ### E. Representation Learning
 
-**Deferred (D10).** Added after the data and feature pipeline is reliable.
+**Partially shipped**, in `discovery/embeddings.py` and `discovery/clusters.py`.
 
-Learn embeddings for:
-
-- Players
-- Teams
-- Managers
-- Fixtures
+| Embedding | Status |
+|---|---|
+| Players | Built — seeded, deterministic, versioned |
+| Teams | Not built |
+| Managers | Not built, and not planned; FPL publishes nothing that would identify a head coach's rotation tendency without inference from lineups |
+| Fixtures | Not built. Matchup context comes from the opponent-strength features instead |
 
 Applications:
 
-- Similar player search
-- Tactical similarity
-- Transfer discovery
-- Cold-start handling
+- Similar player search — exposed as **cluster membership**, not a nearest-neighbour index
+- Tactical similarity — not built; needs team embeddings
+- Transfer discovery — partly, through cluster-conditioned candidate generation
+- Cold-start handling — partly, through cluster priors
 
 ---
 
@@ -285,34 +287,35 @@ Secondary:
 The MVP is a local, CLI-driven vertical slice that produces a defensible transfer recommendation
 for a real squad by GW1 of 2026/27 (D9).
 
-Deliver:
+Delivered:
 
-1. FPL ingestion from the official API (D6), backfilled from 2022/23 (D7)
-2. Canonical tables in DuckDB + Parquet behind a repository interface (D2)
-3. Point-in-time Feature Factory v1
-4. Feature registry — definitions, versions, lineage, metadata
-5. Expected-minutes baseline model
-6. Component-based points baseline, converted through versioned scoring rules (D8)
-7. Squad import by public FPL team ID (D3)
-8. Single and double transfer optimizer, evaluated against a hold baseline
-9. Reason-coded explanations for every recommendation
-10. CLI as the only interface (D4)
+| # | Item | Status |
+|---|---|---|
+| 1 | FPL ingestion from the official API (D6), backfilled from 2022/23 (D7) | Built |
+| 2 | Canonical tables behind a repository interface (D2) | Built — but on **Parquet only**. `DuckDBTableStore` exists behind the same protocol and is constructed nowhere outside tests; there is no `.duckdb` file. D2 named both, and the boundary it required is what made using only one a non-event |
+| 3 | Point-in-time Feature Factory v1 | Built, with a mechanical leakage harness and a negative control |
+| 4 | Feature registry — definitions, versions, lineage, metadata | **Not built as specified.** There is no `feature_registry` table. Definitions are frozen `FeatureSpec` values in code, versioned by `CATALOGUE_VERSION`; lineage is carried on the artifact manifest. The discovery registry (nine `discovery_*` tables) covers discovered features only |
+| 5 | Expected-minutes baseline model | Built |
+| 6 | Component-based points baseline via versioned scoring rules (D8) | Built |
+| 7 | Squad import by public FPL entry ID (D3) | Built, with `--squad-file` for the pre-deadline case |
+| 8 | Transfer optimizer against a hold baseline | Built. Single transfer; the double-transfer package is not |
+| 9 | Reason-coded explanations for every recommendation | Built |
+| 10 | CLI as the only interface (D4) | Superseded — the API and web app also ship. The CLI-first ordering held |
 
-Explicitly deferred, so the cut is visible rather than silent:
+Still deferred, so the cut stays visible rather than silent:
 
 | Deferred item | Reason |
 |---|---|
-| Feature Scientist v1 | D10 — product first, research platform afterwards |
-| Interaction discovery | D10 |
-| Embeddings and representation learning | D10 |
 | Price model, fair value, Market Intelligence | D11 — no current-season price data at GW1 |
 | Wildcard recommender | D5, and the wildcard is unavailable in GW1 |
 | Chip logic (Free Hit, Bench Boost, Triple Captain) | D5 — chip *state* is modelled, chip *logic* is not built |
-| Recommendation dashboard and any web frontend | D4 — CLI first, then FastAPI, then Next.js |
+| Multi-transfer packages | Not deferred by decision; simply not built. Slice 1 is single-transfer |
 | Odds and press conference ingestion | D6 — official FPL API only, no paid providers |
 | Docker, cloud, hosting | D1 — local-only first |
 
-Future versions add richer embeddings, continual learning, and automated experimentation.
+Three items this section listed as deferred have since shipped: the Feature Scientist, interaction
+*expression*, and representation learning — all in `packages/discovery`, all after the product, as
+D10 sequenced. See §4D and §4E for exactly which parts.
 
 ---
 

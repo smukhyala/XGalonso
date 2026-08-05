@@ -534,3 +534,38 @@ class TestTheDiscoveryLoopProvesEachProgram:
         assert "turnover_penalty" not in reported
         assert "predictive_gain" in reported
         assert "not measured" in breakdown.explain()
+
+
+class TestAFailedProofBlocksRegistration:
+    """The gate that decides whether a leaking feature can enter the registry.
+
+    ``FeatureEvaluation.leakage_passed`` and
+    ``DiscoveredFeatureSpec.validation_status`` are two different fields
+    guarding two different things — the acceptance verdict and registration —
+    and they were made honest one at a time. The first fix left the second
+    hardcoded to ``LEAKAGE_PASSED``, so a program the harness rejected was
+    still written into the registry as usable.
+    """
+
+    def test_only_leakage_passed_is_registrable(self) -> None:
+        from xg_alonso.contracts.discovery import ValidationStatus
+
+        assert ValidationStatus.LEAKAGE_PASSED.is_registrable
+        for status in ValidationStatus:
+            if status is not ValidationStatus.LEAKAGE_PASSED:
+                assert not status.is_registrable, f"{status} must not be registrable"
+
+    def test_the_experiment_derives_the_status_from_the_proof(self) -> None:
+        """Reads the source rather than running a full discovery experiment,
+        which needs a fitted bundle and a scorer. What matters is that the
+        assignment is conditional at all — the defect was a literal."""
+        import inspect
+
+        from xg_alonso.discovery import experiment
+
+        source = inspect.getsource(experiment)
+        assert "validation_status=ValidationStatus.LEAKAGE_PASSED," not in source, (
+            "validation_status is assigned unconditionally; a rejected program "
+            "would be registered as usable"
+        )
+        assert "ValidationStatus.REJECTED_LEAKAGE" in source

@@ -4,20 +4,54 @@
 |---|---|
 | Project | XG Alonso |
 | Document | Database Schema |
-| Version | 1.0 |
-| Status | Draft |
+| Version | 1.1 |
+| Status | Draft — schema design, **not** as-built. See section 0 |
 | Owner | Data Platform |
 | Dependencies | [Data Sources](01_data_sources.md), [Feature Factory](../ml/02_feature_factory.md), [Repository Structure](../architecture/01_repository_structure.md) |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-08-04 |
+
+---
+
+## 0. As built — read this before the DDL
+
+**Nothing in this document's DDL has been executed.** No table in sections 2, 3 or 4 exists as a
+table. This is a schema *design*; what runs is flatter, and the gap is large enough that a reader
+who skipped this note would be misled about every section below.
+
+What actually persists, under `.data/`:
+
+| Layer | Reality |
+|---|---|
+| Bronze | JSON snapshots on disk, one directory per endpoint family, through `FileSystemBronzeStore`. Immutable and append-only, as designed |
+| Silver | Two parquet files: `player_gameweek_stats.parquet` and `players_history.parquet` |
+| Gold | Three parquet files: `training_frame.parquet`, `features_gw1.parquet`, `feature_importance.parquet` |
+| Pinned constants | `pinned/rules_2026-27.json`, not a `game_config_snapshots` table |
+| Discovery | The nine `discovery_*` tables in `registry.py` — the **only** tables in the system with a declared schema and a version constant (`REGISTRY_SCHEMA_VERSION`), and they too are written through `ParquetTableStore` |
+
+**The canonical key is `player_code`, not `player_id`.** This document keys most tables on
+`player_id` with `season` alongside. The code does not: `player_code` (`elements[].code`) is stable
+across seasons and is what every silver and gold frame is keyed on, precisely so a cross-season
+join does not silently pair two different footballers. Where a season-scoped `player_id` appears it
+is a payload field being carried, never a key. The convention in §1.1 states this correctly; the DDL
+below contradicts it.
+
+**Sections 2, 3 and 4 are retained as design.** The column-level thinking in them — four
+timestamps, integer money, provenance on every row, the reconciliation rule — is followed by the
+parquet frames even though the DDL is not. Read them for that, not as a description of storage.
 
 ---
 
 ## 1. Storage decision
 
-**DuckDB + Parquet only. There is no PostgreSQL** (D2). Bronze snapshots are Parquet files on local
-disk; silver and gold are DuckDB tables in a single local database file that reads those Parquet
-files directly. Nothing in this project runs a database server, and nothing is containerised in the
-first slice (D1).
+**DuckDB + Parquet only. There is no PostgreSQL** (D2).
+
+In practice, **Parquet only**. `DuckDBTableStore` exists, is tested, and is constructed nowhere
+outside the test suite; there is no `.duckdb` file on disk. `apps/cli` and `apps/api` are both
+forbidden from importing `duckdb` by the `duckdb-isolation` contract in `.importlinter`, so the
+composition root uses `ParquetTableStore`. That is not a failure of D2 — it is the boundary D2
+required doing its job. The store was swapped and no caller changed.
+
+Nothing in this project runs a database server, and nothing is containerised (D1).
 
 All persistence sits **behind a repository interface**. Application, optimizer and feature code
 depend on the interface, never on `duckdb` directly:
@@ -44,9 +78,14 @@ class PlayerRepository(Protocol):
     ) -> Sequence["PlayerGameweekStatsRow"]: ...
 ```
 
-The DuckDB implementation lives in the storage adapter package. Swapping to a server-backed store
-later is a new implementation of the same protocol and touches no caller. That is the entire reason
-the interface exists — not because a swap is planned.
+The DuckDB implementation lives in the storage adapter package alongside the Parquet one. Swapping
+to a server-backed store later is a new implementation of the same protocol and touches no caller.
+That is the entire reason the interface exists — and it has already paid for itself once, when the
+running system settled on Parquet without a downstream change.
+
+The protocol above is illustrative. The shipped protocols are `TableStore` and `BronzeStore` in
+`packages/data_contracts/src/xg_alonso/contracts/storage.py`, typed in terms of polars frames rather
+than row sequences.
 
 ### 1.1 Conventions
 
@@ -67,8 +106,9 @@ comparison errors in budget constraints where the optimizer needs exact feasibil
 
 ## 2. Slice-1 tables
 
-These five tables are the complete canonical surface for the first slice. Everything else is
-deferred.
+**Designed, never created.** These five were the intended canonical surface. What runs is two silver
+parquet frames; `player_gameweek_stats` is the one whose grain and column set the shipped frame
+actually follows, and it is keyed on `player_code`, not `player_id`.
 
 ### 2.1 `teams`
 
@@ -285,7 +325,10 @@ against live rows only. See [Data Sources §1.1](01_data_sources.md).
 
 ## 3. Supporting tables
 
-Two small tables implement rules stated elsewhere. They are slice-1, not deferred.
+**Designed, never created.** Both rules below are implemented; neither is implemented as a table.
+The bronze index is directory structure plus per-snapshot metadata written by
+`FileSystemBronzeStore`, and the pinned constants are a JSON file at `.data/pinned/rules_<season>.json`
+loaded through `SquadRules.from_payload`. The drift check runs on every ingest as designed.
 
 ### 3.1 `raw_snapshots`
 
@@ -334,8 +377,20 @@ free-transfer cap. See [Transfer Planner §3](../optimization/02_transfer_planne
 
 ## 4. Deferred tables
 
-Named and reserved so their eventual arrival is not a migration surprise. **None of these are built
-in slice 1.**
+Named and reserved so their eventual arrival is not a migration surprise. **None are built**, but
+two have been overtaken by something in a different shape and should be read with that in mind:
+
+- `embeddings` and `clusters` — the capability shipped. Cluster models and assignments persist to
+  `discovery_cluster_models` and `discovery_cluster_assignments`; the embedding vectors themselves
+  are recomputed per fold rather than stored, because they are conditioned on the objective and a
+  stored vector without its objective would be a trap.
+- `knowledge_objects` — partly overtaken by `discovery_hypotheses`, `discovery_evaluations` and
+  `discovery_lessons`, which cover within-experiment learning. Cross-season accumulation is not
+  built.
+
+The nine `discovery_*` tables are the only declared, versioned schema in the system. They are
+listed in `packages/discovery/src/xg_alonso/discovery/registry.py` and carry
+`REGISTRY_SCHEMA_VERSION`.
 
 | Table | Purpose | Blocked on |
 |---|---|---|
@@ -357,14 +412,26 @@ the same grain under a name that matches the API's own vocabulary. No content is
 
 ## 5. Acceptance criteria
 
-- Every slice-1 table is creatable from a single idempotent DDL script with no manual steps.
-- Loading a pinned bronze snapshot twice produces identical table contents.
+Met, against the parquet frames rather than against tables:
+
+- Loading a pinned bronze snapshot twice produces identical contents.
 - Component-to-`total_points` reconciliation passes for every row in `player_gameweek_stats`.
-- No table keyed on `player_id` or `team_id` omits `season`.
 - No monetary column is a floating-point type.
-- Every silver row resolves to an existing `raw_snapshots.snapshot_id`.
-- All reads in application code go through a repository interface; a grep for `duckdb` outside the
-  storage adapter returns nothing.
+- All reads in application code go through the `TableStore` / `BronzeStore` protocols. `duckdb`
+  outside the storage adapter is not merely absent — it is unimportable, enforced by
+  `.importlinter` on every CI run rather than by a grep.
+
+Not met, and superseded rather than outstanding:
+
+- *"Every slice-1 table is creatable from a single idempotent DDL script"* — there is no DDL script
+  and no table. Frames are written whole by the pipeline that produces them.
+- *"No table keyed on `player_id` or `team_id` omits `season`"* — nothing is keyed on `player_id`.
+  The stronger rule the code follows is that the key is `player_code`, which needs no season to be
+  unambiguous.
+- *"Every silver row resolves to an existing `raw_snapshots.snapshot_id`"* — there is no
+  `raw_snapshots` table, so this is unenforced. Provenance is carried on the artifact manifest and
+  in the bronze directory layout. **This is a real gap**: a silver frame cannot today be traced back
+  to the exact snapshot that produced it by a mechanical check.
 
 ---
 

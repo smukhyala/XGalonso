@@ -20,7 +20,7 @@ contradicts one of them, the decision wins. Do not relitigate them while impleme
 | D1 | Local-only first — no Docker, cloud, or hosting in the first slice |
 | D2 | DuckDB + Parquet only; no PostgreSQL. Storage sits behind a repository interface |
 | D3 | Public FPL team ID only; no authentication. Prices reconstructed from public transfer history |
-| D4 | CLI first, then FastAPI, then Next.js. No frontend in the MVP |
+| D4 | CLI first, then FastAPI, then Next.js. No frontend in the MVP [†](#d4-superseded-2026-08-04) |
 | D5 | No chips in the MVP. Chip *state* is modelled; chip *logic* is not built |
 | D6 | Official FPL API only, zero budget. No scraping, no paid providers |
 | D7 | Historical backfill from 2022/23 — the earliest season with xG in the API |
@@ -30,6 +30,22 @@ contradicts one of them, the decision wins. Do not relitigate them while impleme
 | D11 | Price model deferred — no current-season price data exists at GW1 |
 | D12 | 300-700 quality candidate features, **not** thousands |
 
+### Amendments
+
+The decision text above is a log and is never rewritten. Where reality has moved, it is recorded
+here with a date, so the original decision and the departure from it are both legible.
+
+<a id="d4-superseded-2026-08-04"></a>
+**† D4 superseded 2026-08-04.** The Next.js surface shipped ahead of the original sequencing. The
+CLI-first *ordering* was still followed — CLI, then FastAPI, then Next.js — so what lapsed is the
+"no frontend in the MVP" clause, not the surface order. `apps/web` serves four routes over
+`apps/api` and holds no modelling logic, which is the constraint D4 existed to protect. The web
+front end is therefore **in scope and shipped**; do not treat a request touching it as
+relitigating D4.
+
+D12's range is a **ceiling, not a target.** The build is currently under it — 180 catalogue specs,
+231 distinct feature columns — and that is compliance, not a shortfall to be closed by generating
+filler.
 
 ---
 

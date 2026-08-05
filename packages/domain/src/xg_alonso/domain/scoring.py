@@ -25,6 +25,7 @@ from typing import Any, Final
 from pydantic import BaseModel, ConfigDict, Field
 
 from xg_alonso.contracts.prediction import ComponentExpectations, PointsBreakdown, Position
+from xg_alonso.domain.rules import SquadRules
 
 __all__ = [
     "ScoringRules",
@@ -267,7 +268,7 @@ def assemble_points(
     )
 
 
-def rules_snapshot_hash(scoring: ScoringRules, squad: object) -> str:
+def rules_snapshot_hash(scoring: ScoringRules, squad: SquadRules) -> str:
     """A digest of what the rules *say*, not of the payload they arrived in.
 
     Deliberately **not** ``ScoringRules.source_sha256``. That is the hash of the
@@ -287,7 +288,7 @@ def rules_snapshot_hash(scoring: ScoringRules, squad: object) -> str:
     """
     payload = {
         "scoring": scoring.model_dump(mode="json", exclude={"source_sha256", "fetched_at"}),
-        "squad": squad.model_dump(mode="json", exclude={"source_sha256"}),  # type: ignore[attr-defined]
+        "squad": squad.model_dump(mode="json", exclude={"source_sha256"}),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

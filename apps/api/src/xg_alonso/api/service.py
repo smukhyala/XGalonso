@@ -238,6 +238,14 @@ class DecisionService:
             prices={
                 PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
                 for code, row in rows.items()
+                # The CLI path filters this and the API did not, so a null
+                # price raised `TypeError` from `int(None)` and took down every
+                # endpoint for that gameweek rather than one player. Omitting
+                # the entry is the documented behaviour:
+                # `apply_price_calibration` leaves a player with no price
+                # untouched. This is the same surface-disagreement class the
+                # module header already records once.
+                if row.get("current_price") is not None
             },
             chances={
                 PlayerCode(code): row.get("chance_of_playing_next_round")
@@ -962,6 +970,10 @@ class DecisionService:
                 prices={
                     PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
                     for code, row in rows.items()
+                    # A null price raises from `int(None)` and fails the whole
+                    # request; the price-aware callees leave an absent player
+                    # untouched, which is the documented behaviour.
+                    if row.get("current_price") is not None
                 },
             ),
             prices=prices,
@@ -1168,6 +1180,10 @@ class DecisionService:
                 prices={
                     PlayerCode(code): TenthsOfMillion(int(row["current_price"]))
                     for code, row in rows.items()
+                    # A null price raises from `int(None)` and fails the whole
+                    # request; the price-aware callees leave an absent player
+                    # untouched, which is the documented behaviour.
+                    if row.get("current_price") is not None
                 },
             ),
             prices=prices,
@@ -1676,6 +1692,7 @@ class DecisionService:
                     prices={
                         PlayerCode(int(code)): TenthsOfMillion(int(row["current_price"]))
                         for code, row in available.items()
+                        if row.get("current_price") is not None
                     },
                 ),
             )

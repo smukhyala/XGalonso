@@ -1,8 +1,65 @@
+<!-- claims
+commands: xg ingest, xg build-features, xg train, xg recommend, xg build-squad, xg plan, xg advise, xg discover, xg build-discovery-frame, xg backtest, xg score, xg importance, xg models list, xg evaluate check
+routes: GET /health, GET /recommend/{entry_id}, POST /squad/plan
+symbols: xg_alonso.contracts.objective:ManagerObjective, xg_alonso.contracts.objective:ManagerConstraints, xg_alonso.contracts.objective:UserBelief, xg_alonso.contracts.context:DecisionContext, xg_alonso.prediction.beliefs, xg_alonso.interpreter.requests, xg_alonso.features.catalogue:catalogue_specs, xg_alonso.storage.parquet_store:ParquetTableStore
+-->
+
 # XG Alonso
 
 > A continually learning sports intelligence platform that transforms raw football data into actionable Fantasy Premier League decisions through automated feature engineering, representation learning, machine learning, and optimization.
 
 Documentation index: [`docs/README.md`](docs/README.md)
+
+---
+
+## Quickstart
+
+**Prerequisites**
+
+| Requirement | Why |
+|---|---|
+| Python 3.12 | Pinned in `.python-version`; `mypy --strict` and the type surface assume it |
+| [uv](https://docs.astral.sh/uv/) | **`pip` does not work here.** The fourteen `xg-alonso-*` distributions are uv workspace members, resolvable only through `[tool.uv.sources]` in `pyproject.toml`. There is no index they can be fetched from |
+| Node 20+ and npm | Only for the web front end. The CLI and API need neither |
+
+```bash
+git clone <repository-url> XGalonso
+cd XGalonso
+make install
+```
+
+`make install` syncs the workspace (`uv sync --all-packages`) and installs the pre-commit hooks.
+
+**Why `make install` rather than `uv sync` directly — Apple Silicon.** On an arm64 Mac, a uv
+installed from Intel Homebrew is itself x86_64, and it will select an x86_64 Python and build the
+virtualenv under Rosetta. Polars' default wheel requires AVX2 and refuses to load there, so every
+command fails at import with an error that says nothing about architecture. `make install` detects
+`uname -m == arm64`, installs a native arm64 CPython 3.12 if one is missing, builds the venv on it,
+and then asserts the result is genuinely arm64 rather than trusting that it worked. If you skip the
+Makefile and the venv comes out x86_64, delete `.venv` and run `make install` again.
+
+**A first run, offline.** Every command below reads from local snapshots except `xg ingest`, which
+is the only step that touches the network.
+
+```bash
+make ingest                    # official FPL API -> immutable bronze snapshots
+uv run xg ingest-history       # per-player history, also bronze
+make features                  # point-in-time feature build
+uv run xg train                # fit the component models
+make recommend ENTRY=1234567   # the product: one transfer, or advice to hold
+```
+
+`make check` runs what CI runs: `ruff`, `mypy --strict`, `import-linter`, the banned-string grep,
+and the test suite.
+
+**The two local interfaces**, in separate terminals — the web app proxies `/api/*` to port 8000, so
+the API must be up first:
+
+```bash
+make api          # 127.0.0.1:8000
+make web-install  # once
+make web          # 127.0.0.1:3000
+```
 
 ---
 
@@ -74,14 +131,22 @@ we ask
 XG Alonso consists of six primary systems.
 
 1. **Data Platform** — continuously ingests football, fixture, player, market, and FPL data.
-2. **Feature Factory** — automatically engineers 300-700 quality candidate features.
+2. **Feature Factory** — declares candidate features rather than hand-writing them.
 3. **Feature Scientist** — discovers useful features, interactions, and representations.
 4. **Prediction Layer** — predicts football outcomes and Fantasy outcomes.
 5. **Optimization Engine** — finds optimal squad decisions.
 6. **Continual Learning** — retrains and improves after every gameweek.
 
-The candidate-feature target is deliberately bounded. Quality and point-in-time correctness matter
-more than raw count; see [Feature Factory](docs/ml/02_feature_factory.md).
+The candidate-feature target is deliberately bounded — D12 caps it at **300-700 quality
+candidates, not thousands**. That is a ceiling, and the build is currently well under it: the
+declarative catalogue holds **180 specs**, and with the career, opponent, recency and slice-1
+families the model-ready frame carries **231 distinct feature columns**. Quality and point-in-time
+correctness matter more than raw count, so the gap is not a defect to be closed by generating
+filler; see [Feature Factory](docs/ml/02_feature_factory.md).
+
+```bash
+uv run python -c "from xg_alonso.features.catalogue import catalogue_specs; print(len(catalogue_specs()))"
+```
 
 ---
 
@@ -101,7 +166,7 @@ XG Alonso:
 ```mermaid
 flowchart TD
     A["Raw data"] --> B["Feature Factory"]
-    B --> C["300-700 candidate features"]
+    B --> C["Declared candidate features<br/>(231 today, D12 caps at 700)"]
     C --> D["Feature Scientist"]
     D --> E["Interaction discovery"]
     E --> F["Embeddings"]
@@ -116,93 +181,159 @@ The project is centered around **automatic representation learning**, not simply
 
 ## Repository Structure
 
-This is the target modular monorepo layout, not the current on-disk state. Only what the current
-slice needs is scaffolded; folders are created when a slice requires them, never speculatively.
-The full tree, package ownership, and dependency rules live in
-[Repository Structure](docs/architecture/01_repository_structure.md).
+This is the tree as it exists on disk. A uv workspace of fourteen distributions sharing the PEP 420
+namespace package `xg_alonso`; package ownership and the enforced dependency direction live in
+[Repository Structure](docs/architecture/01_repository_structure.md), and the machine-readable
+version of the rules is `.importlinter`.
 
 ```text
 xg-alonso/
-├── README.md
-├── CLAUDE.md
-├── pyproject.toml
+├── README.md, CLAUDE.md, LICENSE, Makefile, pyproject.toml, uv.lock
+├── .importlinter                # 7 enforced dependency contracts
 │
 ├── apps/
-│   ├── web/                     # Next.js user-facing app
-│   └── api/                     # FastAPI application
+│   ├── cli/                     # `xg` — the first surface, Typer
+│   ├── api/                     # FastAPI, unprefixed routes over the same functions
+│   └── web/                     # Next.js; renders, never computes
 │
 ├── packages/
-│   ├── data_contracts/          # Shared schemas
-│   ├── domain/                  # Pure FPL and football rules
-│   ├── feature_factory/         # Deterministic candidate-feature generation
-│   ├── feature_scientist/       # Automated feature evaluation and promotion
-│   ├── embeddings/              # Representation learning
-│   ├── prediction/              # Model training and inference
-│   ├── optimization/            # Decision layer
-│   ├── explanations/            # Structured evidence to user-facing reasoning
-│   ├── evaluation/              # Walk-forward validation and backtests
-│   └── observability/           # Run IDs, structured logs, freshness checks
+│   ├── data_contracts/          # xg_alonso.contracts — shared vocabulary, bottom layer
+│   ├── domain/                  # pure FPL and football rules, no I/O
+│   ├── storage/                 # the only package permitted a database driver
+│   ├── interpreter/             # reads free text: requests, team news
+│   ├── feature_factory/         # xg_alonso.features — declarative, point-in-time safe
+│   ├── prediction/              # component models, calibration, beliefs
+│   ├── optimization/            # transfers, squad build, planning
+│   ├── explanations/            # structured evidence to reason-coded text
+│   ├── evaluation/              # walk-forward backtests and experiment reports
+│   └── discovery/               # objective-conditioned feature search (research surface)
 │
 ├── pipelines/
-│   ├── ingestion/
-│   ├── normalization/
-│   ├── identity_resolution/
-│   ├── feature_materialization/
-│   ├── training/
-│   ├── backtesting/
-│   └── recommendations/
+│   ├── ingestion/               # the only package permitted httpx
+│   └── normalization/
 │
-├── configs/                     # Typed YAML/TOML for sources, features, models, experiments
-├── data/                        # Samples, schemas, fixtures only — never raw datasets
-├── models/                      # Model registry and per-target artifacts
-├── infra/                       # Docker, database, migrations, CI, monitoring
-├── scripts/                     # Operational entry points
-├── notebooks/                   # Exploration only, never the sole implementation
-├── tests/                       # Integration, end-to-end, golden, performance
-├── docs/                        # Engineering documentation suite
+├── data/                        # samples, schemas, fixtures only — never raw datasets
+├── tests/                       # mirrors the package tree, plus e2e and docs checks
+├── docs/                        # engineering documentation suite
 └── .github/
 ```
 
-Scaffolded for the current slice:
+Two directories are gitignored rather than absent: `.data/` holds the bronze/silver/gold snapshots
+and model artifacts, and `.venv/` the workspace environment.
 
-```text
-xg-alonso/
-├── README.md
-├── CLAUDE.md
-├── docs/
-└── LICENSE
-```
-
-The web app is added only after a complete recommendation can be produced from the CLI.
-Embeddings and the automated Feature Scientist are added only after the data and feature pipeline
-is reliable.
+Things the documentation set has historically named that **do not exist**: `packages/feature_scientist`,
+`packages/embeddings`, `packages/observability`, `configs/`, `models/`, `infra/`, `scripts/`,
+`notebooks/`, `docker-compose.yml`. The Feature Scientist capability shipped inside
+`packages/discovery` rather than as its own package; the embeddings capability shipped as
+`discovery/embeddings.py` and `discovery/clusters.py`.
 
 ---
 
 ## Current status
 
-Planning is complete. The engineering documentation suite defines every subsystem, and the
-binding project decisions are settled and recorded in [`docs/README.md`](docs/README.md).
-
-The first vertical slice is in progress: FPL ingestion, canonical tables, a point-in-time Feature
-Factory, an expected-minutes baseline, a component-based points baseline, squad import by public
-team ID, and a single/double transfer optimizer compared against a hold baseline — all driven from
-a CLI.
+The vertical slice is built and runs end to end. FPL ingestion into immutable bronze snapshots,
+normalization, a point-in-time Feature Factory with a mechanical leakage harness, component models
+with an expected-minutes stage, squad import by public entry ID, a transfer optimizer measured
+against an explicit HOLD baseline, reason-coded explanations, and a walk-forward backtest — all
+driven from `xg`, with a FastAPI surface and a Next.js front end over the same functions.
 
 Target: useful by **GW1 of the 2026/27 season, 2026-08-21**, then refined in-season.
 
 **Objective-conditioned feature discovery has since landed** — the Feature Scientist,
-interaction discovery, player embeddings and dynamic clustering, all conditioned on what the
-manager is actually trying to achieve. See
-[Objective-Conditioned Feature Discovery](docs/objective_conditioned_feature_discovery.md).
+player embeddings and dynamic clustering, all conditioned on what the manager is actually trying to
+achieve. See [Objective-Conditioned Feature Discovery](docs/objective_conditioned_feature_discovery.md).
+Interaction *search* is the exception: the beam search exists in `discovery/search.py` but is not
+yet reached from the discovery loop, so that part is in progress rather than done.
 
-Deliberately out of the first release:
+Still deliberately out:
 
-- Price model — no current-season price data exists at GW1
-- Chip logic — chip state is modelled, chip decisions are not built
+- Price model — no current-season price data exists at GW1 (D11)
+- Chip logic — chip state is modelled, chip decisions are not built (D5)
 - Wildcard planner — the wildcard is unavailable in GW1 (windows are GW2-19 and GW20-38)
-- Web frontend — CLI first, then API, then Next.js
-- Docker, cloud, and hosting — the first slice runs locally against DuckDB and Parquet
+- Docker, cloud, and hosting — everything runs locally (D1)
+
+**A correction on storage.** D2 names "DuckDB + Parquet", and both implementations exist behind the
+`TableStore` protocol — but nothing in the running system constructs the DuckDB one. `apps/cli` and
+`apps/api` are both forbidden from importing `duckdb` by the `duckdb-isolation` contract, so the
+composition root uses `ParquetTableStore` and `FileSystemBronzeStore`, and there is no `.duckdb`
+file on disk. `DuckDBTableStore` is kept, tested, and unreached: the point of the boundary was to
+keep D2 reversible, and it has been reversed in practice without a code change downstream.
+
+---
+
+## Commands
+
+Twenty-six commands, all under the single `xg` entry point. `--help` on any of them is authoritative;
+this table exists so the surface is discoverable without running the binary.
+
+| Command | Does |
+|---|---|
+| `xg ingest` | Fetch official FPL data into immutable bronze snapshots |
+| `xg ingest-history` | Fetch each player's per-gameweek history into bronze |
+| `xg backfill` | Backfill per-gameweek history from the community archive |
+| `xg refresh` | Re-read the official payload and report what changed |
+| `xg team-news` | Search for team news FPL has not published, and file it as form signals |
+| `xg refresh-plan` | Show which clubs are worth looking up for form, and which are not |
+| `xg build-features` | Build the point-in-time feature set for the next gameweek |
+| `xg train` | Fit component models on historical seasons |
+| `xg importance` | Measure which features actually earn their place |
+| `xg squad` | Show a squad with projected points per player |
+| `xg recommend` | Recommend the best legal single transfer, or advise holding |
+| `xg build-squad` | Build a squad from scratch — the gameweek-1 answer |
+| `xg plan` | Build a squad around requirements typed in plain English |
+| `xg advise` | Recommend a transfer under your objective, constraints and beliefs |
+| `xg backtest` | Walk a past season, measuring recommendations against holding |
+| `xg score` | Score assembled expected points against what actually happened |
+| `xg build-discovery-frame` | Build the point-in-time training frame the discovery loop runs on |
+| `xg discover` | Compile a request, discover features that serve it, report the verdicts |
+| `xg models list` | Every artifact and whether it can be used with the active build |
+| `xg models verify` | Explain in full whether one artifact can be used, and why not |
+| `xg models backfill-manifest` | Write a manifest for an artifact saved before manifests existed |
+| `xg models audit` | Classify every artifact, and optionally give each one a manifest |
+| `xg evaluate check` | Run the freeze assertions and stop |
+| `xg evaluate plan` | Show what an experiment would run, without running any of it |
+| `xg evaluate status` | How far along an experiment is, from its run files alone |
+| `xg evaluate report` | Re-render every artifact from the run files |
+
+The HTTP surface is documented in [Public API](docs/api/01_public_api.md). It is unprefixed and
+read-only apart from three planning endpoints, and it calls the same functions the CLI calls.
+
+---
+
+## Post language → code language
+
+A LinkedIn post about this project describes it as **constraint-conditioned machine learning**. That
+is a reasonable phrase for a general audience and the wrong one for this codebase, because the
+separation the post collapses is the one the code is most careful about. This table maps the post's
+vocabulary onto what to open.
+
+| Post phrasing | Precise term here | Where |
+|---|---|---|
+| "constraint-conditioned" | **context-conditioned** — conditioned on the whole decision context, of which hard constraints are one part | `contracts/context.py` |
+| "what the user wants" (soft) | `ManagerObjective` — maximized, trades off against itself | `contracts/objective.py` |
+| "what the user wants" (hard) | `ManagerConstraints` — never traded off, never priced | `contracts/objective.py` |
+| "what the user thinks" | `UserBelief` — uncertain evidence, never fact, never a constraint | `contracts/objective.py`, applied in `prediction/beliefs.py` |
+| "the AI figures out which features matter" | objective-conditioned feature discovery — a declared search space, scored under the objective, gated by fixed acceptance criteria | `packages/discovery` |
+| "it understands your prompt" | deterministic regex compilation, no language model on the default path | `interpreter/requests.py` |
+
+**Why the distinction is load-bearing rather than pedantic.** The module docstring at
+`packages/data_contracts/src/xg_alonso/contracts/objective.py` puts it directly: confusing an
+objective with a constraint "is how an optimizer comes to sell a player the user said to keep,
+having decided the points were worth it". A constraint is the user choosing which question gets
+answered. An optimizer that prices one has answered a different question and reported the number
+from the wrong one. Beliefs are a third thing again, and the reason `prediction/beliefs.py` returns
+the raw and the adjusted projection side by side is so a hunch cannot quietly overwrite the evidence
+it was supposed to be weighed against.
+
+The umbrella type is `DecisionContext` in `contracts/context.py`: the objective bundle, the squad
+requirements, the squad itself and the gameweek, travelling together as one argument. It is what
+makes "context-conditioned" the right word rather than a nicer-sounding synonym for
+"constraint-conditioned" — intent is only half of a decision context, and the other half is the
+situation the intent applies to.
+
+The umbrella does not blur the three. Objective, constraints and belief remain separately typed and
+separately reachable inside it; that separation is enforced by the types, not asserted by a
+docstring.
 
 ---
 
@@ -258,5 +389,7 @@ Further reading:
 - [Vision](docs/vision/00_vision.md)
 - [Product Requirements](docs/product/01_product_requirements.md)
 - [Repository Structure](docs/architecture/01_repository_structure.md)
-- [Build Plan](docs/implementation/01_build_plan.md)
+- [Public API](docs/api/01_public_api.md) — the CLI and HTTP surfaces as built
+- [Build Plan](docs/implementation/01_build_plan.md) — superseded, retained as a record
 - [Feature Factory](docs/ml/02_feature_factory.md)
+- [`apps/web/README.md`](apps/web/README.md) — the front end and its honesty constraints

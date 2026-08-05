@@ -5,10 +5,21 @@
 | Project | XG Alonso |
 | Document | Build Plan |
 | Version | 1.0 |
-| Status | Draft |
+| Status | **Superseded** — historical record of the 25-day sequencing from 2026-07-27 |
 | Owner | Platform |
 | Dependencies | [Repository Structure](../architecture/01_repository_structure.md), [Data Sources](../data/01_data_sources.md), [Feature Factory](../ml/02_feature_factory.md), [Transfer Planner](../optimization/02_transfer_planner.md), [Public API](../api/01_public_api.md) |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-08-04 (status only) |
+
+> **Superseded 2026-08-04.** This plan was written on 2026-07-27 and sequenced 25 days against the
+> GW1 deadline. Its scope has been exceeded: the API, the web front end and the whole discovery
+> package are built and appear nowhere in it. It carries no completion markers and none have been
+> added, because retro-fitting ticks to a plan that was overtaken rather than followed would
+> misrepresent how the work actually went.
+>
+> For what exists now, read [Repository Structure §11](../architecture/01_repository_structure.md)
+> (milestone status) and the [Public API](../api/01_public_api.md). This document is kept for its
+> reasoning about *ordering* — in particular §1, which is still the clearest statement of why the
+> GW1 404 makes `--squad-file` a launch requirement rather than a convenience.
 
 ---
 

@@ -1,14 +1,37 @@
+<!-- claims
+package: packages/discovery
+symbols: xg_alonso.discovery.dsl:Arith, xg_alonso.discovery.search:beam_search, xg_alonso.discovery.acceptance
+-->
+
 # Interaction Discovery Workflow
 
 | Field | Value |
 |---|---|
 | Project | XG Alonso |
 | Document | Interaction Discovery |
-| Version | 1.0 |
-| Status | Deferred (Post-MVP) |
+| Version | 1.1 |
+| Status | In progress — the expression exists, the search is not wired |
 | Owner | ML Platform |
 | Dependencies | [Feature Factory](02_feature_factory.md), [Feature Scientist](03_feature_scientist.md) |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-08-04 |
+
+> **Status correction, 2026-08-04.** This document said `Deferred (Post-MVP)`, which is no longer
+> true, but "done" would overstate it in the other direction. Precisely:
+>
+> - **Interactions are expressible.** `Arith(MUL)` in the discovery DSL
+>   (`packages/discovery/src/xg_alonso/discovery/dsl.py`) lets a hypothesis multiply two subtrees, so
+>   a proposed interaction compiles, validates against the real schema, and passes through the same
+>   leakage proof and walk-forward controls as any other candidate.
+> - **A search over feature *sets* exists but is unreached.** `search.py::beam_search` carries the
+>   best `k` partial sets forward and is defined, tested and called from nowhere. Wiring it into the
+>   discovery loop is in progress.
+> - **The five-stage evaluation pipeline below was not built.** Acceptance runs through
+>   `discovery/acceptance.py` against criteria fixed in advance, not through the staged screen this
+>   document specifies.
+>
+> Read section 2 with that correction in mind; it is left in place because the reasoning for
+> *gating* interaction search — rather than generating combinatorially — is still the operative
+> policy.
 
 ---
 
@@ -23,15 +46,23 @@ Ownership is split across two subsystems:
 
 This document covers the evaluation and promotion path only. It does not restate the generator contract.
 
-## 2. Deferral
+## 2. Gating
 
-This workflow is deferred post-MVP.
+The precondition this section set has been met: point-in-time correctness is enforced mechanically
+by the leakage harness in `xg_alonso.features.leakage`, and materialization is deterministic. That
+is why interaction expression was unlocked.
 
-- Automated interaction candidates are a Phase 2 item, and SHAP-driven interaction discovery is a Phase 3 item.
-- Automated interaction discovery must not begin before point-in-time correctness, feature metadata, and deterministic materialization are complete in the Feature Factory.
-- Until then, any interaction feature in a production feature set is hand-specified, reviewed, and carries the same Feature Card and lineage requirements as any other feature.
+The policy that survives is the restraint, not the deferral. Interaction search stays **narrow and
+gated** rather than combinatorial: crossing every metric with every window would produce thousands
+of columns, almost all noise, which is exactly what D12 caps against. An interaction earns its place
+by the same route as any other candidate — a falsifiable hypothesis, a leakage proof, a walk-forward
+backtest against noise and shuffled controls, and a utility score under a stated objective.
 
-The stages below are specified now so the contract is stable when the work starts, not because the work is scheduled.
+SHAP-driven interaction discovery was never built and is not planned; `xg importance` measures
+out-of-sample contribution directly instead.
+
+The stages below were specified before the work started and were not the design that shipped. They
+are retained as the contract they were meant to be, not as a description of running code.
 
 ## 3. Stage 1: Eligibility
 

@@ -1,14 +1,43 @@
+<!-- claims
+package: packages/discovery
+symbols: xg_alonso.discovery.acceptance, xg_alonso.discovery.registry:DiscoveryRegistry, xg_alonso.discovery.utility:feature_utility, xg_alonso.discovery.hypotheses:generate_from_residuals
+commands: xg discover, xg build-discovery-frame, xg importance
+routes: GET /features/discovered, GET /hypotheses
+-->
+
 # Feature Scientist Design
 
 | Field | Value |
 |---|---|
 | Project | XG Alonso |
 | Document | Feature Scientist |
-| Version | 1.0 |
-| Status | Deferred (Post-MVP) |
+| Version | 1.1 |
+| Status | Superseded — the capability shipped, this interface did not |
 | Owner | ML Platform |
 | Dependencies | [Feature Factory](02_feature_factory.md), [Prediction Models](07_prediction_models.md), [Knowledge Lab](../research/01_knowledge_lab.md) |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-08-04 |
+
+> **Status correction, 2026-08-04.** This document carried `Deferred (Post-MVP)` while the capability
+> it describes was shipping. That is now wrong in the other direction, and the honest statement is
+> narrower than "implemented":
+>
+> **The capability shipped, in `packages/discovery`.** Feature evaluation, redundancy handling,
+> selection, acceptance and retirement all run — `xg discover` end to end, surfaced at
+> `GET /features/discovered` and `GET /hypotheses`. See
+> [Objective-Conditioned Feature Discovery](../objective_conditioned_feature_discovery.md), which
+> describes what was actually built.
+>
+> **The interface below was not built.** There is no `packages/feature_scientist`, no Feature Card,
+> no Feature Report, no twelve-stage pipeline, and no SHAP stage. What shipped is a different design
+> reached by a different route: hypotheses aimed at *measured residual weakness*, compiled to a safe
+> expression tree, gated by a leakage proof, backtested walk-forward against noise and shuffled
+> controls, and scored by **utility under a stated objective** rather than by a global accuracy
+> metric. That last difference is the substantive one — this document assumes one right answer for
+> every manager, and the shipped system does not.
+>
+> The design below is retained because its stage vocabulary still names real concerns, several of
+> which the shipped loop handles differently and one of which (redundancy analysis against the
+> existing accepted set) it handles less thoroughly.
 
 ---
 
@@ -21,9 +50,10 @@ Unlike the Feature Factory, which is deterministic, the Feature Scientist is ada
 objective is to improve downstream recommendation quality rather than simply improve prediction
 metrics.
 
-The candidate corpus it operates over is deliberately bounded: **300-700 quality candidate
-features, not thousands** (D12). The Feature Scientist's job is to keep that corpus sharp, not to
-grow it without limit.
+The candidate corpus it operates over is deliberately bounded: D12 caps it at **300-700 quality
+candidate features, not thousands**. The Feature Scientist's job is to keep that corpus sharp, not
+to grow it without limit. The current corpus sits below the floor of that range rather than at it —
+231 distinct columns — which is a ceiling being respected, not a target being hit.
 
 ---
 

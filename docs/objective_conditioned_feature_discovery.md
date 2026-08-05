@@ -1,3 +1,10 @@
+<!-- claims
+package: packages/discovery
+commands: xg discover, xg build-discovery-frame
+routes: GET /features/discovered, GET /hypotheses, GET /clusters, GET /experiments, GET /players/{player_code}/cluster-history
+symbols: xg_alonso.discovery.dsl:parse_program, xg_alonso.discovery.compile, xg_alonso.discovery.hypotheses, xg_alonso.discovery.harness, xg_alonso.discovery.utility, xg_alonso.discovery.acceptance, xg_alonso.discovery.registry, xg_alonso.discovery.llm, xg_alonso.discovery.experiment:residual_weakness, xg_alonso.features.leakage
+-->
+
 # Objective-Conditioned Feature Discovery
 
 ## The question this changes
@@ -95,7 +102,7 @@ it.
 compile objective ─► measure residual weakness ─► propose falsifiable hypotheses
       ▲                                                        │
       │                                                        ▼
-  update memory ◄── accept / reject ◄── score under objective ◄── compile to a
+  record lesson ◄── accept / reject ◄── score under objective ◄── compile to a
                                                                   safe program
                                                                        │
                                             walk-forward backtest ◄────┤
@@ -118,7 +125,7 @@ Step by step, with the module that owns it:
 | 9 | Compare against noise and shuffled controls | `discovery.harness` |
 | 10 | Score utility under the objective | `discovery.utility` |
 | 11 | Accept, reject, or mark for revision | `discovery.acceptance` |
-| 12 | Register the verdict and the lesson | `discovery.registry`, `discovery.memory` |
+| 12 | Register the verdict and the lesson | `discovery.registry` |
 
 Step 6 cannot be skipped. A feature that leaks validates beautifully and loses
 money, and `DiscoveryRegistry.register_feature` refuses any spec whose
@@ -213,8 +220,8 @@ type-checks as arithmetic and means nothing; it raises here.
    also rejected: absence of evidence is not evidence of absence.
 2. **Sufficiency** — fewer than `min_folds` (default 3) is
    `INSUFFICIENT_DATA`, a distinct verdict from `REJECTED`. A verdict on two
-   folds is absent, not negative, and recording it as negative would teach the
-   memory layer the wrong lesson.
+   folds is absent, not negative, and recording it as negative would write the
+   wrong lesson into `discovery_lessons`.
 3. **Quality** — utility, fold win rate, incremental value, recent degradation,
    missingness, turnover, complexity. Collected rather than short-circuited, so
    a revision has the whole list.
@@ -285,10 +292,28 @@ Stated plainly, because several are structural rather than temporary.
    rejection is correct, not a bug.
 6. **Chips are state, not logic** (D5). `chip_plan` is carried and validated;
    no chip is optimised.
-7. **Decision-quality metrics are wired but not yet driving acceptance.** The
-   utility function has a `decision_gain` term and `evaluation.backtest`
-   supplies the machinery; the shipped experiment currently passes 0.0 and
-   scores on predictive and objective gain. This is the clearest next step.
+7. ~~**Decision-quality metrics are wired but not yet driving acceptance.**~~
+   **Closed 2026-08-04.** `discovery/decision_metrics.py` registers one metric
+   per `PrimaryMetric` into the previously-empty `MetricRegistry`, so
+   `objective_gain` is a real objective-specific measurement rather than a
+   `predictive_gain` alias, and `decision_gain` and `turnover_penalty` are
+   measured rather than permanently `unmeasured`.
+
+   Every metric is computed on the **predicted top-k drawn from the reachable
+   rows**, which is what makes them decision metrics rather than fit metrics —
+   and what lets two managers get different `objective_gain` from an identical
+   model and feature. Measured on the demo fixture, one candidate scores
+   **+0.26 for captaincy upside and −0.47 for downside protection**: the same
+   feature, opposite verdicts, which is precisely the property that was false
+   while the registry was empty.
+
+   Costs no extra model fits — `harness.fold_predictions` reads the cache the
+   subgroup breakdown already populated. What is *not* done: `decision_gain` is
+   top-k realised points, not a policy backtest through
+   `evaluation.walk_forward`. Simulating squads would mean hundreds of solves
+   per candidate inside a loop already fitting nine models per candidate, and an
+   unusable metric is an unmeasured one with extra steps. Hit costs and squad
+   legality beyond the reachability mask are still outside the term.
 8. **A thin required-feature baseline makes complements easy to find.** When a
    user says "keep xG", the baseline is xG *alone*, so gains are measured
    against a one-feature model and are correspondingly large. That is the right
@@ -395,14 +420,20 @@ not an API, it is a timeout. `ExperimentStage` carries the vocabulary a queue
 would report, so adding one later is a change of execution strategy rather than
 of interface.
 
-### Not built
+### What the web surface covers, and what it does not
 
-**The web surfaces described in the brief's Phase 17 are not implemented.** The
-objective builder, feature-discovery lab, cluster explorer and recommendation
-comparison would extend `apps/web` (Next.js 16, Tailwind v4, the "floodlit
-night" token set in `app/globals.css`). The API above is shaped to serve them,
-and `lib/api.ts` is where their types would go. Stating this plainly is better
-than a scaffold that looks finished.
+**Partly built since this section was first written.** `apps/web/app/discovery/page.tsx` exists and
+reads `GET /features/discovered`, `GET /hypotheses`, `GET /clusters` and `GET /experiments`, so the
+feature-discovery lab and a cluster view ship. `apps/web/app/plan/page.tsx` covers the objective
+builder by way of a typed request rather than a form of controls.
+
+Still not built: a **recommendation comparison** — two objectives' recommendations for the same
+squad, side by side, which is the view that would make the whole conditioning argument legible at a
+glance. And the cluster surface is a list rather than an explorer: there is no way to walk from a
+cluster to its members to a member's history in the UI, though
+`GET /players/{player_code}/cluster-history` would serve it.
+
+Stating this plainly is better than a scaffold that looks finished.
 
 ---
 

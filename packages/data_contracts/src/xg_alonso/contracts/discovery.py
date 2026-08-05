@@ -421,6 +421,23 @@ class FeatureEvaluation(_Frozen):
     objective_id: str
     model_family: str = Field(default="component_hgb")
 
+    pool_signature: str = "global"
+    """The reachable-player population this verdict was measured over.
+
+    ``"global"`` means the whole league — either no decision context was
+    supplied, or the manager's constraints did not narrow the search. Anything
+    else is a
+    :meth:`~xg_alonso.discovery.feasible.PoolSignature.key`, and the verdict
+    describes only that population.
+
+    Recorded because a pool-conditioned gain is **not comparable** to a global
+    one: cheap players have lower absolute error, so a feature measured on a
+    broke manager's pool is measured on an easier population. Two numbers that
+    cannot be compared must at least be labelled, or the registry becomes a
+    collection of results whose meaning depends on a run configuration nobody
+    wrote down.
+    """
+
     backtest_start: int = Field(description="First gameweek on the global timeline")
     backtest_end: int
     folds: tuple[FoldMetrics, ...] = ()

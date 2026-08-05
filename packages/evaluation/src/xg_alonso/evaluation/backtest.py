@@ -87,6 +87,22 @@ class GameweekOutcome:
     reports near-100% for any policy that ever made a good move.
     """
 
+    bench_points: int = 0
+    """Points the acting squad left on its bench."""
+
+    autosub_points: int = 0
+    """Points brought on by automatic substitutions."""
+
+    captain_points: int = 0
+    """Points added by the armband, beyond the holder's own score.
+
+    These three are appended with defaults so existing construction sites stay
+    source-compatible. They exist because ``metrics.py`` was reading them off
+    this class with ``getattr(o, "bench_points", 0)`` when the class had no
+    such field — so three ``RunMetrics`` values were permanently zero while
+    being reported as measurements.
+    """
+
     @property
     def net_policy_points(self) -> int:
         """Points after the transfer hit — what the manager actually banks."""
@@ -280,7 +296,24 @@ def actual_prices(
     )
     if rows.is_empty():
         return {}
-    latest = rows.group_by("player_code").agg(pl.col("value").last().alias("value"))
+    # Ordered before `last()`. A double gameweek gives a player two rows, and
+    # `group_by` promises nothing about the order within a group — so which of
+    # the two prices was taken depended on how polars happened to lay the frame
+    # out. Every price in a backtest feeds squad value and selling price, so a
+    # non-deterministic pick here is a non-deterministic result.
+    #
+    # "Latest" is defined by kickoff, so the sort uses whichever of those
+    # columns the frame actually carries. A frame without them (a fixture, or a
+    # projection that dropped them) cannot express "latest" at all; there the
+    # input order is used and `maintain_order` at least makes it repeatable.
+    ordering = [c for c in ("kickoff_time", "fixture_id") if c in rows.columns]
+    ordered = rows.sort(ordering, nulls_last=True) if ordering else rows
+    latest = ordered.group_by("player_code", maintain_order=True).agg(
+        # `drop_nulls` before `last`: a null in the final row would otherwise
+        # win and drop the player from the map entirely, even when an earlier
+        # leg of a double gameweek carried a price.
+        pl.col("value").drop_nulls().last().alias("value")
+    )
     return {
         PlayerCode(int(r["player_code"])): TenthsOfMillion(int(r["value"]))
         for r in latest.iter_rows(named=True)
@@ -583,17 +616,28 @@ def walk_forward(
             outcomes.get(move.player_in, 0) - outcomes.get(move.player_out, 0) if move else 0
         )
 
+        # The decomposition, not just the total. `score_squad` returns
+        # `simulate_squad(...).total` and discards the parts, so bench, autosub
+        # and captaincy points were unreachable from here — and `metrics.py`
+        # read them with `getattr(o, "bench_points", 0)` against a dataclass
+        # that never had the field, reporting a permanent zero as a
+        # measurement. Keeping the `SquadScore` is what makes them real.
+        acting_score = simulate_squad(
+            acting_after,
+            outcomes,
+            predictions=predictions,
+            rules=rules,
+            minutes=played,
+        )
+
         result.outcomes.append(
             GameweekOutcome(
                 season=season,
                 gameweek=gameweek,
-                policy_points=score_squad(
-                    acting_after,
-                    outcomes,
-                    predictions=predictions,
-                    rules=rules,
-                    minutes=played,
-                ),
+                policy_points=acting_score.total,
+                bench_points=acting_score.bench_points,
+                autosub_points=acting_score.autosub_points,
+                captain_points=acting_score.captaincy_points,
                 hold_points=score_squad(
                     holding, outcomes, predictions=predictions, rules=rules, minutes=played
                 ),

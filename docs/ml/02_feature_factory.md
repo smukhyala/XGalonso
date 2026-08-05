@@ -1,15 +1,64 @@
+<!-- claims
+package: packages/feature_factory
+symbols: xg_alonso.features.catalogue:FeatureSpec, xg_alonso.features.catalogue:catalogue_specs, xg_alonso.features.catalogue:CATALOGUE_VERSION, xg_alonso.features.generators:rolling_as_of, xg_alonso.features.generators:shrunk_rate_as_of, xg_alonso.features.leakage:assert_no_leakage, xg_alonso.features.leakage:assert_detects_leakage, xg_alonso.features.career:CAREER_VERSION
+commands: xg build-features, xg importance
+-->
+
 # Feature Factory Design Specification
 
 | Field | Value |
 |---|---|
 | Project | XG Alonso |
 | Document | Feature Factory |
-| Version | 1.0 |
-| Status | Build Specification |
+| Version | 1.1 |
+| Status | Build Specification — **mostly unbuilt as specified**; see the as-built map below |
 | Owner | ML Platform |
 | Dependencies | Data contracts and raw/normalized data layers ([Data Sources](../data/01_data_sources.md), [Database Schema](../data/04_database_schema.md)); canonical player identity (`elements[].code`); [Repository Structure](../architecture/01_repository_structure.md) |
 | Consumed by | [Feature Scientist](03_feature_scientist.md), [Prediction Models](07_prediction_models.md), [Embeddings](06_embeddings.md), [Transfer Planner](../optimization/02_transfer_planner.md) |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-08-04 |
+
+---
+
+## 0. As-built map — read this before anything below
+
+This is the longest document in the repository and the one furthest from the code. Almost every
+*principle* in it was honoured; almost every *interface* in it was not. Nothing here is a
+description of running code unless this section says so.
+
+**The principles that were built, and are enforced mechanically:**
+
+| Principle | Where it lives |
+|---|---|
+| Every feature uses only information whose `available_time` precedes the prediction timestamp | `features/point_in_time.py`, proven by `features/leakage.py` — which rebuilds features with future records appended and fails if any value moved, and whose negative control proves the harness still has teeth |
+| Features are declared, not hand-written; adding one is configuration plus an existing generator | `features/catalogue.py` |
+| Generation is bounded rather than combinatorial (D12) | `features/catalogue.py` — nothing is crossed with anything; interactions are a separate, gated concern |
+| Features are versioned | `CATALOGUE_VERSION`, `CAREER_VERSION`, and the feature-schema hash on every artifact manifest |
+| Generators are reusable across features | `rolling_as_of`, `shrunk_rate_as_of` in `features/generators.py` |
+
+**The named interfaces below, and what actually exists:**
+
+| Specified here | Reality |
+|---|---|
+| `FeatureGenerator` (a generator class hierarchy) | Does not exist. Generators are two module-level functions taking and returning frames |
+| `FeatureDefinition` | Does not exist. The unit is `FeatureSpec` — a frozen dataclass with eight fields, at `features/catalogue.py` |
+| `GenerationContext` | Does not exist. Context is passed as function arguments |
+| `FeatureMetadata` | Does not exist as a type. Metadata is the `family` field on a spec plus the module version constants |
+| `FeatureStore` | Does not exist. Features materialize to parquet under `.data/gold/` through `ParquetTableStore` |
+| `FeatureCard` | Does not exist, in any form |
+| A `feature_registry` database table | Does not exist. See [Database Schema §4](../data/04_database_schema.md) |
+| "approximately 300-700 quality candidate features" | 180 catalogue specs; 231 distinct columns including the career, opponent, recency and slice-1 families. D12 is a ceiling and the build is under it |
+
+**One gap worth stating plainly**, because it undermines a guarantee this document makes. The
+feature-schema hash covers declarative specs only. The opponent, career and recency families come
+from hand-written functions, so only their names and a module version constant are hashable —
+editing the arithmetic inside `build_career_features` without bumping `CAREER_VERSION` will not
+change the digest. That is precisely why a catalogue-hash mismatch is a warning rather than a
+refusal, and why those version constants exist at all. See
+[Model Artifacts §8](model_artifacts.md).
+
+The rest of this document is retained because its reasoning about point-in-time correctness,
+leakage classes, and bounded generation is the reasoning the implementation actually followed. Read
+it as design rationale, not as an interface contract.
 
 ---
 
@@ -1210,6 +1259,12 @@ feature_factory/
 ---
 
 ## 18. Configuration
+
+> **Not built.** There is no `configs/` directory. Feature definitions are version-controlled, but
+> as frozen `FeatureSpec` values in `features/catalogue.py` rather than as YAML. The property this
+> section was after — adding a feature is configuration plus an existing generator, not bespoke
+> pipeline code — holds; the file format does not. Declaring specs in Python also buys type
+> checking on every field, which a YAML tree would have had to re-implement.
 
 Feature definitions should live in version-controlled YAML.
 

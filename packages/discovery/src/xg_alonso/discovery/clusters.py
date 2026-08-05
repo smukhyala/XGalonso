@@ -47,6 +47,7 @@ from typing import Final
 import numpy as np
 import polars as pl
 
+from xg_alonso.contracts.context import BudgetBand, DecisionContext, LockPressure
 from xg_alonso.contracts.discovery import ClusterSummary, PlayerClusterAssignment
 from xg_alonso.contracts.identifiers import GameweekId, PlayerCode
 from xg_alonso.contracts.objective import ManagerObjective, OwnershipPreference, PrimaryMetric
@@ -57,6 +58,7 @@ __all__ = [
     "ClusterModel",
     "ClusterSelection",
     "assign_rolling",
+    "context_weights",
     "fit_clusters",
     "fit_supervised_projection",
     "objective_weights",
@@ -158,6 +160,100 @@ def objective_weights(objective: ManagerObjective, columns: Sequence[str]) -> np
         bump(("minutes_mean_20", "total_points_mean_5"), 1.5)
 
     return np.array([emphasis.get(name, 1.0) for name in columns], dtype=np.float64)
+
+
+def _constraint_emphasis(context: DecisionContext) -> dict[str, float]:
+    """Per-column emphasis implied by the *hard* constraints alone.
+
+    Empty — meaning "change nothing" — whenever the manager is unconstrained or
+    no squad is attached. That is what makes :func:`context_weights` reduce
+    exactly to :func:`objective_weights` in the neutral case, and it is asserted
+    rather than assumed.
+
+    Only two situations earn a bump, both because they change what "similar"
+    *means* rather than what is desirable:
+
+    **A tight budget makes price the binding axis of similarity.** With 0.3m in
+    the bank, two forwards with identical output are not interchangeable if one
+    costs 12.5m and the other 7.0m — only one of them is a move you can make.
+    When money is plentiful the same pair genuinely are alternatives, and
+    weighting price then would invent a distinction the manager does not face.
+
+    **A frozen squad makes durability the binding axis.** A manager with two
+    sellable slots cannot churn out of a mistake, so minutes security is worth
+    more to them than to someone with a free hand — not because they value it
+    more in the abstract, but because they will live with the consequence
+    longer. This is the same reasoning `planning_horizon >= 5` already applies
+    to the objective, arriving from the constraint side.
+
+    Note what is deliberately *not* here: nothing reads expected points, and
+    nothing scales with how good a player is. These weights reshape a distance,
+    never a ranking. A constraint that could reweight *value* would be a
+    constraint trading against points, which is the thing the whole
+    objective/constraint split exists to prevent.
+    """
+    emphasis: dict[str, float] = {}
+
+    def bump(names: Sequence[str], weight: float) -> None:
+        for name in names:
+            emphasis[name] = max(emphasis.get(name, 1.0), weight)
+
+    bucket = context.bucket()
+
+    if bucket.budget_band is BudgetBand.BROKE:
+        bump(("value_mean_1",), 2.4)
+    elif bucket.budget_band is BudgetBand.THIN:
+        bump(("value_mean_1",), 1.7)
+
+    if bucket.lock_pressure is LockPressure.FROZEN:
+        bump(("minutes_mean_20", "appearance_rate_10", "starts_mean_5"), 2.2)
+    elif bucket.lock_pressure is LockPressure.HEAVY:
+        bump(("minutes_mean_20", "appearance_rate_10"), 1.6)
+
+    return emphasis
+
+
+def context_weights(context: DecisionContext, columns: Sequence[str]) -> np.ndarray:
+    """Per-column emphasis implied by a whole decision context. **Approach A+.**
+
+    A continuous generalisation of :func:`objective_weights` that also reads the
+    manager's hard constraints, so two managers pursuing the same objective from
+    the same squad get different notions of "similar player" when one of them is
+    broke or frozen and the other is not.
+
+    **It reduces exactly to :func:`objective_weights` when the constraint block
+    is empty**, and ``tests/discovery/test_context_weights.py`` asserts bitwise
+    equality rather than approximate agreement. That equality is what makes the
+    shipped objective-only path a strict special case of the context-conditioned
+    one: any measured difference between them is attributable to the constraints
+    and to nothing else. A generalisation that silently perturbed the neutral
+    case would make every later comparison uninterpretable.
+
+    This is also the reason to prefer it over a learned representation *first*.
+    It needs no training data, no fold budget and no acceptance gate, and it
+    ships whether or not the learned conditioning in
+    :mod:`xg_alonso.discovery.conditioned` ever clears one.
+
+    Args:
+        context: Objective, constraints, beliefs and the squad they apply to.
+        columns: The embedding columns being weighted, in order.
+
+    Returns:
+        A non-negative weight per column, on the same scale and with the same
+        meaning as :func:`objective_weights` — applied to a *standardised* space,
+        so 2.0 doubles that axis's influence on distance.
+    """
+    base = objective_weights(context.objective, columns)
+    constraint = _constraint_emphasis(context)
+    if not constraint:
+        return base
+    # `max`, matching how `objective_weights` composes its own rules: an axis
+    # already emphasised by the objective is not emphasised twice, and a
+    # constraint never *reduces* an objective's emphasis. Multiplying instead
+    # would let two independently mild signals compound into a dominant axis.
+    overlay = np.array([constraint.get(name, 1.0) for name in columns], dtype=np.float64)
+    combined: np.ndarray = np.maximum(base, overlay)
+    return combined
 
 
 @dataclass(frozen=True)

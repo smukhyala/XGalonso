@@ -22,6 +22,9 @@ from pathlib import Path
 import pytest
 
 from xg_alonso.contracts.evaluation import (
+    FULL_GRID,
+    LEGACY_HEADLINE,
+    SMOKE,
     EvaluationWindow,
     ExperimentConfig,
     ModelSpec,
@@ -101,18 +104,36 @@ class TestPlanning:
         assert by_policy["random"] == 2 * 5
 
     def test_the_declared_stochastic_set_matches_the_selectors(self) -> None:
-        """Guards the saving: a policy that varies must not be collapsed."""
+        """Guards the saving: a policy that varies must not be collapsed.
+
+        Checked against the *shipped* presets, not the three-policy fixture in
+        this file. Iterating `_POLICIES` asserted only that the fixture the
+        test author wrote is self-consistent — which it is by construction —
+        and could never have caught a production policy being mislabelled.
+        """
         deterministic = {
             PolicyKind.MODEL,
             PolicyKind.HIGHEST_FORM,
             PolicyKind.MOST_EXPENSIVE,
             PolicyKind.HOLD,
         }
-        for policy in _POLICIES:
+        stochastic = {PolicyKind.RANDOM}
+
+        shipped = {p.name: p for c in (SMOKE, LEGACY_HEADLINE, FULL_GRID) for p in c.policies}
+        assert shipped, "no shipped policies to check"
+
+        for policy in shipped.values():
             if policy.selector in deterministic:
                 assert not policy.stochastic, (
                     f"{policy.name} is declared stochastic but its selector "
-                    "ignores the generator; replicates would be identical"
+                    "ignores the generator; its replicates would be identical "
+                    "and would put copies of one number into the sample"
+                )
+            if policy.selector in stochastic:
+                assert policy.stochastic, (
+                    f"{policy.name} draws from the generator but is declared "
+                    "deterministic, so `plan_units` would collapse it to one "
+                    "replicate and the spread would go unmeasured"
                 )
 
     def test_planning_is_pure_and_repeatable(self) -> None:
@@ -321,3 +342,38 @@ class TestMetricsSplitTheAmbiguousNames:
 
         metrics = compute_run_metrics(BacktestResult(outcomes=[]), prices_moved=False)
         assert metrics.squad_value_status is MetricStatus.UNAVAILABLE_STATIC_PRICES
+
+
+class TestTheConditionSeparatesDifferentWalks:
+    """Two windows can name the same season and start with different ends."""
+
+    @staticmethod
+    def _two_windows() -> ExperimentConfig:
+        return ExperimentConfig(
+            name="two-windows",
+            windows=(
+                EvaluationWindow(season="2024-25", start_gameweeks=(6,), end_gameweek=25),
+                EvaluationWindow(season="2024-25", start_gameweeks=(6,), end_gameweek=38),
+            ),
+            models=(ModelSpec(name="m"),),
+            squads=(SquadCohortSpec(source=SquadSource.MOST_EXPENSIVE_LEGAL),),
+            policies=(PolicySpec(name="hold", selector=PolicyKind.HOLD, model="m"),),
+        )
+
+    def test_a_shorter_and_a_longer_walk_are_not_the_same_condition(self) -> None:
+        """Without `end_gameweek` in the condition, a twenty-week result and a
+        thirty-three-week result are averaged together as replicates of one
+        starting position, then paired against another policy as one number."""
+        units = plan_units(self._two_windows(), ["squadA"])
+
+        assert len(units) == 2
+        assert {u.end_gameweek for u in units} == {25, 38}
+        assert len({u.condition for u in units}) == 2
+
+    def test_the_seed_is_shared_so_the_shorter_walk_is_a_prefix(self) -> None:
+        """The deliberate asymmetry. Two walks from the same start should make
+        the same draws for as long as they overlap."""
+        config = self._two_windows()
+        short, long = sorted(plan_units(config, ["squadA"]), key=lambda u: u.end_gameweek)
+
+        assert policy_seed(config, short) == policy_seed(config, long)

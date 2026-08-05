@@ -13,9 +13,10 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+from tests.conftest import BOOTSTRAP_FIXTURE
+
 from conftest import FAST
 from conftest import synthetic_stats as _stats
-
 from xg_alonso.contracts.identifiers import GameweekId
 from xg_alonso.contracts.prediction import Position
 from xg_alonso.domain.scoring import ScoringRules
@@ -33,13 +34,12 @@ from xg_alonso.prediction.trained import ComponentModels, train_component_models
 #: seasons they were trained on.
 Fitted = tuple[ComponentModels, pl.DataFrame, tuple[str, ...]]
 
-FIXTURE = Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @pytest.fixture(scope="module")
 def rules() -> ScoringRules:
-    payload = json.loads(FIXTURE.read_text())
+    payload = json.loads(BOOTSTRAP_FIXTURE.read_text())
     return ScoringRules.from_bootstrap(
         payload, version="2026-27", source_sha256="a" * 64, fetched_at=NOW
     )

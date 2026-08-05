@@ -30,14 +30,13 @@ from xg_alonso.pipelines.ingestion import (
 )
 from xg_alonso.storage import FileSystemBronzeStore
 
-FIXTURE = Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture(scope="module")
-def payload() -> dict[str, Any]:
-    data: dict[str, Any] = json.loads(FIXTURE.read_text())
-    return data
+def payload(bootstrap_payload: dict[str, Any]) -> dict[str, Any]:
+    """The pinned snapshot. Every drift test below deep-copies before mutating."""
+    return bootstrap_payload
 
 
 class TestAvailableTimeDerivation:

@@ -352,10 +352,22 @@ class TestRegistry:
         base.update(overrides)
         return DiscoveredFeatureSpec(**base)  # type: ignore[arg-type]
 
-    def test_an_unvalidated_feature_cannot_be_registered(self, registry: DiscoveryRegistry) -> None:
-        """The gate. Static validation alone is not enough."""
+    @pytest.mark.parametrize(
+        "status",
+        [s for s in ValidationStatus if s is not ValidationStatus.LEAKAGE_PASSED],
+    )
+    def test_only_a_leakage_passed_feature_can_be_registered(
+        self, registry: DiscoveryRegistry, status: ValidationStatus
+    ) -> None:
+        """The gate, over every status that is not a pass.
+
+        `REJECTED_LEAKAGE` is the case that matters most and was previously
+        unreachable: `experiment.py` hardcoded `LEAKAGE_PASSED` on every spec it
+        built, so a program the harness rejected arrived here wearing a pass and
+        this gate waved it through. The gate was right; its input was lying.
+        """
         with pytest.raises(ValueError, match="leakage harness"):
-            registry.register_feature(self._spec(validation_status=ValidationStatus.STATIC_PASSED))
+            registry.register_feature(self._spec(validation_status=status))
 
     def test_a_leakage_passed_feature_is_registered_with_its_lineage(
         self, registry: DiscoveryRegistry

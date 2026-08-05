@@ -1,0 +1,107 @@
+{
+  "generator": "tools/build_demo_fixture.py",
+  "generator_version": "1",
+  "extracted_at": "2026-08-04T19:09:01.766470+00:00",
+  "source_root": ".data",
+  "seed": 718453750,
+  "seasons": [
+    "2023-24",
+    "2024-25"
+  ],
+  "club_quota": {
+    "GK": 1,
+    "DEF": 1,
+    "MID": 2,
+    "FWD": 1
+  },
+  "random_supplement_per_season": 6,
+  "max_fixture_bytes": 262144,
+  "silver_schema_sha256": "e61558759514cde87564a8f9aea265e996a44f29cd000b282c5cb16df4c584a3",
+  "catalogue_hash": "8601b5079bdd01f3d838bab76080ddc8f77973d9729f0ebd42143ef6909987b6",
+  "bronze_snapshots": [
+    {
+      "source": "fpl.bootstrap_static",
+      "content_sha256": "c3ca55859ad1f37295ed5e27db82529d1bf0d12d3611a2efae8849c4408730c8",
+      "byte_size": 1323304,
+      "http_status": 200,
+      "run_id": "ingest-98bf9b551279",
+      "timestamps": {
+        "event_time": "2026-07-27T21:50:24Z",
+        "observed_time": "2026-07-27T21:54:08.497546Z",
+        "available_time": "2026-07-27T21:50:24Z",
+        "processed_time": "2026-07-27T21:54:09.059906Z",
+        "time_source": "http_date_minus_age"
+      },
+      "fixture_path": "bronze/fpl.bootstrap_static.json.gz"
+    },
+    {
+      "source": "fpl.fixtures",
+      "content_sha256": "9e7484118381f8202830906ba993c176475d8ca1796571f5dd78cbfc2d73bd3e",
+      "byte_size": 118021,
+      "http_status": 200,
+      "run_id": "ingest-944bd7071acd",
+      "timestamps": {
+        "event_time": "2026-07-27T17:20:01Z",
+        "observed_time": "2026-07-27T17:27:19.415868Z",
+        "available_time": "2026-07-27T17:20:01Z",
+        "processed_time": "2026-07-27T17:27:19.427693Z",
+        "time_source": "http_date_minus_age"
+      },
+      "fixture_path": "bronze/fpl.fixtures.json.gz"
+    }
+  ],
+  "files": [
+    {
+      "path": "silver/player_gameweek_stats.parquet",
+      "derived_from": ".data/silver/player_gameweek_stats.parquet",
+      "byte_size": 218307,
+      "sha256": "b2b388d6f4af04751e8b8c7fd983890657108f1e0a6d67248a6146de25215c6e",
+      "note": "club-and-position stratified sample: {'GK': 1, 'DEF': 1, 'MID': 2, 'FWD': 1} per club per season plus 6 random per season, seasons ['2023-24', '2024-25']",
+      "rows": 7998,
+      "columns": 37,
+      "player_seasons": 212,
+      "distinct_players": 172,
+      "seasons": [
+        "2023-24",
+        "2024-25"
+      ],
+      "clubs": 23,
+      "source_rows": 113270
+    },
+    {
+      "path": "silver/players_history.parquet",
+      "derived_from": ".data/silver/players_history.parquet",
+      "byte_size": 33471,
+      "sha256": "4b52f3e79a9c4a0ec740ddff54abc2df48a28fee5fd3cd58569ba82bd8d05aec",
+      "note": "copied whole \u2014 every season, every player; the file is already small",
+      "rows": 3268,
+      "columns": 6
+    },
+    {
+      "path": "pinned/rules_2026-27.json",
+      "derived_from": ".data/pinned/rules_2026-27.json",
+      "byte_size": 4808,
+      "sha256": "187673bc33d6b8a27e3690c21100b7b8272311ca75fd0a60045711fa96c027b2",
+      "note": "byte-for-byte copy of the pinned rules snapshot. CLAUDE.md requires scoring constants to load from a pinned snapshot with a drift check, so the demo goes through that path rather than around it"
+    },
+    {
+      "path": "bronze/fpl.bootstrap_static.json.gz",
+      "derived_from": ".data/bronze/fpl.bootstrap_static",
+      "byte_size": 110139,
+      "sha256": "36931e695b91e77dbeb0f0a36cfed6b1f58a36487610e794ca137963e3303a81",
+      "note": "gzipped official payload, replayed into a bronze store by `xg demo`",
+      "uncompressed_bytes": 1323304,
+      "payload_sha256": "c3ca55859ad1f37295ed5e27db82529d1bf0d12d3611a2efae8849c4408730c8"
+    },
+    {
+      "path": "bronze/fpl.fixtures.json.gz",
+      "derived_from": ".data/bronze/fpl.fixtures",
+      "byte_size": 4829,
+      "sha256": "f2b5bf693b29d45d4853e021c9d8fa36f1b9448de0e64b4bce36cdde6b2779cc",
+      "note": "gzipped official payload, replayed into a bronze store by `xg demo`",
+      "uncompressed_bytes": 118021,
+      "payload_sha256": "9e7484118381f8202830906ba993c176475d8ca1796571f5dd78cbfc2d73bd3e"
+    }
+  ],
+  "warning": "Real, public FPL data, sampled \u2014 not synthetic and not complete. Anything computed from it describes 172 players over 2 seasons, so it demonstrates that the pipeline runs. It is not evidence about football."
+}

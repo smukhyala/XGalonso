@@ -14,6 +14,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+from tests.conftest import BOOTSTRAP_FIXTURE
 from xg_alonso.contracts.discovery import ExperimentStage
 from xg_alonso.contracts.identifiers import GameweekId, PlayerCode, TeamId, TenthsOfMillion
 from xg_alonso.contracts.objective import (
@@ -161,13 +162,9 @@ def _squad() -> SquadState:
 @pytest.fixture(scope="module")
 def scoring_rules() -> ScoringRules:
     import json
-    from pathlib import Path
 
-    fixture = (
-        Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
-    )
     return ScoringRules.from_bootstrap(
-        json.loads(fixture.read_text()),
+        json.loads(BOOTSTRAP_FIXTURE.read_text()),
         version="2026-27",
         source_sha256="a" * 64,
         fetched_at=NOW,
@@ -767,15 +764,11 @@ class TestLocksAreUnbreakable:
 
     def _rules(self) -> Any:
         import json
-        from pathlib import Path
 
         from xg_alonso.domain.rules import SquadRules
 
-        fixture = (
-            Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
-        )
         return SquadRules.from_bootstrap(
-            json.loads(fixture.read_text()), version="2026-27", source_sha256="a" * 64
+            json.loads(BOOTSTRAP_FIXTURE.read_text()), version="2026-27", source_sha256="a" * 64
         )
 
     def test_a_held_player_is_never_ranked_however_good_the_alternative(self) -> None:

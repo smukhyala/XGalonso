@@ -1,7 +1,11 @@
 """Deterministic, point-in-time-safe candidate feature generation.
 
 The Feature Factory generates candidates; it does not decide which are useful.
-That judgement belongs to the Feature Scientist, which is deferred per D10.
+That judgement belongs to the Feature Scientist, which shipped as
+:mod:`xg_alonso.discovery` — after the product, as D10 sequenced — rather than as
+a package of its own. The separation is load-bearing: everything here is
+deterministic and reproducible from stored snapshots, and ``.importlinter``
+forbids this package from importing the research surface that judges it.
 
 Everything here obeys one rule: **a feature may use only information whose
 ``available_time`` precedes the prediction timestamp.** The rule is enforced

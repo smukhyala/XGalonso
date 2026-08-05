@@ -24,7 +24,7 @@ compute it historically                       ``compile``
 backtest walk-forward                         ``experiment``
 score it under the objective                  ``utility``
 accept, reject or revise                      ``acceptance``
-remember the result                           ``registry``, ``memory``
+remember the result                           ``registry``
 ===========================================  =========================
 
 **Nothing here executes generated code.** A proposal is an expression tree
@@ -34,8 +34,10 @@ proposal can do is fail validation.
 **The core is domain-free.** ``dsl``, ``compile``, ``utility``, ``acceptance``,
 ``search`` and ``registry`` know about columns, windows and folds — not about
 football. ``.importlinter`` enforces it, so the engine is reusable outside FPL
-rather than merely claimed to be. The football lives in ``residuals``,
-``hypotheses`` and ``experiment``.
+rather than merely claimed to be. The football lives in ``hypotheses`` (which
+owns :func:`~xg_alonso.discovery.hypotheses.generate_from_residuals`) and in
+``experiment`` (which owns
+:func:`~xg_alonso.discovery.experiment.residual_weakness`).
 """
 
 from xg_alonso.discovery.dsl import (

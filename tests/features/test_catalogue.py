@@ -108,7 +108,20 @@ def _entities(players: tuple[int, ...] = (1, 2, 3), days: int = 200) -> pl.DataF
 
 class TestCatalogueShape:
     def test_it_declares_a_substantial_number_of_features(self) -> None:
-        assert len(catalogue_specs()) >= 100
+        """Bounded on both sides, because D12 is a ceiling as well as a target.
+
+        The lower bound guards against a refactor silently dropping a family.
+        The upper bound is the one that matters: D12 caps the catalogue at 700
+        quality candidates precisely so nobody "improves" it by crossing every
+        metric with every window. A combinatorial expansion would sail past a
+        one-sided assertion.
+
+        The catalogue holds 180 specs today; with the career, opponent, recency
+        and slice-1 families the model-ready frame carries 231 columns. The
+        window below is deliberately loose enough that adding a family is not a
+        test edit, and tight enough that an explosion is.
+        """
+        assert 150 <= len(catalogue_specs()) <= 700
 
     def test_names_are_unique(self) -> None:
         """A duplicate name would silently overwrite an earlier column."""

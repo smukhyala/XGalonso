@@ -172,6 +172,9 @@ mypy_path = [
     "apps/cli/src",
     "apps/api/src",
     "tests/prediction",
+    # The fixture generator. Committed beside its output, so the golden tests
+    # import its constants rather than restating them.
+    "tools",
 ]
 
 [[tool.mypy.overrides]]
@@ -195,8 +198,14 @@ ignore_missing_imports = true
 minversion = "8.0"
 testpaths = ["tests", "packages", "pipelines", "apps"]
 python_files = ["test_*.py"]
-addopts = "-ra --strict-markers --strict-config"
-pythonpath = ["tests/prediction"]
+# `--import-mode=importlib` so two test modules may share a basename across
+# directories. Under the default `prepend` mode, adding
+# `tests/evaluation/test_calibration.py` beside the existing
+# `tests/prediction/test_calibration.py` aborted the whole run at collection —
+# a failure that names neither the feature nor the author and that no amount of
+# care in the new file could have avoided.
+addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
+pythonpath = ["tests/prediction", "tools"]
 markers = [
     "leakage: point-in-time leakage tests (must include a negative control)",
     "golden: golden-fixture comparison tests",

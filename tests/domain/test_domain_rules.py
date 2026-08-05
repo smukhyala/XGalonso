@@ -9,12 +9,10 @@ mode that makes a goalkeeper goal worth 6 points in most FPL models.
 from __future__ import annotations
 
 import hashlib
-import json
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.conftest import BOOTSTRAP_FIXTURE, RULES_FETCHED_AT
 
 from xg_alonso.contracts import (
     ComponentExpectations,
@@ -34,26 +32,19 @@ from xg_alonso.domain import (
     selling_price,
 )
 
-FIXTURE = Path(__file__).resolve().parents[2] / "data/fixtures/fpl/bootstrap_static_2026_27.json"
-NOW = datetime(2026, 7, 27, tzinfo=UTC)
+NOW = RULES_FETCHED_AT
 
 
 @pytest.fixture(scope="module")
-def payload() -> dict[str, Any]:
-    data: dict[str, Any] = json.loads(FIXTURE.read_text())
-    return data
+def payload(bootstrap_payload: dict[str, Any]) -> dict[str, Any]:
+    """The pinned snapshot. Shared and read-only; deep-copy before mutating."""
+    return bootstrap_payload
 
 
 @pytest.fixture(scope="module")
-def scoring(payload: dict[str, Any]) -> ScoringRules:
-    return ScoringRules.from_bootstrap(
-        payload, version="2026-27", source_sha256="a" * 64, fetched_at=NOW
-    )
-
-
-@pytest.fixture(scope="module")
-def squad_rules(payload: dict[str, Any]) -> SquadRules:
-    return SquadRules.from_bootstrap(payload, version="2026-27", source_sha256="b" * 64)
+def scoring(scoring_rules: ScoringRules) -> ScoringRules:
+    """Named `scoring` here because that is what this module's tests ask for."""
+    return scoring_rules
 
 
 class TestScoringRulesFromPayload:
@@ -386,7 +377,7 @@ class TestPointsAssembly:
 class TestFixtureIntegrity:
     def test_fixture_stays_within_the_commit_budget(self) -> None:
         """Golden fixtures live in git, so they must stay small."""
-        size = FIXTURE.stat().st_size
+        size = BOOTSTRAP_FIXTURE.stat().st_size
         assert size < 256 * 1024, f"fixture is {size / 1024:.0f}KB; budget is 256KB"
 
     def test_fixture_records_its_provenance(self, payload: dict[str, Any]) -> None:

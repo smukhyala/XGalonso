@@ -51,6 +51,13 @@ __all__ = [
     "DiscoveryRegistry",
 ]
 
+_GLOBAL_POOL = "global"
+"""Pool signature meaning "the whole league".
+
+Matches :meth:`~xg_alonso.discovery.feasible.PoolSignature.key` for an
+unapplied pool, so the two vocabularies cannot drift.
+"""
+
 REGISTRY_SCHEMA_VERSION: Final[str] = "discovery_registry_v1"
 
 HYPOTHESES: Final[str] = "discovery_hypotheses"
@@ -302,19 +309,76 @@ class DiscoveryRegistry:
             return None
         return max(found, key=lambda e: e.evaluated_at)
 
-    def accepted_features(self, objective_id: str) -> list[DiscoveredFeatureSpec]:
-        """Feature specs whose most recent verdict under this objective is usable.
+    def accepted_features(
+        self,
+        objective_id: str,
+        *,
+        pool_signature: str | None = None,
+    ) -> list[tuple[DiscoveredFeatureSpec, str]]:
+        """Usable feature specs, each with a note on how its verdict was reached.
 
         Reads the *latest* evaluation per feature rather than any accepting one.
         A feature accepted in March and rejected in May is rejected; taking the
         best result ever recorded would make the registry a highlight reel.
+
+        **The program is universal; the verdict is not.** A DSL feature program
+        is a statement about football, not about a bank balance — nothing in a
+        manager's constraints changes whether ``xG x expected minutes`` predicts
+        points. So one program has one spec row, however many managers discover
+        it. What is pool-specific is the *evidence*, and that is what
+        ``pool_signature`` selects over.
+
+        The transfer rule, when ``pool_signature`` is given:
+
+        1. a verdict measured on **exactly** this pool wins;
+        2. otherwise a **global** verdict is used, and the note says it was not
+           measured under these constraints;
+        3. a verdict from a *different* narrow pool is **not** transferred.
+
+        Rule 3 is the one worth arguing for. A verdict transfers to a wider
+        population, never to a narrower one: "this helped across the whole
+        league" is weaker but real evidence for any subset of it, whereas "this
+        helped among premium forwards" says nothing whatever about budget
+        defenders. Silently reusing the latter would be the registry asserting a
+        result it never measured.
+
+        Returns:
+            ``(spec, note)`` pairs. The note is empty when the verdict was
+            measured on the requested pool, and explains the substitution
+            otherwise — so a caller can print *why* a feature is in play rather
+            than presenting borrowed evidence as its own.
         """
         by_version = {f.version: f for f in self.features()}
-        out: list[DiscoveredFeatureSpec] = []
+        out: list[tuple[DiscoveredFeatureSpec, str]] = []
+
         for version, spec in by_version.items():
-            latest = self.latest_evaluation(version, objective_id)
-            if latest is not None and latest.accepted.is_usable:
-                out.append(spec)
+            found = [
+                e
+                for e in self.evaluations(feature_version=version, objective_id=objective_id)
+                if e.accepted.is_usable
+            ]
+            if not found:
+                continue
+
+            if pool_signature is None:
+                latest = self.latest_evaluation(version, objective_id)
+                if latest is not None and latest.accepted.is_usable:
+                    out.append((spec, ""))
+                continue
+
+            exact = [e for e in found if e.pool_signature == pool_signature]
+            if exact:
+                out.append((spec, ""))
+                continue
+
+            unconstrained = [e for e in found if e.pool_signature == _GLOBAL_POOL]
+            if unconstrained:
+                out.append(
+                    (
+                        spec,
+                        "reused from the unconstrained run; not measured under your constraints",
+                    )
+                )
         return out
 
     # -- clusters ---------------------------------------------------------

@@ -12,9 +12,9 @@ from datetime import timedelta
 
 import polars as pl
 import pytest
+
 from conftest import FAST, T0
 from conftest import synthetic_stats as _stats
-
 from xg_alonso.prediction.dataset import (
     COMPONENT_LABELS,
     TrainingData,
