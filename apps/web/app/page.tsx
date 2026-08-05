@@ -119,6 +119,8 @@ export default function Page() {
         </div>
       ) : (
         <>
+          {health && !picksPublished(health) && <PreseasonNote health={health} />}
+
           <div className="mt-14 grid gap-16 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
             <div>
               {busy && !call ? <Skeleton /> : call && <TheCall recommendation={call} />}
@@ -242,6 +244,66 @@ function Masthead({
       )}
       </div>
     </header>
+  );
+}
+
+/** Whether FPL will serve any manager's picks yet.
+ *
+ * `entry/{id}/event/{gw}/picks/` returns 404 until that gameweek's deadline
+ * passes — the API says exactly that when it fails, and this is the same fact
+ * stated before a user runs into it rather than after.
+ *
+ * Returns false while `health` is null, which also keeps the note off the
+ * server-rendered pass: `health` only ever arrives from a client fetch, so the
+ * clock is never read during hydration.
+ */
+function picksPublished(health: Health | null): boolean {
+  if (!health) return false;
+  return new Date(health.deadline).getTime() <= Date.now();
+}
+
+/** The deadline, fixed to UTC so it reads the same everywhere it is quoted. */
+function formatDeadline(iso: string): string {
+  return new Date(iso).toLocaleString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "UTC",
+    timeZoneName: "short",
+  });
+}
+
+/** Why the transfer view is not showing the manager's own squad yet.
+ *
+ * Worth saying plainly on screen, because the failure is silent rather than
+ * loud: the team id is accepted, the request succeeds, and a full squad renders
+ * under it. Without this note the only honest reading available to a viewer is
+ * that the squad shown *is* theirs, and it is not — it is the committed sample,
+ * identical for every id, because FPL will not publish picks before the
+ * deadline and there is nothing else to show.
+ */
+function PreseasonNote({ health }: { health: Health }) {
+  return (
+    <aside
+      className="mt-10 max-w-2xl border-l-2 pl-5"
+      style={{ borderColor: "var(--color-line)" }}
+    >
+      <p className="eyebrow">Preseason · GW{health.next_gameweek} has not locked</p>
+      <p className="mt-2 text-[15px] leading-relaxed" style={{ color: "var(--color-muted)" }}>
+        FPL publishes a manager&apos;s picks only after the gameweek deadline —{" "}
+        <span className="tnum" style={{ color: "var(--color-chalk)" }}>
+          {formatDeadline(health.deadline)}
+        </span>
+        . Until then no team ID can load a real squad, so the transfer view below scores a
+        committed sample squad and returns the same fifteen players whichever ID you enter.{" "}
+        <strong style={{ color: "var(--color-chalk)", fontWeight: 500 }}>
+          It is not your team.
+        </strong>{" "}
+        Build a squad needs no ID and is unaffected.
+      </p>
+    </aside>
   );
 }
 
