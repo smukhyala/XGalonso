@@ -1,5 +1,5 @@
 <!-- claims
-commands: xg ingest, xg build-features, xg train, xg recommend, xg build-squad, xg plan, xg advise, xg discover, xg build-discovery-frame, xg backtest, xg score, xg importance, xg models list, xg evaluate check
+commands: xg demo, xg ingest, xg build-features, xg train, xg recommend, xg build-squad, xg plan, xg advise, xg discover, xg discover-demo, xg build-discovery-frame, xg backtest, xg score, xg importance, xg models list, xg evaluate check
 routes: GET /health, GET /recommend/{entry_id}, POST /squad/plan
 symbols: xg_alonso.contracts.objective:ManagerObjective, xg_alonso.contracts.objective:ManagerConstraints, xg_alonso.contracts.objective:UserBelief, xg_alonso.contracts.context:DecisionContext, xg_alonso.prediction.beliefs, xg_alonso.interpreter.requests, xg_alonso.features.catalogue:catalogue_specs, xg_alonso.storage.parquet_store:ParquetTableStore
 -->
@@ -38,8 +38,20 @@ command fails at import with an error that says nothing about architecture. `mak
 and then asserts the result is genuinely arm64 rather than trusting that it worked. If you skip the
 Makefile and the venv comes out x86_64, delete `.venv` and run `make install` again.
 
-**A first run, offline.** Every command below reads from local snapshots except `xg ingest`, which
-is the only step that touches the network.
+**A first run, with no network and no API key.** `data/fixtures` is committed, so the whole pipeline
+— features, training, the discovery loop with its controls, and a recommendation — runs on a clone
+with nothing fetched. It writes to a scratch root under the system temp, never to your own store.
+
+```bash
+make demo
+```
+
+The fixtures are real public FPL data, sampled rather than complete, so the demo proves the pipeline
+runs end to end; it is not evidence about football. `tools/build_demo_fixture.py` records what was
+sampled and how in `data/fixtures/PROVENANCE.json`.
+
+**The real thing.** Every command below reads from local snapshots except `xg ingest` and
+`xg ingest-history`, which are the only steps that touch the network.
 
 ```bash
 make ingest                    # official FPL API -> immutable bronze snapshots
@@ -140,7 +152,7 @@ XG Alonso consists of six primary systems.
 The candidate-feature target is deliberately bounded — D12 caps it at **300-700 quality
 candidates, not thousands**. That is a ceiling, and the build is currently well under it: the
 declarative catalogue holds **180 specs**, and with the career, opponent, recency and slice-1
-families the model-ready frame carries **231 distinct feature columns**. Quality and point-in-time
+families the model-ready frame carries **224 distinct feature columns**. Quality and point-in-time
 correctness matter more than raw count, so the gap is not a defect to be closed by generating
 filler; see [Feature Factory](docs/ml/02_feature_factory.md).
 
@@ -166,7 +178,7 @@ XG Alonso:
 ```mermaid
 flowchart TD
     A["Raw data"] --> B["Feature Factory"]
-    B --> C["Declared candidate features<br/>(231 today, D12 caps at 700)"]
+    B --> C["Declared candidate features<br/>(224 today, D12 caps at 700)"]
     C --> D["Feature Scientist"]
     D --> E["Interaction discovery"]
     E --> F["Embeddings"]
@@ -263,11 +275,12 @@ keep D2 reversible, and it has been reversed in practice without a code change d
 
 ## Commands
 
-Twenty-six commands, all under the single `xg` entry point. `--help` on any of them is authoritative;
-this table exists so the surface is discoverable without running the binary.
+Twenty-eight commands, all under the single `xg` entry point. `--help` on any of them is
+authoritative; this table exists so the surface is discoverable without running the binary.
 
 | Command | Does |
 |---|---|
+| `xg demo` | Run the whole pipeline offline on committed fixtures — no network, no `.data` |
 | `xg ingest` | Fetch official FPL data into immutable bronze snapshots |
 | `xg ingest-history` | Fetch each player's per-gameweek history into bronze |
 | `xg backfill` | Backfill per-gameweek history from the community archive |
@@ -286,6 +299,7 @@ this table exists so the surface is discoverable without running the binary.
 | `xg score` | Score assembled expected points against what actually happened |
 | `xg build-discovery-frame` | Build the point-in-time training frame the discovery loop runs on |
 | `xg discover` | Compile a request, discover features that serve it, report the verdicts |
+| `xg discover-demo` | Two managers, same frame and seed, different constraints — different verdicts |
 | `xg models list` | Every artifact and whether it can be used with the active build |
 | `xg models verify` | Explain in full whether one artifact can be used, and why not |
 | `xg models backfill-manifest` | Write a manifest for an artifact saved before manifests existed |

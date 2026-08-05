@@ -54,7 +54,12 @@ golden: ## Committed-fixture tests only
 	uv run pytest -m golden -v
 
 banned-strings: ## Fail if a corrected claim reappears in the docs
-	@! grep -rniE '3000\+|thousands of candidate features|raw_understat_shots' \
+	@# `231 distinct` was the model-ready feature count in five documents and one
+	@# docstring; the schema has returned 224 for some time. tests/docs/
+	@# test_documented_counts.py checks the Markdown against the live schema — this
+	@# line is here because that test does not read Python docstrings, which is
+	@# where the stale figure was last found.
+	@! grep -rniE '3000\+|thousands of candidate features|raw_understat_shots|231 distinct' \
 		--include='*.md' --include='*.py' . \
 		|| (echo "FAIL: banned string found above" && exit 1)
 	@echo "OK: no banned strings"

@@ -44,8 +44,9 @@ front end is therefore **in scope and shipped**; do not treat a request touching
 relitigating D4.
 
 D12's range is a **ceiling, not a target.** The build is currently under it — 180 catalogue specs,
-231 distinct feature columns — and that is compliance, not a shortfall to be closed by generating
-filler.
+224 distinct feature columns — and that is compliance, not a shortfall to be closed by generating
+filler. Both figures are asserted against live code, so read them from
+`catalogue_specs()` and `model_feature_names()` rather than from here if they ever disagree.
 
 ---
 

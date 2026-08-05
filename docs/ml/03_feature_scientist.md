@@ -53,7 +53,7 @@ metrics.
 The candidate corpus it operates over is deliberately bounded: D12 caps it at **300-700 quality
 candidate features, not thousands**. The Feature Scientist's job is to keep that corpus sharp, not
 to grow it without limit. The current corpus sits below the floor of that range rather than at it —
-231 distinct columns — which is a ceiling being respected, not a target being hit.
+224 distinct columns — which is a ceiling being respected, not a target being hit.
 
 ---
 

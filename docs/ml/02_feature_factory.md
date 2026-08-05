@@ -46,7 +46,7 @@ description of running code unless this section says so.
 | `FeatureStore` | Does not exist. Features materialize to parquet under `.data/gold/` through `ParquetTableStore` |
 | `FeatureCard` | Does not exist, in any form |
 | A `feature_registry` database table | Does not exist. See [Database Schema §4](../data/04_database_schema.md) |
-| "approximately 300-700 quality candidate features" | 180 catalogue specs; 231 distinct columns including the career, opponent, recency and slice-1 families. D12 is a ceiling and the build is under it |
+| "approximately 300-700 quality candidate features" | 180 catalogue specs; 224 distinct columns including the career, opponent, recency and slice-1 families. D12 is a ceiling and the build is under it |
 
 **One gap worth stating plainly**, because it undermines a guarantee this document makes. The
 feature-schema hash covers declarative specs only. The opponent, career and recency families come
