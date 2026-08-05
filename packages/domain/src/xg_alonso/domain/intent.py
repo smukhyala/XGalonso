@@ -58,6 +58,14 @@ __all__ = [
 ]
 
 
+#: Punctuation inside a name that a manager is not expected to type exactly.
+#: Mapped to a space rather than removed, so the relaxed key stays the same
+#: length as the written one and the spans reported against the raw text remain
+#: valid. Both apostrophes appear in the league — "O'Riley" is typed either way,
+#: so U+2019 is spelled as an escape rather than pasted in.
+_NAME_SEPARATORS: Final[dict[int, int]] = str.maketrans("-'\u2019", "   ")
+
+
 def build_name_index(
     players: Mapping[int, str],
     *,
@@ -94,11 +102,23 @@ def build_name_index(
 
     def offer(key: str, code: int) -> None:
         cleaned = " ".join(str(key).strip().lower().split())
-        if cleaned:
-            candidates.setdefault(cleaned, set()).add(int(code))
+        if not cleaned:
+            return
+        candidates.setdefault(cleaned, set()).add(int(code))
+        # Also reachable with the punctuation spelled as a space. A manager
+        # typing "morgan gibbs white" is writing Gibbs-White, but with the
+        # hyphen kept the only key that matched anything was the bare "white"
+        # sitting inside the phrase — which belongs to a different footballer.
+        relaxed = " ".join(cleaned.translate(_NAME_SEPARATORS).split())
+        if relaxed != cleaned:
+            candidates.setdefault(relaxed, set()).add(int(code))
 
     for code, name in players.items():
         offer(str(name), int(code))
+        # Split on whitespace only, deliberately. "Gibbs-White" is one surname,
+        # so it must not also offer "white" — that key belongs to Benjamin
+        # White, and offering it for both would make it ambiguous and cost him
+        # the name that is rightly his.
         parts = str(name).strip().split()
         if len(parts) > 1:
             offer(parts[-1], int(code))
@@ -418,16 +438,30 @@ def compile_intent(
             note("constraints.max_transfers", 0.9, ParseSource.EXPLICIT, claim(transfers))
 
     # Locked players. Whole-word, case-insensitive matching only.
+    #
+    # Longest key first, and a span is claimed once — the same rule
+    # `parse_squad_requirements` applies, and for the same reason. The index
+    # holds both "morgan gibbs white" and the bare "white", which belong to
+    # different footballers; walking it in dictionary order locked both off the
+    # one phrase. A wrong lock is the expensive kind of wrong, because the squad
+    # comes back honouring a constraint the manager never gave and nothing on
+    # screen says so.
     locked: list[PlayerCode] = []
     excluded: list[PlayerCode] = []
+    claimed_name_spans: list[tuple[int, int]] = []
+
+    def name_span_is_free(span: tuple[int, int]) -> bool:
+        return not any(span[0] < end and start < span[1] for start, end in claimed_name_spans)
+
     if players:
-        for name, code in players.items():
+        for name, code in sorted(players.items(), key=lambda pair: -len(pair[0])):
             if not name:
                 continue
             pattern = re.compile(rf"\b{re.escape(name.lower())}\b")
             found = pattern.search(lowered)
-            if found is None:
+            if found is None or not name_span_is_free(found.span()):
                 continue
+            claimed_name_spans.append(found.span())
             window = lowered[max(0, found.start() - 40) : found.start()]
             if re.search(
                 r"\b(keep|lock|hold|keeping|retain|stick with|must have|starting)\b", window

@@ -174,7 +174,7 @@ export default function PlanPage() {
                 border: "1px solid var(--color-line)",
               }}
             />
-            Read it with Claude too
+            Digest
           </button>
           <span className="text-[12px]" style={{ color: "var(--color-dim)" }}>
             Catches intent the vocabulary cannot — “prioritise the non-elite players”, “I’m bored
@@ -257,7 +257,7 @@ function Understood({
         <p className="eyebrow">What I understood</p>
         <p className="eyebrow hidden sm:block">
           {parsed.objective_id} · {Math.round(parsed.overall_confidence * 100)}% confident
-          {parsed.interpreted ? " · read by claude" : ""}
+          {parsed.interpreted ? " · digested" : ""}
         </p>
       </div>
       <div className="hairline mt-4" />
@@ -290,7 +290,7 @@ function Understood({
                     {requirement.source === "model" && (
                       // Inferred, not matched. A reader has to be able to tell.
                       <span className="eyebrow" style={{ color: "var(--color-dim)" }}>
-                        claude
+                        digest
                       </span>
                     )}
                   </span>
@@ -351,7 +351,7 @@ function Understood({
 
       {parsed.model_notes.length > 0 && (
         <div className="mt-5">
-          <p className="eyebrow">What Claude made of it</p>
+          <p className="eyebrow">What the digest made of it</p>
           <ul className="mt-2 space-y-1.5">
             {parsed.model_notes.map((note) => (
               <li
@@ -368,7 +368,7 @@ function Understood({
 
       {parsed.interpreter_note && !parsed.interpreted && (
         <p className="mt-5 text-[12px]" style={{ color: "var(--color-dim)" }}>
-          Claude was not consulted: {parsed.interpreter_note}. The matched reading above stands.
+          The digest did not run: {parsed.interpreter_note}. The matched reading above stands.
         </p>
       )}
 
