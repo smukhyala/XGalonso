@@ -13,6 +13,7 @@ from typing import ClassVar
 import pytest
 
 from xg_alonso.contracts.objective import RequirementKind
+from xg_alonso.domain.intent import build_name_index
 from xg_alonso.domain.squad_requests import parse_squad_requirements
 
 _PLAYERS = {
@@ -273,3 +274,75 @@ class TestLongestMatchWins:
         """Both keys match the same span; only the specific one may count."""
         parse = parse_squad_requirements("bruno fernandes starting", players=self.INDEX)
         assert len(parse.requirements) == 1
+
+
+class TestHyphenatedNameResolvesToTheRightPlayer:
+    """The bug the plan page showed: "i want morgan gibbs white".
+
+    It produced *White in the squad* bound to Benjamin White — a different
+    footballer, at a different club, injured at the time — and the squad builder
+    then dropped the requirement as unsatisfiable. The manager was told his
+    request could not be honoured, about a player he never named.
+
+    The index is the fix (see :func:`build_name_index`), but the guarantee worth
+    pinning is this one, at the level a manager experiences it.
+    """
+
+    # Built through the real index rather than hand-written, so the relaxed key
+    # has to be *derived*. Spelling "gibbs white" into the mapping here would
+    # pass whether or not build_name_index does its job, which is no test at all.
+    _NAMES = build_name_index(
+        {222531: "Gibbs-White", 198869: "White"},
+        full_names={222531: "Morgan Gibbs-White", 198869: "Benjamin White"},
+    )
+
+    def test_the_unhyphenated_name_binds_gibbs_white(self) -> None:
+        parse = parse_squad_requirements(
+            "i want morgan gibbs white", players=self._NAMES, teams=_TEAMS
+        )
+        bound = [int(c) for r in parse.requirements for c in r.players]
+        assert bound == [222531]
+
+    def test_benjamin_white_is_not_swept_up_as_well(self) -> None:
+        """Longest-key-first must claim the span so the short key cannot fire."""
+        parse = parse_squad_requirements(
+            "i want morgan gibbs white", players=self._NAMES, teams=_TEAMS
+        )
+        assert 198869 not in {int(c) for r in parse.requirements for c in r.players}
+
+    def test_asking_for_white_alone_still_reaches_benjamin_white(self) -> None:
+        parse = parse_squad_requirements("i want white", players=self._NAMES, teams=_TEAMS)
+        bound = [int(c) for r in parse.requirements for c in r.players]
+        assert bound == [198869]
+
+
+class TestLockedPlayersClaimTheirSpan:
+    """The constraint path needs the same discipline as the requirement path.
+
+    `parse_squad_requirements` sorts keys longest-first and claims each matched
+    span, so a short key cannot fire inside a longer one it overlaps. The
+    locked/excluded scan in :func:`compile_intent` did neither: it walked the
+    index in dictionary order and appended every hit. "keep morgan gibbs white"
+    therefore locked Gibbs-White *and* Benjamin White off one phrase, binding a
+    footballer the manager never named to a squad he was never meant to be in.
+
+    A wrong lock is the expensive kind of wrong here, because it is invisible —
+    the squad comes back respecting a constraint nobody gave.
+    """
+
+    _NAMES: ClassVar[dict[str, int]] = build_name_index(
+        {222531: "Gibbs-White", 198869: "White"},
+        full_names={222531: "Morgan Gibbs-White", 198869: "Benjamin White"},
+    )
+
+    def _locked(self, text: str) -> tuple[int, ...]:
+        from xg_alonso.domain.intent import compile_intent
+
+        compiled = compile_intent(text, players=self._NAMES)
+        return tuple(int(c) for c in compiled.bundle.constraints.locked_players)
+
+    def test_only_the_named_player_is_locked(self) -> None:
+        assert self._locked("keep morgan gibbs white and lock him") == (222531,)
+
+    def test_the_shorter_name_still_works_on_its_own(self) -> None:
+        assert self._locked("keep white and lock him") == (198869,)
