@@ -454,26 +454,81 @@ export interface Health {
   stale: boolean;
 }
 
+/** How long any one call may stall before it is treated as a failure.
+ *
+ * Generous rather than tight: `/recommend` rebuilds the whole feature frame and
+ * legitimately takes a second or two on a cold cache, and a timeout that fires
+ * on a slow-but-working request is worse than none at all.
+ *
+ * The reason there is a ceiling: the page fetches once on mount and does not
+ * retry, and `busy` is cleared in a `finally`. A request that never settles
+ * therefore never clears it, and the UI sits on a skeleton with no error and no
+ * way forward — the failure looks identical to "still loading", which is the
+ * one thing a viewer cannot distinguish. A rejection is recoverable; a hang is
+ * not.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/** `fetch`, but a stall becomes a rejection with a message worth reading. */
+async function withTimeout(path: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(`/api${path}`, {
+      ...init,
+      cache: "no-store",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    // A DOMException named TimeoutError is what AbortSignal.timeout throws;
+    // anything else here is the API being unreachable, which reads the same to
+    // a user and needs the same instruction.
+    const timedOut = cause instanceof DOMException && cause.name === "TimeoutError";
+    throw new Error(
+      timedOut
+        ? `The API did not respond within ${REQUEST_TIMEOUT_MS / 1000}s. Is it still running?`
+        : "Could not reach the API on 127.0.0.1:8000. Start it with `make api`.",
+    );
+  }
+}
+
+/** The server's `detail` when there is one, and a useful guess when there is not.
+ *
+ * FastAPI returns `{"detail": ...}` for every error it raises itself, and that
+ * text is always better than anything invented here — "the picks endpoint
+ * returns 404 until that gameweek's deadline" tells a manager exactly what to
+ * do. The fallback matters because the most common failure in local use is
+ * `make web` without `make api`: the Next proxy answers 5xx with an HTML error
+ * page, `detail` parses to nothing, and the honest reading of that pair is that
+ * the upstream is not there.
+ */
+async function failureFrom(response: Response): Promise<Error> {
+  const body = await response.json().catch(() => null);
+  const detail = body?.detail;
+  if (typeof detail === "string" && detail) {
+    return new Error(detail);
+  }
+  if (response.status >= 500) {
+    return new Error("Could not reach the API on 127.0.0.1:8000. Start it with `make api`.");
+  }
+  return new Error(response.statusText || `Request failed (${response.status})`);
+}
+
 async function get<T>(path: string): Promise<T> {
-  const response = await fetch(`/api${path}`, { cache: "no-store" });
+  const response = await withTimeout(path, {});
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(body.detail ?? `Request failed (${response.status})`);
+    throw await failureFrom(response);
   }
   return response.json() as Promise<T>;
 }
 
 /** POST helper. Same error discipline as `get`: the server's detail wins. */
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(`/api${path}`, {
+  const response = await withTimeout(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    cache: "no-store",
   });
   if (!response.ok) {
-    const detail = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(detail.detail ?? `Request failed (${response.status})`);
+    throw await failureFrom(response);
   }
   return response.json() as Promise<T>;
 }
