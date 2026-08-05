@@ -117,7 +117,7 @@ class TestCatalogueShape:
         one-sided assertion.
 
         The catalogue holds 180 specs today; with the career, opponent, recency
-        and slice-1 families the model-ready frame carries 231 columns. The
+        and slice-1 families the model-ready frame carries 224 columns. The
         window below is deliberately loose enough that adding a family is not a
         test edit, and tight enough that an explosion is.
         """

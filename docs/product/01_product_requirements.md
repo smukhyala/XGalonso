@@ -148,7 +148,7 @@ objective rather than on a single global accuracy metric.
 
 | Requirement | Status |
 |---|---|
-| Generate 300-700 quality candidate features (D12 — a bounded target, not thousands) | Partly. 231 distinct columns today; D12 is a ceiling and the build is under it |
+| Generate 300-700 quality candidate features (D12 — a bounded target, not thousands) | Partly. 224 distinct columns today; D12 is a ceiling and the build is under it |
 | Discover interactions | Expressible via `Arith(MUL)` in the DSL; the set search exists but is not yet wired. See [Interaction Discovery](../ml/04_interaction_discovery.md) |
 | Rank importance | Shipped — `xg importance`, `GET /features/importance`, measured out of sample |
 | Remove redundant features | Partly. Acceptance rejects a candidate that does not add utility over the existing set; there is no standing redundancy sweep over accepted features |
